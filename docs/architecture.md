@@ -130,7 +130,7 @@ Tunnel mode is experimental and intended for demos or remote testing.
 +----------------+       public HTTPS URL        +------------------------------+
 | Claude.ai      | ----------------------------> | Tunnel provider              |
 | ChatGPT web    |                               |                              |
-| remote client  | <---------------------------- | Cloudflare / Pinggy / custom |
+| remote client  | <---------------------------- | Cloudflare / localhost.run   |
 +----------------+                               +---------------+--------------+
                                                                 |
                                                                 |

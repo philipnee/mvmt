@@ -1,5 +1,6 @@
-import { spawn, ChildProcessByStdio } from 'child_process';
+import { spawn, spawnSync, ChildProcessByStdio } from 'child_process';
 import { Readable } from 'stream';
+import { TunnelConfig } from '../config/schema.js';
 
 export interface RunningTunnel {
   command: string;
@@ -57,6 +58,35 @@ export function formatMcpPublicUrl(publicUrl: string): string {
   return `${publicUrl.replace(/\/+$/, '')}/mcp`;
 }
 
+export function defaultTunnelCommand(provider: Exclude<TunnelConfig['provider'], 'custom'>): string {
+  const sshFlags = [
+    '-T',
+    '-o StrictHostKeyChecking=accept-new',
+    '-o UserKnownHostsFile=/dev/null',
+    '-o ExitOnForwardFailure=yes',
+    '-o ServerAliveInterval=60',
+    '-o ServerAliveCountMax=3',
+  ];
+  switch (provider) {
+    case 'cloudflare-quick':
+      return 'cloudflared tunnel --url http://127.0.0.1:{port}';
+    case 'pinggy':
+      return ['ssh', '-p 443', ...sshFlags, '-R0:localhost:{port}', 'a.pinggy.io'].join(' ');
+    case 'localhost-run':
+      return ['ssh', ...sshFlags, '-R 80:localhost:{port}', 'nokey@localhost.run'].join(' ');
+  }
+}
+
+export function missingTunnelDependency(
+  tunnel: TunnelConfig | undefined,
+  isAvailable: (command: string) => boolean = isCommandAvailable,
+): string | undefined {
+  if (tunnel?.provider === 'cloudflare-quick' && !isAvailable('cloudflared')) {
+    return 'cloudflared';
+  }
+  return undefined;
+}
+
 export function extractPublicUrl(text: string): string | undefined {
   for (const match of text.matchAll(HTTPS_URL_PATTERN)) {
     const candidate = trimTrailingPunctuation(match[0]);
@@ -67,6 +97,11 @@ export function extractPublicUrl(text: string): string | undefined {
   if (hostMatch) return `https://${trimTrailingPunctuation(hostMatch[0])}`;
 
   return undefined;
+}
+
+function isCommandAvailable(command: string): boolean {
+  const result = spawnSync(command, ['--version'], { stdio: 'ignore' });
+  return !result.error;
 }
 
 function waitForPublicUrl(

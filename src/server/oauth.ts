@@ -236,7 +236,7 @@ export function renderAuthorizePage(params: AuthorizePageParams): string {
   <h1>Authorize connector</h1>
   <p>
     A client (<code>${escapeHtml(params.clientId)}</code>) is requesting access to your local mvmt instance.
-    Paste your mvmt session token to approve. Run <code>mvmt token show</code> on the host machine to retrieve it.
+    Paste your mvmt session token to approve. Run <code>mvmt show</code> on the host machine to retrieve it.
   </p>
   ${error}
   <form method="POST" action="/authorize">

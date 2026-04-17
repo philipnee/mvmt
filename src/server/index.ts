@@ -66,13 +66,13 @@ export async function startStdioServer(router: ToolRouter): Promise<void> {
   await server.connect(transport);
 }
 
-export async function startHttpServer(router: ToolRouter, options: HttpServerOptions): Promise<string> {
+export async function startHttpServer(router: ToolRouter, options: HttpServerOptions): Promise<void> {
   const { port } = options;
   const app = express();
   app.use(express.json({ limit: '10mb' }));
   app.use(express.urlencoded({ extended: false, limit: '64kb' }));
 
-  const token = generateSessionToken();
+  generateSessionToken();
   const oauth = new OAuthStore();
   const oauthCleanup = setInterval(() => oauth.cleanup(), 60 * 1000);
   oauthCleanup.unref();
@@ -123,6 +123,8 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       registration_endpoint: `${baseUrl}/register`,
       response_types_supported: ['code'],
       grant_types_supported: ['authorization_code'],
+      // S256 is strongly preferred. plain is kept for compatibility with
+      // simple MCP/OAuth clients during the v0 tunnel flow.
       code_challenge_methods_supported: ['S256', 'plain'],
       token_endpoint_auth_methods_supported: ['none'],
       scopes_supported: ['mcp'],
@@ -268,7 +270,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     server.on('error', reject);
   });
 
-  return token;
+  return;
 }
 
 async function handleMcpRequest(
@@ -282,6 +284,9 @@ async function handleMcpRequest(
   if (sessionId && sessions.has(sessionId)) {
     const session = sessions.get(sessionId)!;
     session.lastActivity = Date.now();
+    if (isStandaloneSseRequest(req)) {
+      session.transport.closeStandaloneSSEStream();
+    }
     await session.transport.handleRequest(req, res, req.body);
     return;
   }
@@ -292,6 +297,10 @@ async function handleMcpRequest(
   const server = createMcpServer(router);
 
   transport.onerror = (error) => {
+    if (isBenignDuplicateSseConflict(error)) {
+      log.debug(`MCP transport notice: ${error.message}`);
+      return;
+    }
     log.warn(`MCP transport error: ${error.message}`);
   };
 
@@ -313,6 +322,19 @@ function getSessionId(req: Request): string | undefined {
   return Array.isArray(header) ? header[0] : header;
 }
 
+export function isStandaloneSseRequest(req: Request): boolean {
+  return req.method === 'GET' && headerIncludes(req.headers.accept, 'text/event-stream');
+}
+
+export function isBenignDuplicateSseConflict(error: Error): boolean {
+  return error.message === 'Conflict: Only one SSE stream is allowed per session';
+}
+
+function headerIncludes(value: string | string[] | undefined, needle: string): boolean {
+  if (Array.isArray(value)) return value.some((entry) => entry.includes(needle));
+  return value?.includes(needle) ?? false;
+}
+
 type AuthorizeParams = {
   responseType: string;
   clientId: string;
@@ -328,6 +350,8 @@ function parseAuthorizeParams(source: Record<string, unknown>): AuthorizeParams 
   const clientId = stringField(source.client_id);
   const redirectUri = stringField(source.redirect_uri);
   const codeChallenge = stringField(source.code_challenge);
+  // S256 is strongly preferred. Defaulting to plain is compatibility behavior
+  // for simple clients that omit code_challenge_method.
   const codeChallengeMethodRaw = stringField(source.code_challenge_method) ?? 'plain';
 
   if (!responseType) return { error: 'Missing response_type' };

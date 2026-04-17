@@ -4,7 +4,7 @@ export async function showToken(): Promise<void> {
   const token = readSessionToken();
   if (!token) {
     console.error(`No session token found at ${TOKEN_PATH}.`);
-    console.error('Run `mvmt start` or `mvmt token rotate` first.');
+    console.error('Run `mvmt start` or `mvmt rotate` first.');
     process.exitCode = 1;
     return;
   }

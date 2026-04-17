@@ -12,6 +12,7 @@ import {
   PluginConfig,
   TunnelConfig,
 } from '../config/schema.js';
+import { defaultTunnelCommand, missingTunnelDependency } from '../utils/tunnel.js';
 
 export async function init(): Promise<void> {
   printBanner();
@@ -194,76 +195,40 @@ async function promptForAccess(port: number): Promise<{ access: 'local' | 'tunne
 
   if (access === 'local') return { access: 'local' };
 
-  const provider = await select<TunnelConfig['provider']>({
-    message: 'Which tunnel?',
-    choices: [
-      { name: 'Cloudflare Quick Tunnel (cloudflared, anonymous)', value: 'cloudflare-quick' },
-      { name: 'Pinggy (built-in ssh, anonymous, 60-min sessions)', value: 'pinggy' },
-      { name: 'localhost.run (built-in ssh, anonymous)', value: 'localhost-run' },
-      { name: 'Custom tunnel command', value: 'custom' },
-    ],
-  });
+  while (true) {
+    const provider = await select<'cloudflare-quick' | 'localhost-run'>({
+      message: 'Which tunnel?',
+      choices: [
+        { name: 'Cloudflare Quick Tunnel (recommended, requires cloudflared)', value: 'cloudflare-quick' },
+        { name: 'localhost.run (fallback, less stable)', value: 'localhost-run' },
+      ],
+    });
 
-  if (provider === 'custom') {
-    console.log(chalk.yellow('mvmt will run this command when `mvmt start` runs. Use a command you trust.'));
-    console.log(chalk.dim('Examples:'));
-    console.log(chalk.dim('  cloudflared tunnel --url http://127.0.0.1:{port}'));
-    console.log(chalk.dim('  npx localtunnel --port {port}'));
-    console.log(chalk.dim('  ssh -p 443 -R0:127.0.0.1:{port} a.pinggy.io'));
-    const command = await input({
-      message: 'Paste your tunnel command. Use {port} for the mvmt port:',
-      validate: (value) => (value.trim().length > 0 ? true : 'Enter a tunnel command'),
-    });
-    const url = await input({
-      message: 'Public base URL if this tunnel has a stable URL (optional):',
-      validate: (value) => {
-        const trimmed = value.trim();
-        if (!trimmed) return true;
-        try {
-          new URL(trimmed);
-          return true;
-        } catch {
-          return 'Enter a valid URL or leave blank';
-        }
-      },
-    });
+    const tunnel: TunnelConfig = {
+      provider,
+      command: defaultTunnelCommand(provider),
+    };
+    const missingDependency = missingTunnelDependency(tunnel);
+    if (missingDependency) {
+      printMissingTunnelDependencyWarning(missingDependency);
+      console.log(chalk.dim('Choose another tunnel provider, or press Ctrl+C and install the missing command first.'));
+      continue;
+    }
 
     return {
       access: 'tunnel',
-      tunnel: {
-        provider,
-        command: command.trim(),
-        ...(url.trim() ? { url: url.trim() } : {}),
-      },
+      tunnel,
     };
   }
-
-  return {
-    access: 'tunnel',
-    tunnel: {
-      provider,
-      command: defaultTunnelCommand(provider),
-    },
-  };
 }
 
-function defaultTunnelCommand(provider: Exclude<TunnelConfig['provider'], 'custom'>): string {
-  const sshFlags = [
-    '-T',
-    '-o StrictHostKeyChecking=accept-new',
-    '-o UserKnownHostsFile=/dev/null',
-    '-o ExitOnForwardFailure=yes',
-    '-o ServerAliveInterval=60',
-    '-o ServerAliveCountMax=3',
-  ];
-  switch (provider) {
-    case 'cloudflare-quick':
-      return 'cloudflared tunnel --url http://127.0.0.1:{port}';
-    case 'pinggy':
-      return ['ssh', '-p 443', ...sshFlags, '-R0:localhost:{port}', 'a.pinggy.io'].join(' ');
-    case 'localhost-run':
-      return ['ssh', ...sshFlags, '-R 80:localhost:{port}', 'nokey@localhost.run'].join(' ');
+function printMissingTunnelDependencyWarning(command: string): void {
+  if (command === 'cloudflared') {
+    console.log(chalk.yellow('Cloudflare Quick Tunnel requires `cloudflared`, but it is not installed or not on PATH.'));
+    console.log(chalk.yellow('Install it with `brew install cloudflared`, or choose another tunnel provider.'));
+    return;
   }
+  console.log(chalk.yellow(`Tunnel dependency is missing: ${command}`));
 }
 
 export async function detectObsidianVaults(): Promise<string[]> {

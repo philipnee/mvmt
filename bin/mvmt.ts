@@ -30,7 +30,7 @@ program.hook('preAction', async (thisCommand, actionCommand) => {
   const globalOptions = thisCommand.opts<{ updateCheck?: boolean }>();
   if (globalOptions.updateCheck === false) return;
   if (actionCommand.name() === 'doctor') return;
-  if (isTokenCommand(actionCommand)) return;
+  if (isTokenCommand(actionCommand) || isTokenShortcutCommand(actionCommand)) return;
 
   const actionOptions = actionCommand.opts<{ stdio?: boolean }>();
   if (actionCommand.name() === 'start' && actionOptions.stdio) return;
@@ -68,18 +68,34 @@ program
     await doctor({ ...options, updateCheck: globalOptions.updateCheck !== false });
   });
 
-const tokenCommand = program.command('token').description('Manage the HTTP bearer token');
-
-tokenCommand
+program
   .command('show')
   .description('Print the current HTTP bearer token without regenerating it')
   .action(async () => {
     await showToken();
   });
 
-tokenCommand
+program
   .command('rotate')
   .description('Regenerate and print the HTTP bearer token')
+  .action(async () => {
+    await rotateToken();
+  });
+
+const tokenCommand = program
+  .command('token', { hidden: true })
+  .description('Manage the HTTP bearer token');
+
+tokenCommand
+  .command('show')
+  .description('Alias for `mvmt show`')
+  .action(async () => {
+    await showToken();
+  });
+
+tokenCommand
+  .command('rotate')
+  .description('Alias for `mvmt rotate`')
   .action(async () => {
     await rotateToken();
   });
@@ -93,4 +109,8 @@ function isTokenCommand(command: Command): boolean {
     current = current.parent;
   }
   return false;
+}
+
+function isTokenShortcutCommand(command: Command): boolean {
+  return command.name() === 'show' || command.name() === 'rotate';
 }

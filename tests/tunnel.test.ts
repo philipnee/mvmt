@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   extractPublicUrl,
   formatMcpPublicUrl,
+  missingTunnelDependency,
   renderTunnelCommand,
   startTunnel,
 } from '../src/utils/tunnel.js';
@@ -54,6 +55,30 @@ describe('tunnel utilities', () => {
     expect(formatMcpPublicUrl('https://quiet-river.trycloudflare.com/')).toBe(
       'https://quiet-river.trycloudflare.com/mcp',
     );
+  });
+
+  it('reports missing cloudflared for Cloudflare Quick Tunnel configs', () => {
+    expect(
+      missingTunnelDependency(
+        {
+          provider: 'cloudflare-quick',
+          command: 'cloudflared tunnel --url http://127.0.0.1:{port}',
+        },
+        () => false,
+      ),
+    ).toBe('cloudflared');
+  });
+
+  it('does not require cloudflared for non-Cloudflare tunnel configs', () => {
+    expect(
+      missingTunnelDependency(
+        {
+          provider: 'pinggy',
+          command: 'ssh -p 443 -R0:localhost:{port} a.pinggy.io',
+        },
+        () => false,
+      ),
+    ).toBeUndefined();
   });
 
   it('starts a tunnel command and resolves when a public URL appears', async () => {

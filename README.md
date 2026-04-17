@@ -24,10 +24,6 @@ mvmt init
 mvmt start -i # -i stands for interactive mode
 ```
 
-## Screenshot
-
-> Screenshot/GIF placeholder: `mvmt init` -> `mvmt start` -> an MCP client reading a scoped local note or folder.
-
 ## Status
 
 | Area | Status |
@@ -47,7 +43,7 @@ mvmt start -i # -i stands for interactive mode
 | Client | Transport | Status | Auth method | Known issues |
 | --- | --- | --- | --- | --- |
 | Claude Desktop | stdio | supported | process launch, no HTTP bearer token | Runs its own mvmt process per config |
-| Claude Code | Streamable HTTP | supported | bearer token header | Token must be refreshed after `mvmt start` or `mvmt token rotate` |
+| Claude Code | Streamable HTTP | supported | bearer token header | Token must be refreshed after `mvmt start` or `mvmt rotate` |
 | Codex CLI | Streamable HTTP | supported | bearer token env var | Start Codex from a shell where the token env var is set |
 | Cursor | Streamable HTTP | expected | bearer token header | Client behavior may vary by Cursor MCP version |
 | VS Code / Copilot | Streamable HTTP | expected | bearer token header | Client behavior may vary by MCP extension/version |
@@ -74,6 +70,7 @@ Not yet enforced: TLS on localhost, per-client tokens, rate limiting, and full w
 - [Architecture](docs/architecture.md)
 - [Security policy](SECURITY.md)
 - [Security memo](docs/security-memo.md)
+- [Personal memo](docs/personal-memo.md)
 - [Contributing](CONTRIBUTING.md)
 - [Changelog](CHANGELOG.md)
 
@@ -81,10 +78,10 @@ Not yet enforced: TLS on localhost, per-client tokens, rate limiting, and full w
 
 All clients connect to the same endpoint. Get your token first:
 ```bash
-mvmt token show
+mvmt show
 ```
 
-Or `show token` in the interactive mode.
+Or `token show` in interactive mode.
 
 ### Claude Desktop
 
@@ -115,7 +112,7 @@ Then add the HTTP endpoint:
 
 ```bash
 claude mcp add --transport http \
-  --header "Authorization: Bearer $(mvmt token show)" \
+  --header "Authorization: Bearer $(mvmt show)" \
   mvmt http://127.0.0.1:4141/mcp
 ```
 
@@ -126,7 +123,7 @@ If mvmt restarts, it generates a new token. Update the client token after each r
 Codex stores a bearer-token environment variable name, not the token value itself:
 
 ```bash
-export MVMT_TOKEN="$(mvmt token show)"
+export MVMT_TOKEN="$(mvmt show)"
 codex mcp add mvmt \
   --url http://127.0.0.1:4141/mcp \
   --bearer-token-env-var MVMT_TOKEN
@@ -135,7 +132,7 @@ codex mcp add mvmt \
 Start new Codex sessions from a shell where `MVMT_TOKEN` is set:
 
 ```bash
-MVMT_TOKEN="$(mvmt token show)" codex
+MVMT_TOKEN="$(mvmt show)" codex
 ```
 
 ### Cursor
@@ -177,7 +174,7 @@ Add to `.vscode/mcp.json`:
 Direct `curl` is useful for debugging, but MCP Streamable HTTP is session-based. Initialize first, capture the `mcp-session-id` response header, then make later requests with that session ID.
 
 ```bash
-TOKEN="$(mvmt token show)"
+TOKEN="$(mvmt show)"
 
 curl -i http://127.0.0.1:4141/mcp \
   -H "Authorization: Bearer $TOKEN" \
@@ -359,8 +356,29 @@ Interactive mode:
 
 - Run `mvmt start -i`.
 - Keeps mvmt in the foreground with a prompt at the bottom.
-- Supports `show token`, `rotate token`, `logs on`, `logs off`, `status`, `url`, and `quit`.
+- Uses grouped commands for token, tunnel, and logs.
 - Live logs show connector, tool name, argument keys, duration, and error state without printing full argument values.
+
+Interactive command shape:
+
+```text
+> token
+> token show
+> token rotate
+
+> tunnel
+> tunnel show
+> tunnel config
+> tunnel start
+> tunnel refresh
+> tunnel stop
+> tunnel logs
+
+> logs
+> logs show
+> logs on
+> logs off
+```
 
 ### `mvmt doctor`
 
@@ -385,16 +403,18 @@ Checks include:
 
 `mvmt doctor` exits with status `0` when config is valid and all enabled connectors are healthy. It exits with status `1` when config is missing, invalid, or any enabled connector fails health checks.
 
-### `mvmt token`
+### `mvmt show` / `mvmt rotate`
 
 Manages the HTTP bearer token used by `/mcp` and `/health`.
 
 ```bash
-mvmt token show
-mvmt token rotate
+mvmt show
+mvmt rotate
 ```
 
-`mvmt token show` prints the current token without regenerating it. `mvmt token rotate` writes a new token to `~/.mvmt/.session-token` and prints it. Running HTTP servers validate against the token file on each request, so rotation takes effect immediately. Any connected client that stored the old token must be updated.
+`mvmt show` prints the current token without regenerating it. `mvmt rotate` writes a new token to `~/.mvmt/.session-token` and prints it. Running HTTP servers validate against the token file on each request, so rotation takes effect immediately. Any connected client that stored the old token must be updated.
+
+`mvmt token show` and `mvmt token rotate` remain hidden compatibility aliases.
 
 ## Obsidian Connector
 
@@ -502,7 +522,7 @@ HTTP mode listens on `127.0.0.1` only. It does not bind to `0.0.0.0`, your LAN I
 
 **Bearer token**
 
-A 256-bit token is generated on every HTTP server start and written to `~/.mvmt/.session-token` with mode `600`. Validation uses constant-time comparison against the current token file, so `mvmt token rotate` takes effect without restarting the server.
+A 256-bit token is generated on every HTTP server start and written to `~/.mvmt/.session-token` with mode `600`. Validation uses constant-time comparison against the current token file, so `mvmt rotate` takes effect without restarting the server.
 
 Security design notes live in [docs/security-memo.md](docs/security-memo.md).
 
@@ -611,23 +631,18 @@ For a short demo, `mvmt init` can configure a tunnel. When `mvmt start` runs, mv
 
 Built-in tunnel choices:
 
-| Tool | Command | Public URL |
-| --- | --- | --- |
-| Cloudflare Quick Tunnel | `cloudflared tunnel --url http://127.0.0.1:{port}` | `https://random-words.trycloudflare.com/mcp` |
-| localhost.run | `ssh -R 80:localhost:{port} nokey@localhost.run` | `https://abc123.localhost.run/mcp` |
+| Tool | Recommendation | Command | Public URL |
+| --- | --- | --- | --- |
+| Cloudflare Quick Tunnel | Recommended for V0 testing | `cloudflared tunnel --url http://127.0.0.1:{port}` | `https://random-words.trycloudflare.com/mcp` |
+| localhost.run | Fallback, less stable | `ssh -R 80:localhost:{port} nokey@localhost.run` | `https://abc123.lhr.life/mcp` |
 
-Custom tunnel examples:
+Cloudflare requires `cloudflared`. Install it with `brew install cloudflared`.
 
-```bash
-npx localtunnel --port {port}
-ssh -p 443 -R0:127.0.0.1:{port} a.pinggy.io
-```
+If a free tunnel drops while `mvmt start -i` is running, run `tunnel refresh`. This restarts only the tunnel process; the local mvmt server and bearer token stay the same.
 
-Use `{port}` in tunnel commands as a placeholder for the configured mvmt port.
+To switch tunnel providers while mvmt is running, run `tunnel config`. mvmt saves the selected tunnel back to `~/.mvmt/config.yaml`.
 
-If a custom or named tunnel has a stable URL but does not print it on startup, set `server.tunnel.url` in config so mvmt can still print the MCP URL.
-
-Cloudflare Quick Tunnels are for testing. Cloudflare documents that quick tunnels do not support Server-Sent Events, so use a named/stable tunnel or another provider if a client requires SSE.
+Tunnel mode is for testing and demos. For V0, use Cloudflare Quick Tunnel first; localhost.run is kept as a fallback but can be flaky.
 
 Use a narrow demo config before exposing mvmt:
 
@@ -686,10 +701,10 @@ If your vault is elsewhere, enter the path manually.
 
 ### Token rejected by client
 
-The bearer token changes every time `mvmt start` runs and every time you run `mvmt token rotate`. Read the current token:
+The bearer token changes every time `mvmt start` runs and every time you run `mvmt rotate`. Read the current token:
 
 ```bash
-mvmt token show
+mvmt show
 ```
 
 Then update or restart the client with that token.
@@ -750,6 +765,7 @@ mvmt/
 │   └── mvmt.ts
 ├── docs/
 │   ├── architecture.md
+│   ├── personal-memo.md
 │   └── security-memo.md
 ├── src/
 │   ├── index.ts

@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { Request } from 'express';
-import { buildOriginCheck } from '../src/server/index.js';
+import {
+  buildOriginCheck,
+  isBenignDuplicateSseConflict,
+  isStandaloneSseRequest,
+} from '../src/server/index.js';
 
 function req(origin?: string): Request {
   return { headers: origin === undefined ? {} : { origin } } as unknown as Request;
@@ -34,5 +38,30 @@ describe('buildOriginCheck', () => {
 
   it('rejects malformed Origin headers', () => {
     expect(check(req('not a url'))).toBe(false);
+  });
+});
+
+describe('SSE request helpers', () => {
+  it('identifies standalone SSE GET requests', () => {
+    expect(
+      isStandaloneSseRequest({
+        method: 'GET',
+        headers: { accept: 'application/json, text/event-stream' },
+      } as unknown as Request),
+    ).toBe(true);
+  });
+
+  it('does not classify non-SSE GET requests as standalone SSE requests', () => {
+    expect(
+      isStandaloneSseRequest({
+        method: 'GET',
+        headers: { accept: 'application/json' },
+      } as unknown as Request),
+    ).toBe(false);
+  });
+
+  it('treats duplicate standalone SSE conflicts as benign reconnect noise', () => {
+    expect(isBenignDuplicateSseConflict(new Error('Conflict: Only one SSE stream is allowed per session'))).toBe(true);
+    expect(isBenignDuplicateSseConflict(new Error('Conflict: Stream already has an active connection'))).toBe(false);
   });
 });

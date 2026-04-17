@@ -23,8 +23,8 @@ Future connectors should follow the same pattern: exact scope first, read-only d
 HTTP auth uses a 256-bit bearer token stored at `~/.mvmt/.session-token` with mode `600` on non-Windows systems.
 
 - `mvmt start` generates a fresh token.
-- `mvmt token show` prints the current token without changing it.
-- `mvmt token rotate` generates a new token and writes it to the token file.
+- `mvmt show` prints the current token without changing it.
+- `mvmt rotate` generates a new token and writes it to the token file.
 
 The HTTP server validates against the token file on each request. This makes token rotation effective without restarting the server, but clients that cached the old token still need to be updated or restarted.
 
@@ -35,6 +35,8 @@ Localhost traffic is plaintext. A process running as the same OS user can usuall
 There is no per-client permission model yet. Any authenticated HTTP client can see the same configured connectors.
 
 There is no production remote relay yet. For demos, use a narrow config, a temporary tunnel, and read-only scopes. Stop the tunnel when the demo is over.
+
+Tunnel OAuth discovery uses forwarded host/proto headers from the tunnel provider to construct public URLs. Cloudflare Quick Tunnel is the recommended v0 path; other tunnels may produce incorrect discovery URLs.
 
 Audit logs are local JSONL files with mode `600`. They include argument key names and a truncated argument preview, which can contain values. Do not treat the audit log as sanitized.
 
