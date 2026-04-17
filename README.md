@@ -11,6 +11,8 @@
 > [!WARNING]
 > Tunnel mode is experimental and intended for demos or remote testing with narrow, read-only scopes.
 
+![mvmt running in interactive mode](docs/assets/mvmt-start-interactive.png)
+
 ## Quick Start
 
 ```bash
