@@ -52,7 +52,7 @@ It is not a connector registry, marketplace, or bundled catalog of third-party s
 |  |  | - localhost bind     |                                                 ||
 |  |  | - bearer token       |                                                 ||
 |  |  | - origin check       |                                                 ||
-|  |  | - OAuth/PKCE draft   |                                                 ||
+|  |  | - OAuth/PKCE bridge  |                                                 ||
 |  |  +----------+-----------+                                                 ||
 |  |             |                                                             ||
 |  |             v                                                             ||

@@ -69,6 +69,13 @@ Not yet enforced: TLS on localhost, per-client tokens, rate limiting, and full w
 
 ## Project Docs
 
+- [Client setup](docs/client-setup.md)
+- [Configuration](docs/configuration.md)
+- [Connectors](docs/connectors.md)
+- [Plugins](docs/plugins.md)
+- [Remote access](docs/remote-access.md)
+- [Audit log](docs/audit-log.md)
+- [Troubleshooting](docs/troubleshooting.md)
 - [Architecture](docs/architecture.md)
 - [Security policy](SECURITY.md)
 - [Security memo](docs/security-memo.md)
@@ -76,221 +83,40 @@ Not yet enforced: TLS on localhost, per-client tokens, rate limiting, and full w
 - [Contributing](CONTRIBUTING.md)
 - [Changelog](CHANGELOG.md)
 
-## Full Client Setup
+## Client Setup
 
-All clients connect to the same endpoint. Get your token first:
-```bash
-mvmt show
-```
+Most MCP clients let you add servers through their settings UI. You need two things:
 
-Or `token show` in interactive mode.
+- **URL**: `http://127.0.0.1:4141/mcp`
+- **Authorization header**: `Bearer <token from mvmt show>`
 
-### Claude Desktop
+Claude Desktop is the exception — it uses stdio mode and launches mvmt directly, so no token is needed.
 
-Use stdio mode so Claude Desktop launches mvmt directly:
-
-```json
-{
-  "mcpServers": {
-    "mvmt": {
-      "command": "mvmt",
-      "args": ["start", "--stdio"]
-    }
-  }
-}
-```
-
-No token is needed in stdio mode.
-
-### Claude Code
-
-Start mvmt first:
-
-```bash
-mvmt start
-```
-
-Then add the HTTP endpoint:
-
-```bash
-claude mcp add --transport http \
-  --header "Authorization: Bearer $(mvmt show)" \
-  mvmt http://127.0.0.1:4141/mcp
-```
-
-If mvmt restarts, it generates a new token. Update the client token after each restart.
-
-### Codex CLI
-
-Codex stores a bearer-token environment variable name, not the token value itself:
-
-```bash
-export MVMT_TOKEN="$(mvmt show)"
-codex mcp add mvmt \
-  --url http://127.0.0.1:4141/mcp \
-  --bearer-token-env-var MVMT_TOKEN
-```
-
-Start new Codex sessions from a shell where `MVMT_TOKEN` is set:
-
-```bash
-MVMT_TOKEN="$(mvmt show)" codex
-```
-
-### Cursor
-
-Add to `.cursor/mcp.json` or through Cursor's MCP settings:
-
-```json
-{
-  "mcpServers": {
-    "mvmt": {
-      "url": "http://127.0.0.1:4141/mcp",
-      "headers": {
-        "Authorization": "Bearer <paste token from ~/.mvmt/.session-token>"
-      }
-    }
-  }
-}
-```
-
-### VS Code
-
-Add to `.vscode/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "mvmt": {
-      "url": "http://127.0.0.1:4141/mcp",
-      "headers": {
-        "Authorization": "Bearer <paste token from ~/.mvmt/.session-token>"
-      }
-    }
-  }
-}
-```
-
-### Raw HTTP
-
-Direct `curl` is useful for debugging, but MCP Streamable HTTP is session-based. Initialize first, capture the `mcp-session-id` response header, then make later requests with that session ID.
-
-```bash
-TOKEN="$(mvmt show)"
-
-curl -i http://127.0.0.1:4141/mcp \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "initialize",
-    "params": {
-      "protocolVersion": "2025-06-18",
-      "capabilities": {},
-      "clientInfo": { "name": "curl", "version": "0.0.1" }
-    }
-  }'
-```
-
-In normal use, prefer an MCP client instead of raw HTTP.
+See [Client Setup](docs/client-setup.md) for step-by-step instructions for Claude Desktop, Claude Code, Codex CLI, Cursor, VS Code, and raw HTTP.
 
 ## Configuration
 
-`~/.mvmt/config.yaml`:
+`mvmt init` creates `~/.mvmt/config.yaml` with everything you selected during setup. The config controls four things:
 
-```yaml
-version: 1
+- **`server`** — port, allowed origins, and whether to start a tunnel for public access.
+- **`proxy`** — external MCP servers that mvmt proxies (e.g. the filesystem connector).
+- **`obsidian`** — the native Obsidian vault connector.
+- **`plugins`** — security plugins that inspect tool results before they reach clients (e.g. the pattern-based redactor).
 
-server:
-  port: 4141
-  allowedOrigins: []
-  access: local
+You should not need to write this file by hand. To regenerate it, run `mvmt init` again. To validate it, run `mvmt doctor`.
 
-proxy:
-  - name: filesystem
-    source: manual
-    transport: stdio
-    command: npx
-    args:
-      - -y
-      - "@modelcontextprotocol/server-filesystem"
-      - /Users/you/project
-    env: {}
-    writeAccess: false
-    enabled: true
-
-obsidian:
-  path: /Users/you/Documents/ObsidianVault
-  enabled: true
-  writeAccess: false
-
-plugins:
-  - name: pattern-redactor
-    enabled: true
-    mode: redact
-    maxBytes: 1048576
-    patterns:
-      - name: anthropic-keys
-        regex: "\\bsk-ant-[A-Za-z0-9_-]{20,}\\b"
-        flags: g
-        replacement: "[REDACTED:ANTHROPIC_KEY]"
-        enabled: true
-      - name: openai-keys
-        regex: "\\bsk-[A-Za-z0-9_-]{20,}\\b"
-        flags: g
-        replacement: "[REDACTED:OPENAI_KEY]"
-        enabled: true
-      - name: aws-access-keys
-        regex: "\\b(?:AKIA|ASIA)[A-Z0-9]{16}\\b"
-        flags: g
-        replacement: "[REDACTED:AWS_ACCESS_KEY]"
-        enabled: true
-      - name: github-tokens
-        regex: "\\b(?:(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,255}|github_pat_[A-Za-z0-9_]{22,255})\\b"
-        flags: g
-        replacement: "[REDACTED:GITHUB_TOKEN]"
-        enabled: true
-      - name: slack-tokens
-        regex: "\\bxox[baprs]-[A-Za-z0-9-]{10,}\\b"
-        flags: g
-        replacement: "[REDACTED:SLACK_TOKEN]"
-        enabled: true
-      - name: jwt-looking-strings
-        regex: "\\beyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\b"
-        flags: g
-        replacement: "[REDACTED:JWT]"
-        enabled: true
-```
-
-Tunnel config example:
-
-```yaml
-server:
-  port: 4141
-  allowedOrigins: []
-  access: tunnel
-  tunnel:
-    provider: cloudflare-quick
-    command: cloudflared tunnel --url http://127.0.0.1:{port}
-    # Optional for custom or named tunnels that do not print their public URL:
-    # url: https://mvmt.example.com
-```
-
-Schema rules:
-
-- `transport: stdio` requires `command`.
-- `transport: http` requires `url`.
-- `server.port` must be in `1..65535`.
-- `server.allowedOrigins` defaults to `[]`.
-- `server.access` defaults to `local`.
-- `obsidian.writeAccess` defaults to `false`.
-- `plugins[].name` currently supports the built-in `pattern-redactor` plugin.
-- `pattern-redactor.mode` is `warn`, `redact`, or `block`.
-- `pattern-redactor.patterns` is editable. Each pattern has `name`, `regex`, `flags`, `replacement`, and `enabled`.
+See [Configuration](docs/configuration.md) for the full schema reference, field descriptions, and editing instructions.
 
 ## Commands
+
+| Command | Description |
+| --- | --- |
+| `mvmt init` | Interactive setup wizard — choose folders, connectors, plugins, and access mode |
+| `mvmt start` | Start the MCP server (HTTP by default, `--stdio` for direct client launch, `-i` for interactive) |
+| `mvmt show` | Print the current HTTP bearer token |
+| `mvmt rotate` | Generate a new bearer token and print it |
+| `mvmt doctor` | Validate config and check connector health |
+| `mvmt --version` | Print version and check for updates |
 
 ### `mvmt --version`
 
@@ -418,390 +244,71 @@ mvmt rotate
 
 `mvmt token show` and `mvmt token rotate` remain hidden compatibility aliases.
 
-## Obsidian Connector
+## Connectors
 
-The Obsidian connector is native. It does not spawn a child MCP process.
+A connector is the code that gives mvmt access to one local data source or tool surface. It owns discovery, permissions, tool definitions, tool execution, and cleanup for that source.
 
-| Tool | Purpose | Requires `obsidian.writeAccess` |
-| --- | --- | --- |
-| `search_notes` | Search markdown files by keyword and filename | no |
-| `read_note` | Read a note by vault-relative path | no |
-| `list_notes` | List notes, optionally by folder, with tags | no |
-| `list_tags` | Count tags across the vault | no |
-| `append_to_daily` | Append text to `daily/YYYY-MM-DD.md` | yes |
+mvmt currently ships two connectors. Both are read-only by default with opt-in write access.
 
-Path traversal is blocked. Symlinked files and directories are skipped during vault walks. Reads also verify the resolved real path stays inside the vault.
+**Obsidian** — native connector that reads markdown files directly from a vault. Tools: `search_notes`, `read_note`, `list_notes`, `list_tags`, and `append_to_daily` (write, opt-in). Path traversal is blocked; symlinks are skipped.
 
-## Filesystem Connector
+**Filesystem** — proxies the official `@modelcontextprotocol/server-filesystem` MCP server as a stdio child process. When `writeAccess: false`, mvmt hides write tools from `listTools` and rejects them at `callTool`.
 
-mvmt does not implement its own general filesystem connector. During `mvmt init`, if you choose folder access, mvmt adds the official `@modelcontextprotocol/server-filesystem` as a stdio proxy:
+Tools from all connectors are prefixed with the connector ID (e.g. `obsidian__search_notes`, `proxy_filesystem__read_file`) to avoid name collisions.
 
-```yaml
-proxy:
-  - name: filesystem
-    source: manual
-    transport: stdio
-    command: npx
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "/Users/you/project"]
-    env: {}
-    writeAccess: false
-    enabled: true
-```
-
-With `writeAccess: false`, mvmt exposes only this filesystem read allowlist:
-
-- `directory_tree`
-- `get_file_info`
-- `list_allowed_directories`
-- `list_directory`
-- `read_file`
-- `read_media_file`
-- `read_multiple_files`
-- `read_text_file`
-- `search_files`
-
-Underlying write tools still exist in the filesystem server, but mvmt hides them from `listTools` and rejects them at `callTool`.
+To add a native connector in v0, implement the `Connector` interface, add config schema for its scope, wire it into startup, and add tests for path/scope/write behavior. See [Connectors](docs/connectors.md) for the implementation checklist.
 
 ## Plugins
 
-Plugins are first-class TypeScript interfaces that can inspect or transform tool results before they leave mvmt. The current public build ships one built-in plugin: `pattern-redactor`.
+A plugin is a post-processing hook that runs after a connector returns a tool result and before that result is sent back to the MCP client. Plugins can inspect, annotate, transform, or block outbound tool results.
 
-`pattern-redactor` is a pattern-based redactor. It scans text tool results with configured regex patterns and can warn, replace matches, or block the whole result.
-
-The default pattern set is deliberately small:
-
-- OpenAI-style keys
-- Anthropic-style keys
-- AWS access key IDs
-- GitHub classic and fine-grained tokens
-- Slack tokens
-- JWT-looking strings
-
-You can edit `~/.mvmt/config.yaml` to add your own patterns.
-
-Modes:
-
-| Mode | Behavior |
-| --- | --- |
-| `warn` | Returns output unchanged and adds a warning message |
-| `redact` | Replaces matches with labels such as `[REDACTED:EMAIL]` |
-| `block` | Blocks the whole tool result when a match is found |
-
-The redactor only scans text content. Image content is not modified. `maxBytes` caps scanning per text result so very large files do not create unbounded overhead.
+The built-in `pattern-redactor` plugin scans text tool results with regex patterns and can `warn`, `redact`, or `block` matches. Default patterns cover common API keys (OpenAI, Anthropic, AWS, GitHub, Slack) and JWT-looking strings.
 
 > [!WARNING]
-> This is a best-effort pattern matcher, not a security control. It will miss data that doesn't match your patterns, and may redact things you didn't intend. Do not rely on it for compliance, privacy, or security requirements.
+> This is a best-effort pattern matcher, not a security control. If data must not reach AI tools, scope the connector to exclude it.
 
-Use the redactor as defense-in-depth for accidental leakage, such as a stray API key in a code comment. If your goal is to prevent private or regulated data from reaching AI tools, scope the connector so that data is not exposed at all.
-
-## Tool Namespacing
-
-mvmt prefixes every tool with its connector ID to avoid collisions.
-
-| Connector | Original tool | Namespaced as |
-| --- | --- | --- |
-| `proxy_filesystem` | `read_file` | `proxy_filesystem__read_file` |
-| `obsidian` | `search_notes` | `obsidian__search_notes` |
-
-MCP clients see the namespaced names. The router strips the prefix before forwarding to the connector.
+To add a plugin in v0, implement the `ToolResultPlugin` interface, add config schema, register it in the plugin factory, and make audit events explicit when it changes output. See [Plugins](docs/plugins.md) for the implementation checklist.
 
 ## Security Model
 
-> [!WARNING]
-> mvmt is local-first. Do not put it behind a public URL for production use. The current tunnel path is for demos and testing only.
+Every file and data access in mvmt is gated. There is no open mode.
 
-> [!WARNING]
-> HTTP proxy connectors are advanced/manual config. `writeAccess` is not fully enforced for HTTP proxy connectors yet, so only configure HTTP proxies you already trust.
+- **Localhost bind** — HTTP listens on `127.0.0.1` only.
+- **Bearer token** — 256-bit, generated on each start, constant-time validation, rotatable without restart.
+- **Origin allowlist** — browser requests from non-localhost origins are rejected unless explicitly allowed.
+- **Environment scrubbing** — stdio child processes receive only an allowlist of env vars.
+- **Write gates** — read-only by default per connector; write tools are hidden and rejected unless enabled.
+- **Pattern redactor** — opt-in regex scrubbing of tool results before they reach clients.
+- **Audit log** — every tool call appended to `~/.mvmt/audit.log` as JSONL with mode `600`.
 
-> [!WARNING]
-> Audit log previews may contain sensitive argument values. The audit log is local and permission-restricted, but it is not value-sanitized.
+Not yet enforced: TLS on localhost, per-client connector scoping, rate limiting, persistent OAuth client registry, token revocation, write gates for HTTP proxy connectors.
 
-### Enforced Today
-
-**Localhost bind**
-
-HTTP mode listens on `127.0.0.1` only. It does not bind to `0.0.0.0`, your LAN IP or IPv6.
-
-**Bearer token**
-
-A 256-bit token is generated on every HTTP server start and written to `~/.mvmt/.session-token` with mode `600`. Validation uses constant-time comparison against the current token file, so `mvmt rotate` takes effect without restarting the server.
-
-Security design notes live in [docs/security-memo.md](docs/security-memo.md).
-
-**Origin allowlist**
-
-Requests with non-localhost `Origin` headers are rejected unless the origin is listed in `server.allowedOrigins`. Requests without an `Origin` header are allowed through this check and still require bearer auth.
-
-**Environment scrubbing for stdio child processes**
-
-Stdio child processes receive a small allowlist of inherited environment variables plus values explicitly set in `proxy[].env`. Parent-process secrets such as API keys are not forwarded unless you put them in the proxy config.
-
-**Stdio proxy write gates**
-
-- Filesystem proxies are read-only by default and use the filesystem allowlist above unless `writeAccess: true`.
-- Non-filesystem stdio entries are advanced/manual config. They only apply generic write-name blocking when `writeAccess: false` is present.
-- Generic blocking is name-based and catches tool names starting with common write verbs such as `write_`, `edit_`, `create_`, `delete_`, `remove_`, `move_`, `rename_`, `append_`, `update_`, `patch_`, `put_`, `upsert_`, `insert_`, `drop_`, `set_`, and `mkdir`.
-
-HTTP proxy entries are advanced/manual config and are passed through as exposed by the upstream MCP server. mvmt does not currently enforce `writeAccess` on HTTP proxies.
-
-**Obsidian write gate**
-
-`append_to_daily` is hidden and blocked unless `obsidian.writeAccess: true`.
-
-**Pattern-based redactor plugin**
-
-If enabled, `pattern-redactor` runs on tool results after the connector returns and before the MCP client receives the response. It can warn, redact, or block configured regex matches depending on config. Redaction matches are recorded in the audit log with pattern name and count.
-
-**Audit log**
-
-Every tool call routed through mvmt is appended to `~/.mvmt/audit.log` as JSONL. mvmt creates the file with mode `600`.
-
-### Not Enforced Yet
-
-- TLS on localhost.
-- Per-client connector scoping.
-- Request rate limiting.
-- Encrypted config or audit storage.
-- OAuth, token revocation lists, or per-client tokens.
-- MCP resources and prompts. mvmt currently exposes tools only.
-- Write gates for HTTP proxy connectors.
-- Dynamic plugin loading. Current plugins are built in.
-
-## Audit Log
-
-> [!WARNING]
-> `argPreview` can include truncated argument values. Do not store secrets in tool arguments unless you are comfortable with those values appearing in `~/.mvmt/audit.log`.
-
-Each tool call appends one JSON object to `~/.mvmt/audit.log`:
-
-```json
-{
-  "ts": "2026-04-14T14:23:01.442Z",
-  "connectorId": "obsidian",
-  "tool": "obsidian__search_notes",
-  "argKeys": ["query", "maxResults"],
-  "argPreview": "{\"query\":\"meeting notes\",\"maxResults\":10}",
-  "redactions": [
-    {
-      "pluginId": "pattern-redactor",
-      "mode": "redact",
-      "pattern": "openai-keys",
-      "count": 1
-    }
-  ],
-  "isError": false,
-  "durationMs": 34
-}
-```
-
-`argPreview` is truncated to 512 characters, but it can include argument values. Do not treat the audit log as value-sanitized. When `pattern-redactor` matches, `redactions` records the pattern name and count so you can see why output was changed or blocked.
-
-View recent activity:
-
-```bash
-tail -20 ~/.mvmt/audit.log | jq .
-```
-
-Filter by connector:
-
-```bash
-jq 'select(.connectorId == "obsidian")' ~/.mvmt/audit.log
-```
-
-Count tool calls per connector:
-
-```bash
-jq -r '.connectorId' ~/.mvmt/audit.log | sort | uniq -c | sort -rn
-```
-
-mvmt never truncates or rotates the audit log. To archive it manually:
-
-```bash
-mv ~/.mvmt/audit.log ~/.mvmt/audit.log.bak
-```
-
-mvmt creates a new log on the next tool call.
+See [Security Memo](docs/security-memo.md) for design notes and [Audit Log](docs/audit-log.md) for log format and queries.
 
 ## Remote Access
 
+mvmt is local-first. Cloud clients like claude.ai cannot reach `127.0.0.1` directly. For demos, `mvmt init` can configure a tunnel (Cloudflare Quick Tunnel or localhost.run) that gives you a temporary public HTTPS URL.
+
 > [!WARNING]
-> Tunnel mode is not production remote access. Use it only with narrow scopes, preferably read-only folders or a throwaway vault, and stop the tunnel when testing is done.
+> Tunnel mode is experimental. Use narrow, read-only scopes and stop the tunnel when done.
 
-mvmt is local-first and binds to `127.0.0.1`. Cloud clients such as claude.ai or ChatGPT web cannot reach your local `localhost`.
-
-For a short demo, `mvmt init` can configure a tunnel. When `mvmt start` runs, mvmt starts the tunnel command, watches its output for a public URL, and prints the MCP URL.
-
-Built-in tunnel choices:
-
-| Tool | Recommendation | Command | Public URL |
-| --- | --- | --- | --- |
-| Cloudflare Quick Tunnel | Recommended for V0 testing | `cloudflared tunnel --url http://127.0.0.1:{port}` | `https://random-words.trycloudflare.com/mcp` |
-| localhost.run | Fallback, less stable | `ssh -R 80:localhost:{port} nokey@localhost.run` | `https://abc123.lhr.life/mcp` |
-
-Cloudflare requires `cloudflared`. Install it with `brew install cloudflared`.
-
-If a free tunnel drops while `mvmt start -i` is running, run `tunnel refresh`. This restarts only the tunnel process; the local mvmt server and bearer token stay the same.
-
-To switch tunnel providers while mvmt is running, run `tunnel config`. mvmt saves the selected tunnel back to `~/.mvmt/config.yaml`.
-
-Tunnel mode is for testing and demos. For V0, use Cloudflare Quick Tunnel first; localhost.run is kept as a fallback but can be flaky.
-
-Use a narrow demo config before exposing mvmt:
-
-- Read-only filesystem access.
-- A throwaway folder or demo vault.
-- No production secrets in config.
-- Stop the tunnel when the demo is over.
-
-A production remote mode should use a proper relay/OAuth design rather than exposing your local hub directly.
+See [Remote Access](docs/remote-access.md) for tunnel providers, runtime management, and safety guidelines.
 
 ## Troubleshooting
 
-### `mvmt start` says port is in use
-
-Another process is using the port.
-
-```bash
-mvmt start --port 4142
-```
-
-### Connector fails to start
-
-Run:
-
-```bash
-mvmt doctor
-mvmt start --verbose
-```
-
-Common causes:
-
-- The MCP package is not installed or `npx` cannot download it.
-- Required environment variables are missing from `proxy[].env`.
-- The command is not on `PATH`.
-- An advanced/manual HTTP proxy URL is not a Streamable HTTP MCP endpoint.
-
-### Tools are missing
-
-Check:
-
-- Whether the connector is enabled in `~/.mvmt/config.yaml`.
-- Whether `writeAccess: false` is hiding write-like tools.
-- Whether `mvmt doctor` reports the connector healthy.
-
-### Obsidian vault not detected
-
-`mvmt init` scans these locations one level deep:
-
-- `~/Documents/`
-- `~/Obsidian/`
-- `~/vaults/`
-- `~/`
-- `~/Library/Mobile Documents/iCloud~md~obsidian/Documents/` on macOS
-
-If your vault is elsewhere, enter the path manually.
-
-### Token rejected by client
-
-The bearer token changes every time `mvmt start` runs and every time you run `mvmt rotate`. Read the current token:
-
-```bash
-mvmt show
-```
-
-Then update or restart the client with that token.
-
-If the token file is rejected even though mvmt is running, check that the client actually sent the new token. Existing MCP clients may need to be restarted after rotation.
+See [Troubleshooting](docs/troubleshooting.md) for common issues: port conflicts, connector failures, missing tools, vault detection, and token rejection.
 
 ## Coming Next
 
-- Fast file indexer: use Chroma's embedded JS/TS version with its official default embedding function.
-- Full key management: named keys, rotation, revocation, expiration, and audit-friendly ownership.
-- SQLite connector: local `.db` files with per-table read/write permissions. Good for app data, AI agent state, logs, and side projects.
-- Safer writes and atomic operations: atomic tempfile -> rename for all write tools, which helps prevent Obsidian file-locking issues and race conditions. Add optional `--preview` mode that shows a diff before committing a write.
-- Git connector: native local repository tools for history, diffs, blame, and branch-aware search. Cloud AI can only see what is pushed, is limited to what GitHub exposes, and usually gets all-or-nothing repo access.
-
-## Current Scope
-
-In scope:
-
-- Explicit user-selected folder exposure.
-- Native Obsidian connector.
-- Streamable HTTP server and stdio server modes.
-- Optional tunnel startup for public HTTPS demos.
-- Built-in pattern-based redactor plugin for configured regex matches.
-- Token show and rotation commands.
-- Version checks and diagnostics.
-- Local bearer auth, Origin checks, env scrubbing, write gates, and audit logging.
-
-Not in current v0:
-
-- Native Postgres connector.
-- Public relay or hosted remote access.
-- Background daemon or PID file.
-- File indexer, SQLite, FTS, or watcher.
-- TLS on localhost.
-- Per-client permissions.
-- MCP resource or prompt proxying.
-- Plugin marketplace or dynamic connector loading.
-- Bundled third-party connector implementations.
-- Importing existing MCP server configs from Claude Desktop, Claude Code, Cursor, or other clients.
+- Fast file indexer with Chroma's embedded JS/TS version.
+- Full key management: named keys, rotation, revocation, expiration.
+- SQLite connector with per-table read/write permissions.
+- Atomic writes and optional `--preview` mode.
+- Git connector for local history, diffs, blame, and branch-aware search.
 
 ## Contributing
 
 Contributions are welcome while the project is early. Keep changes focused and security-conscious. Read [CONTRIBUTING.md](CONTRIBUTING.md) and report vulnerabilities through [SECURITY.md](SECURITY.md).
-
-## Project Structure
-
-```text
-mvmt/
-├── CHANGELOG.md
-├── CODE_OF_CONDUCT.md
-├── CONTRIBUTING.md
-├── LICENSE
-├── SECURITY.md
-├── .github/
-│   ├── CODEOWNERS
-│   └── workflows/ci.yml
-├── bin/
-│   └── mvmt.ts
-├── docs/
-│   ├── architecture.md
-│   ├── personal-memo.md
-│   └── security-memo.md
-├── src/
-│   ├── index.ts
-│   ├── cli/
-│   │   ├── doctor.ts
-│   │   ├── init.ts
-│   │   ├── start.ts
-│   │   └── token.ts
-│   ├── config/
-│   │   ├── loader.ts
-│   │   └── schema.ts
-│   ├── connectors/
-│   │   ├── factory.ts
-│   │   ├── obsidian.ts
-│   │   ├── proxy-http.ts
-│   │   ├── proxy-stdio.ts
-│   │   └── types.ts
-│   ├── server/
-│   │   ├── index.ts
-│   │   └── router.ts
-│   ├── plugins/
-│   │   ├── factory.ts
-│   │   ├── pattern-redactor.ts
-│   │   └── types.ts
-│   └── utils/
-│       ├── audit.ts
-│       ├── logger.ts
-│       ├── token.ts
-│       ├── tunnel.ts
-│       └── version.ts
-├── tests/
-├── fixtures/
-└── package.json
-```
 
 ## License
 
