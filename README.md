@@ -18,7 +18,7 @@ mvmt runs as a local MCP server between your data sources and your clients. You 
 ## Quick Start
 
 ```bash
-git clone https://github.com/philipnee/mvmt.git
+git clone git@github.com:philipnee/mvmt.git
 cd mvmt
 npm install
 npm run build
