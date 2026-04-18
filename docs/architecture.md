@@ -184,6 +184,18 @@ mvmt namespaces tools by connector ID so different connectors can expose tools w
 +--------------------+----------------------+--------------------------------+
 ```
 
+## Shutdown
+
+SIGINT or SIGTERM triggers shutdown. All cleanup tasks run in parallel:
+
+- Shut down each connector (kills stdio child processes, closes HTTP clients).
+- Close the HTTP server (closes MCP session transports, drains idle connections, force-closes after 1 second).
+- Stop the tunnel process if running (SIGTERM, then SIGKILL after 2 seconds).
+
+If cleanup does not finish within 5 seconds, the process force-exits.
+
+On startup failure (e.g. port conflict), connectors that were already initialized are shut down before exit.
+
 ## Boundary
 
 ```text

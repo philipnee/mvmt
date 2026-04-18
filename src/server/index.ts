@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import { Server as HttpServer } from 'node:http';
 import express, { Request, Response } from 'express';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -24,6 +25,11 @@ type McpSession = {
 export interface HttpServerOptions {
   port: number;
   allowedOrigins?: string[];
+}
+
+export interface StartedHttpServer {
+  port: number;
+  close(): Promise<void>;
 }
 
 export function createMcpServer(router: ToolRouter): Server {
@@ -60,13 +66,18 @@ export function createMcpServer(router: ToolRouter): Server {
   return server;
 }
 
-export async function startStdioServer(router: ToolRouter): Promise<void> {
+// Returns a close handle so the caller can tear down the transport on
+// shutdown. Without this, stdio child processes could outlive the parent.
+export async function startStdioServer(router: ToolRouter): Promise<{ close(): Promise<void> }> {
   const server = createMcpServer(router);
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  return {
+    close: () => transport.close(),
+  };
 }
 
-export async function startHttpServer(router: ToolRouter, options: HttpServerOptions): Promise<void> {
+export async function startHttpServer(router: ToolRouter, options: HttpServerOptions): Promise<StartedHttpServer> {
   const { port } = options;
   const app = express();
   app.use(express.json({ limit: '10mb' }));
@@ -263,14 +274,39 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     });
   });
 
-  await new Promise<void>((resolve, reject) => {
-    const server = app.listen(port, '127.0.0.1', () => {
-      resolve();
+  let httpServer: HttpServer;
+  try {
+    httpServer = await new Promise<HttpServer>((resolve, reject) => {
+      const server = app.listen(port, '127.0.0.1', () => {
+        resolve(server);
+      });
+      server.on('error', reject);
     });
-    server.on('error', reject);
-  });
+  } catch (err) {
+    clearInterval(oauthCleanup);
+    clearInterval(cleanupInterval);
+    throw err;
+  }
 
-  return;
+  const address = httpServer.address();
+  const actualPort = typeof address === 'object' && address !== null ? address.port : port;
+
+  let closed = false;
+  return {
+    port: actualPort,
+    close: async () => {
+      if (closed) return;
+      closed = true;
+
+      clearInterval(oauthCleanup);
+      clearInterval(cleanupInterval);
+
+      const activeSessions = [...sessions.values()];
+      sessions.clear();
+      await Promise.allSettled(activeSessions.map((session) => session.transport.close()));
+      await closeHttpServer(httpServer);
+    },
+  };
 }
 
 async function handleMcpRequest(
@@ -333,6 +369,27 @@ export function isBenignDuplicateSseConflict(error: Error): boolean {
 function headerIncludes(value: string | string[] | undefined, needle: string): boolean {
   if (Array.isArray(value)) return value.some((entry) => entry.includes(needle));
   return value?.includes(needle) ?? false;
+}
+
+function closeHttpServer(server: HttpServer): Promise<void> {
+  if (!server.listening) return Promise.resolve();
+
+  return new Promise((resolve, reject) => {
+    const forceCloseTimer = setTimeout(() => {
+      server.closeAllConnections?.();
+    }, 1000);
+    forceCloseTimer.unref();
+
+    server.close((err) => {
+      clearTimeout(forceCloseTimer);
+      if (err && (err as NodeJS.ErrnoException).code !== 'ERR_SERVER_NOT_RUNNING') {
+        reject(err);
+        return;
+      }
+      resolve();
+    });
+    server.closeIdleConnections?.();
+  });
 }
 
 type AuthorizeParams = {

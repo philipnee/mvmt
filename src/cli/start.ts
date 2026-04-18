@@ -70,19 +70,25 @@ export async function start(options: StartOptions = {}): Promise<void> {
   const router = new ToolRouter(loaded.map((entry) => entry.connector), audit, plugins);
   await router.initialize();
 
+  // Cleanup tasks run on SIGINT/SIGTERM and on startup failure.
+  // Tasks are appended as resources are acquired so only initialized
+  // resources are cleaned up. See registerShutdown for the 5-second
+  // force-exit timeout that guards against hung cleanup.
   const cleanupTasks: CleanupTask[] = loaded.map((entry) => () => entry.connector.shutdown());
   const shutdown = registerShutdown(cleanupTasks, stdioMode, logger);
 
   if (stdioMode) {
-    await startStdioServer(router);
+    const stdio = await startStdioServer(router);
+    cleanupTasks.push(() => stdio.close());
     return;
   }
 
   try {
-    await startHttpServer(router, {
+    const httpServer = await startHttpServer(router, {
       port,
       allowedOrigins: config.server.allowedOrigins,
     });
+    cleanupTasks.push(() => httpServer.close());
     const tunnelController = new TunnelController(config.server, port, logger);
     cleanupTasks.push(() => tunnelController.stop());
     const tunnel = await tunnelController.start();
@@ -108,6 +114,9 @@ export async function start(options: StartOptions = {}): Promise<void> {
     } else {
       logger.error(`Failed to start server: ${message}`);
     }
+    // Shut down connectors that were already initialized (e.g. stdio
+    // child processes) so they don't outlive the parent process.
+    await Promise.all(cleanupTasks.map((task) => task().catch(() => undefined)));
     process.exit(1);
   }
 }
@@ -255,6 +264,9 @@ async function initializeConnectors(
   return loaded;
 }
 
+// Runs all cleanup tasks on SIGINT/SIGTERM. If any task hangs (e.g. a
+// child process that ignores SIGTERM), the 5-second force timer ensures
+// the process still exits instead of hanging indefinitely.
 function registerShutdown(
   cleanupTasks: CleanupTask[],
   stdioMode: boolean,
@@ -265,7 +277,15 @@ function registerShutdown(
     if (shuttingDown) return;
     shuttingDown = true;
     emit('Shutting down...', stdioMode, logger);
+
+    const forceTimer = setTimeout(() => {
+      emit('Shutdown timed out, forcing exit.', stdioMode, logger, 'warn');
+      process.exit(1);
+    }, 5_000);
+    forceTimer.unref();
+
     await Promise.all(cleanupTasks.map((task) => task().catch(() => undefined)));
+    clearTimeout(forceTimer);
     process.exit(0);
   };
 

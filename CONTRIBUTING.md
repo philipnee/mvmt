@@ -25,8 +25,7 @@ Out of scope for now:
 ```bash
 nvm use
 npm install
-npm run build
-npm test
+npm run verify
 ```
 
 mvmt targets Node 20+. The repo includes `.nvmrc` with Node 20 for contributors who use nvm.
@@ -44,11 +43,19 @@ npm run dev -- start
 Run:
 
 ```bash
-npm run build
-npm test
+npm run verify
 ```
 
-GitHub Actions runs `npm ci`, `npm run build`, and `npm test` on push and pull request for Node 20.x and 22.x.
+GitHub Actions runs `npm ci` and `npm run verify` on push and pull request for Node 20.x and 22.x.
+
+`npm run verify` is the default PR gate. It runs the TypeScript build, full tests, whitespace checks, package dry-run, and a local runtime smoke test that starts mvmt against a fixture vault, checks `/health`, shuts it down, and confirms the port is closed.
+
+Useful variants:
+
+```bash
+npm run verify:quick    # skips the runtime smoke test
+npm run verify:release  # includes npm audit --omit=dev
+```
 
 ## Test Matrix
 
@@ -62,7 +69,10 @@ GitHub Actions runs `npm ci`, `npm run build`, and `npm test` on push and pull r
 | Proxy connector behavior | unit/mocked integration | `npm test` | Tests proxy behavior without requiring real third-party services |
 | Doctor command | unit/mocked integration | `npm test` | Checks diagnostics behavior |
 | Tunnel utilities | unit/process integration | `npm test` | Spawns short-lived local Node processes, not real tunnel providers |
-| TypeScript build | static | `npm run build` | Required before PR |
+| Runtime smoke | local integration | `npm run verify` | Starts mvmt on a temporary local port and verifies shutdown |
+| TypeScript build | static | `npm run verify` | Required before PR |
+| Package dry-run | packaging | `npm run verify` | Ensures npm package contents are sane |
+| Dependency audit | network/security | `npm run verify:release` | Release check; not run in PR CI because it depends on registry availability |
 | Coverage | coverage | `npm run test:coverage` | Optional before PR, useful for security-sensitive changes |
 
 ## Platform Matrix

@@ -25,7 +25,7 @@ export { ObsidianConnector, extractTags } from './connectors/obsidian.js';
 export { createProxyConnector } from './connectors/factory.js';
 export type { CallToolResult, Connector, ToolDefinition } from './connectors/types.js';
 export { createMcpServer, startHttpServer, startStdioServer } from './server/index.js';
-export type { HttpServerOptions } from './server/index.js';
+export type { HttpServerOptions, StartedHttpServer } from './server/index.js';
 export { ToolRouter } from './server/router.js';
 export type { NamespacedTool } from './server/router.js';
 export { createPlugins } from './plugins/factory.js';
