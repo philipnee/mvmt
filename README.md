@@ -1,5 +1,8 @@
 # mvmt
 
+[![CI](https://github.com/philipnee/mvmt/actions/workflows/ci.yml/badge.svg)](https://github.com/philipnee/mvmt/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/philipnee/mvmt/actions/workflows/codeql.yml/badge.svg)](https://github.com/philipnee/mvmt/actions/workflows/codeql.yml)
+
 **A local-first MCP layer for scoped access to files, vaults, and tools.**
 
 mvmt runs as a local MCP server between your data sources and your clients. You choose which folders, vaults, and tools are exposed, with read/write access controlled per source.
