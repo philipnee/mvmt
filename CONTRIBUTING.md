@@ -2,6 +2,8 @@
 
 Thanks for taking the time to contribute to mvmt.
 
+> **Using a coding agent?** Read [CLAUDE.md](CLAUDE.md) before making any changes. It contains rules for diffs, verification, and PR format that apply to all AI coding tools.
+
 mvmt is a local personal data plane. The project is intentionally narrow: users choose exactly which local folders and native connectors are exposed, and mvmt gates access through MCP-compatible transports.
 
 ## Product Boundary

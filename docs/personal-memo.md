@@ -7,3 +7,7 @@ I came up with the name on a bike ride along Page Mill Road, Palo Alto. mvmt mea
 The goal is simple: keep stuff where it already is, on my machine, and let me control who gets access to what, for how long, and for what reason. Some access should be temporary. Some should be really limited. Some can stick around longer. But it should be my choice.
 
 I never really bought the answer of “just put it in the cloud.”: I don't think we need to add more infrastructure to our life. I’m happy with my stuff living on my computer.
+
+---
+
+I get it, everyone will be using codex/claude/cursor, big part of this project was AI generated, too.  I'm tally cool with it, follow the guidelines in the README.
