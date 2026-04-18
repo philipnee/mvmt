@@ -1,0 +1,163 @@
+import { spawn, ChildProcessByStdio } from 'child_process';
+import { Readable } from 'stream';
+
+export interface RunningTunnel {
+  command: string;
+  url?: string;
+  stop(): Promise<void>;
+}
+
+interface StartTunnelOptions {
+  timeoutMs?: number;
+  onOutput?(line: string): void;
+}
+
+const HTTPS_URL_PATTERN = /https:\/\/[^\s"'<>),]+/gi;
+const HOST_PATTERN = /\b[a-z0-9][a-z0-9-]*\.(?:trycloudflare\.com|lhr\.life|lhr\.rocks|loca\.lt|a\.pinggy\.io|pinggy\.io|pinggy\.link)\b/i;
+// localhost.run is intentionally excluded: real tunnels now use .lhr.life,
+// while .localhost.run subdomains (e.g. admin.localhost.run) are account
+// management URLs that localhost.run hands out when no SSH key is registered.
+const TUNNEL_HOST_SUFFIXES = [
+  'trycloudflare.com',
+  'lhr.life',
+  'lhr.rocks',
+  'loca.lt',
+  'a.pinggy.io',
+  'pinggy.io',
+  'pinggy.link',
+];
+
+type TunnelChild = ChildProcessByStdio<null, Readable, Readable>;
+
+export async function startTunnel(
+  commandTemplate: string,
+  port: number,
+  options: StartTunnelOptions = {},
+): Promise<RunningTunnel> {
+  const command = renderTunnelCommand(commandTemplate, port);
+  const child = spawn(command, {
+    shell: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  const url = await waitForPublicUrl(child, options);
+
+  return {
+    command,
+    url,
+    stop: () => stopTunnel(child),
+  };
+}
+
+export function renderTunnelCommand(commandTemplate: string, port: number): string {
+  return commandTemplate.replaceAll('{port}', String(port));
+}
+
+export function formatMcpPublicUrl(publicUrl: string): string {
+  return `${publicUrl.replace(/\/+$/, '')}/mcp`;
+}
+
+export function extractPublicUrl(text: string): string | undefined {
+  for (const match of text.matchAll(HTTPS_URL_PATTERN)) {
+    const candidate = trimTrailingPunctuation(match[0]);
+    if (isKnownTunnelUrl(candidate)) return candidate;
+  }
+
+  const hostMatch = text.match(HOST_PATTERN);
+  if (hostMatch) return `https://${trimTrailingPunctuation(hostMatch[0])}`;
+
+  return undefined;
+}
+
+function waitForPublicUrl(
+  child: TunnelChild,
+  options: StartTunnelOptions,
+): Promise<string | undefined> {
+  const timeoutMs = options.timeoutMs ?? 15_000;
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let buffer = '';
+
+    const drain = (chunk: Buffer) => {
+      const text = chunk.toString('utf-8');
+      for (const line of text.split(/\r?\n/).filter(Boolean)) {
+        options.onOutput?.(line);
+      }
+    };
+
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.stdout.off('data', onData);
+      child.stderr.off('data', onData);
+      child.off('error', onError);
+      child.off('exit', onExit);
+      // Keep stdio flowing so the child doesn't stall on full pipe buffers.
+      child.stdout.on('data', drain);
+      child.stderr.on('data', drain);
+      fn();
+    };
+
+    const onData = (chunk: Buffer) => {
+      const text = chunk.toString('utf-8');
+      buffer += text;
+      for (const line of text.split(/\r?\n/).filter(Boolean)) {
+        options.onOutput?.(line);
+      }
+
+      const url = extractPublicUrl(buffer);
+      if (url) settle(() => resolve(url));
+    };
+
+    const onError = (error: Error) => {
+      settle(() => reject(error));
+    };
+
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      settle(() => reject(new Error(`Tunnel command exited before a public URL was detected (code ${code ?? signal ?? 'unknown'})`)));
+    };
+
+    const timer = setTimeout(() => {
+      settle(() => resolve(undefined));
+    }, timeoutMs);
+    timer.unref();
+
+    child.stdout.on('data', onData);
+    child.stderr.on('data', onData);
+    child.once('error', onError);
+    child.once('exit', onExit);
+  });
+}
+
+function stopTunnel(child: TunnelChild): Promise<void> {
+  if (child.exitCode !== null || child.killed) return Promise.resolve();
+
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      resolve();
+    }, 2_000);
+    timer.unref();
+
+    child.once('exit', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    child.kill('SIGTERM');
+  });
+}
+
+function trimTrailingPunctuation(value: string): string {
+  return value.replace(/[.,;:]+$/, '');
+}
+
+function isKnownTunnelUrl(value: string): boolean {
+  try {
+    const hostname = new URL(value).hostname.toLowerCase();
+    return TUNNEL_HOST_SUFFIXES.some((suffix) => hostname.endsWith(`.${suffix}`));
+  } catch {
+    return false;
+  }
+}
