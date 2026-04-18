@@ -94,6 +94,69 @@ describe('ObsidianConnector', () => {
     });
   });
 
+  it('blocks append_to_daily when daily is a symlink outside the vault', async () => {
+    const vaultPath = await createVault();
+    const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-outside-'));
+
+    await fs.rm(path.join(vaultPath, 'daily'), { recursive: true });
+    await fs.symlink(outsideDir, path.join(vaultPath, 'daily'));
+
+    const connector = new ObsidianConnector({ path: vaultPath, writeAccess: true });
+    await connector.initialize();
+
+    const result = await connector.callTool('append_to_daily', { content: 'escape attempt' });
+    expect(result).toMatchObject({
+      isError: true,
+      content: [{ type: 'text', text: expect.stringContaining('Access denied') }],
+    });
+
+    // Verify nothing was written outside the vault
+    const files = await fs.readdir(outsideDir);
+    expect(files).toHaveLength(0);
+  });
+
+  it('blocks append_to_daily when daily is a symlink inside the vault', async () => {
+    const vaultPath = await createVault();
+    const realDaily = path.join(vaultPath, 'real-daily');
+    await fs.mkdir(realDaily);
+    await fs.rm(path.join(vaultPath, 'daily'), { recursive: true });
+    await fs.symlink(realDaily, path.join(vaultPath, 'daily'));
+
+    const connector = new ObsidianConnector({ path: vaultPath, writeAccess: true });
+    await connector.initialize();
+
+    const result = await connector.callTool('append_to_daily', { content: 'symlink parent' });
+    expect(result).toMatchObject({
+      isError: true,
+      content: [{ type: 'text', text: expect.stringContaining('Access denied') }],
+    });
+
+    const files = await fs.readdir(realDaily);
+    expect(files).toHaveLength(0);
+  });
+
+  it('blocks append_to_daily when the daily note is a symlink outside the vault', async () => {
+    const vaultPath = await createVault();
+    const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-outside-'));
+    const outsideFile = path.join(outsideDir, 'outside.md');
+    await fs.writeFile(outsideFile, 'original', 'utf-8');
+
+    const dailyNote = path.join(vaultPath, 'daily', todayFileName());
+    await fs.rm(dailyNote, { force: true });
+    await fs.symlink(outsideFile, dailyNote);
+
+    const connector = new ObsidianConnector({ path: vaultPath, writeAccess: true });
+    await connector.initialize();
+
+    const result = await connector.callTool('append_to_daily', { content: 'symlink target' });
+    expect(result).toMatchObject({
+      isError: true,
+      content: [{ type: 'text', text: expect.stringContaining('Access denied') }],
+    });
+
+    await expect(fs.readFile(outsideFile, 'utf-8')).resolves.toBe('original');
+  });
+
   it('rejects non-vault directories', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-not-vault-'));
     const connector = new ObsidianConnector({ path: dir });
@@ -120,4 +183,12 @@ function parseTextResult(result: CallToolResult): unknown {
   const first = result.content[0];
   if (!first || first.type !== 'text') throw new Error('Expected text result');
   return JSON.parse(first.text);
+}
+
+function todayFileName(): string {
+  const today = new Date();
+  const year = today.getFullYear();
+  const month = String(today.getMonth() + 1).padStart(2, '0');
+  const day = String(today.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}.md`;
 }

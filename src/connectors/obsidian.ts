@@ -224,19 +224,18 @@ export class ObsidianConnector implements Connector {
   private async appendToDaily(content: string) {
     const today = formatLocalDate(new Date());
     const relativePath = path.join('daily', `${today}.md`);
-    const dailyPath = this.resolveVaultPath(relativePath);
-
-    await fs.mkdir(path.dirname(dailyPath), { recursive: true });
+    const writePath = await this.resolveWritePath(relativePath);
 
     let existing = '';
     try {
-      existing = await fs.readFile(dailyPath, 'utf-8');
-    } catch {
+      existing = await fs.readFile(writePath, 'utf-8');
+    } catch (err) {
+      if (!isNodeError(err, 'ENOENT')) throw err;
       // The daily note will be created below.
     }
 
     const separator = existing.length > 0 && !existing.endsWith('\n') ? '\n\n' : '';
-    await fs.writeFile(dailyPath, `${existing}${separator}${content}`, 'utf-8');
+    await fs.writeFile(writePath, `${existing}${separator}${content}`, 'utf-8');
 
     return { dailyNote: relativePath.replaceAll(path.sep, '/'), appended: content };
   }
@@ -269,6 +268,59 @@ export class ObsidianConnector implements Connector {
         await this.walkNotes(fullPath, notes);
       } else if (entry.isFile() && entry.name.endsWith('.md')) {
         notes.push(path.relative(this.vaultPath, fullPath).replaceAll(path.sep, '/'));
+      }
+    }
+  }
+
+  private async resolveWritePath(relativePath: string): Promise<string> {
+    const resolved = this.resolveVaultPath(relativePath);
+    const parentDir = path.dirname(resolved);
+
+    await fs.mkdir(parentDir, { recursive: true });
+    await this.assertNoSymlinkPathSegments(parentDir);
+
+    const parentStat = await fs.lstat(parentDir);
+    if (parentStat.isSymbolicLink()) {
+      throw new Error('Access denied: write target includes a symlinked directory');
+    }
+    if (!parentStat.isDirectory()) {
+      throw new Error('Access denied: write target parent is not a directory');
+    }
+
+    const realParent = await fs.realpath(parentDir);
+    const vaultReal = this.vaultRealPath || this.vaultPath;
+    const rel = path.relative(vaultReal, realParent);
+    if (rel !== '' && (rel.startsWith('..') || path.isAbsolute(rel))) {
+      throw new Error('Access denied: write target resolves outside the vault');
+    }
+
+    const target = path.join(realParent, path.basename(resolved));
+    try {
+      const targetStat = await fs.lstat(target);
+      if (targetStat.isSymbolicLink()) {
+        throw new Error('Access denied: write target is a symlink');
+      }
+      if (!targetStat.isFile()) {
+        throw new Error('Access denied: write target is not a file');
+      }
+    } catch (err) {
+      if (!isNodeError(err, 'ENOENT')) throw err;
+    }
+
+    return target;
+  }
+
+  private async assertNoSymlinkPathSegments(targetDir: string): Promise<void> {
+    const relative = path.relative(this.vaultPath, targetDir);
+    if (relative === '') return;
+
+    let current = this.vaultPath;
+    for (const segment of relative.split(path.sep)) {
+      if (!segment) continue;
+      current = path.join(current, segment);
+      const stat = await fs.lstat(current);
+      if (stat.isSymbolicLink()) {
+        throw new Error('Access denied: write target includes a symlinked directory');
       }
     }
   }
@@ -368,4 +420,8 @@ function formatLocalDate(date: Date): string {
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
+}
+
+function isNodeError(err: unknown, code: string): boolean {
+  return err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === code;
 }
