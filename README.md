@@ -1,7 +1,5 @@
 # mvmt
 
-**AI tools want access to your files. mvmt lets you decide exactly how much.**
-
 mvmt is a local MCP server that sits between your data and your AI clients. You pick which folders, vaults, and tools are exposed. Everything else stays invisible.
 
 - **One server, every client** — Claude, Cursor, Codex, VS Code, and any MCP-compatible tool connect to a single local endpoint.
