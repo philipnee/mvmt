@@ -34,7 +34,7 @@ Localhost traffic is plaintext. A process running as the same OS user can usuall
 
 There is no per-client permission model yet. Any authenticated HTTP client can see the same configured connectors.
 
-There is no production remote relay yet. For demos, use a narrow config, a temporary tunnel, and read-only scopes. Stop the tunnel when the demo is over.
+There is no managed remote relay yet. For remote access, use a narrow config and read-only scopes where possible. Quick tunnels are temporary; use a named tunnel or reserved domain for a stable URL.
 
 Tunnel OAuth discovery uses forwarded host/proto headers from the tunnel provider to construct public URLs. Cloudflare Quick Tunnel is the recommended v0 path; other tunnels may produce incorrect discovery URLs.
 

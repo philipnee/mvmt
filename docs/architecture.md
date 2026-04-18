@@ -124,7 +124,7 @@ Clients that launch MCP servers directly can run mvmt in stdio mode.
 +----------------+                                               +---------------+
 ```
 
-Tunnel mode is experimental and intended for demos or remote testing.
+Tunnel mode provides public HTTPS access for cloud and web MCP clients. Quick tunnel URLs are temporary; stable URLs require a named tunnel or reserved domain.
 
 ```text
 +----------------+       public HTTPS URL        +------------------------------+

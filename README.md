@@ -1,15 +1,17 @@
 # mvmt
 
-**mvmt is a local-first data hub that gives AI clients scoped access to your files, notes, and local tools.**
+**AI tools want access to your files. mvmt lets you decide exactly how much.**
 
-- Choose exactly which folders and local sources are exposed.
-- Read-only by default, with explicit write access per connector.
-- One local MCP endpoint for Claude, Cursor, Codex, VS Code, and other MCP clients.
-- Native Obsidian connector, plus scoped filesystem access through the official filesystem MCP server.
-- Bearer-token auth, Origin checks, optional pattern-based redaction, diagnostics, and a local audit log.
+mvmt is a local MCP server that sits between your data and your AI clients. You pick which folders, vaults, and tools are exposed. Everything else stays invisible.
+
+- **One server, every client** — Claude, Cursor, Codex, VS Code, and any MCP-compatible tool connect to a single local endpoint.
+- **Read-only by default** — write access is opt-in per connector. Nothing writes unless you said so.
+- **Scoped, not open** — choose exact folders and Obsidian vaults. No full-disk access, no guessing.
+- **Secure out of the box** — bearer-token auth, origin checks, environment scrubbing, audit log, and an optional pattern-based redactor for configured patterns.
+- **Tunnel-ready** — expose mvmt to cloud clients like claude.ai over public HTTPS, with OAuth/PKCE for web clients.
 
 > [!WARNING]
-> Tunnel mode is experimental and intended for demos or remote testing with narrow, read-only scopes.
+> Remote access is authenticated, but it still exposes your configured local tools beyond your machine. Keep connector scopes narrow before exposing mvmt over a tunnel.
 
 ![mvmt running in interactive mode](docs/assets/mvmt-start-interactive.png)
 
@@ -36,8 +38,8 @@ mvmt start -i # -i stands for interactive mode
 | Stdio mode | supported |
 | Interactive start mode | supported |
 | Built-in pattern-based redactor plugin | supported, opt-in during `mvmt init` |
-| Tunnel mode | experimental, demo/testing only |
-| Public production remote access | not ready |
+| Tunnel mode | supported for personal remote access; quick tunnel URLs are temporary |
+| Managed remote relay / per-client remote access | not in v0 |
 | HTTP proxy write gates | incomplete; advanced/manual config only |
 
 ## Client Compatibility
@@ -49,7 +51,7 @@ mvmt start -i # -i stands for interactive mode
 | Codex CLI | Streamable HTTP | supported | bearer token env var | Start Codex from a shell where the token env var is set |
 | Cursor | Streamable HTTP | expected | bearer token header | Client behavior may vary by Cursor MCP version |
 | VS Code / Copilot | Streamable HTTP | expected | bearer token header | Client behavior may vary by MCP extension/version |
-| claude.ai / ChatGPT web | public HTTPS tunnel | experimental | OAuth/tunnel flow in progress | Do not use for production data; SSE/tunnel behavior can be flaky |
+| claude.ai / ChatGPT web | public HTTPS tunnel | supported remote mode | OAuth/PKCE over tunnel | Requires a public HTTPS URL; use a named tunnel for a stable URL |
 | Raw HTTP/curl | Streamable HTTP | debug only | bearer token header | Must follow MCP session initialization rules |
 
 ## Security At A Glance
@@ -287,10 +289,23 @@ See [Security Memo](docs/security-memo.md) for design notes and [Audit Log](docs
 
 ## Remote Access
 
-mvmt is local-first. Cloud clients like claude.ai cannot reach `127.0.0.1` directly. For demos, `mvmt init` can configure a tunnel (Cloudflare Quick Tunnel or localhost.run) that gives you a temporary public HTTPS URL.
+mvmt is local-first. Cloud clients like claude.ai cannot reach `127.0.0.1` directly. `mvmt init` can configure a tunnel that gives you a public HTTPS URL.
+
+Quick tunnels are temporary, which means you lose the URL when mvmt is shut down. Use a named tunnel or reserved domain to keep the same URL.
+
+Recommended quick tunnel: Cloudflare. It has been more stable than `localhost.run`.
 
 > [!WARNING]
-> Tunnel mode is experimental. Use narrow, read-only scopes and stop the tunnel when done.
+> Remote web clients authorize with OAuth/PKCE. Direct HTTP clients use bearer tokens. Auth controls who connects; connector scope controls what they can access.
+
+Remote access checklist:
+
+- Use Cloudflare Tunnel when possible.
+- Expose the smallest useful folder, vault, or connector scope.
+- Keep write access disabled unless you explicitly need it.
+- Do not expose secrets, credential folders, home directories, production databases, or browser profiles.
+- Watch the audit log when using remote clients.
+- Stop the tunnel when you are done with remote access.
 
 See [Remote Access](docs/remote-access.md) for tunnel providers, runtime management, and safety guidelines.
 
@@ -300,8 +315,13 @@ See [Troubleshooting](docs/troubleshooting.md) for common issues: port conflicts
 
 ## Coming Next
 
+Planned work is focused on safer long-running use and better local data coverage:
+
 - Fast file indexer with Chroma's embedded JS/TS version.
 - Full key management: named keys, rotation, revocation, expiration.
+- Per-client permissions and connector scoping.
+- Runtime permission changes for folders, vaults, and connector write access.
+- Remote access hardening guides for Cloudflare Named Tunnels, Cloudflare Access, and rate limiting.
 - SQLite connector with per-table read/write permissions.
 - Atomic writes and optional `--preview` mode.
 - Git connector for local history, diffs, blame, and branch-aware search.
