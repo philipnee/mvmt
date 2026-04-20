@@ -6,6 +6,7 @@ Examples:
 
 - **Obsidian** is a native connector. mvmt reads the vault directly with Node filesystem APIs.
 - **Filesystem** is a proxy connector. mvmt launches the official filesystem MCP server as a child process and routes its tools through mvmt's auth, write gates, plugins, and audit log.
+- **MemPalace** is a proxy connector setup. mvmt launches the local MemPalace MCP server as a child process and applies mvmt-side write gates, plugins, and audit logging.
 
 Connectors are the boundary where mvmt decides what exists, what is exposed, what is read-only, and what counts as a write.
 
@@ -71,7 +72,7 @@ Native connectors should be narrow and explicit. A connector should never scan a
 
 A proxy connector wraps an existing MCP server. mvmt starts it over stdio or connects to it over HTTP, then forwards tools through mvmt's router.
 
-Proxy connectors are useful when the external MCP server is already the right implementation. The filesystem connector currently uses this model.
+Proxy connectors are useful when the external MCP server is already the right implementation. Filesystem and MemPalace currently use this model.
 
 Proxy connectors still need mvmt-side guardrails:
 
@@ -80,6 +81,30 @@ Proxy connectors still need mvmt-side guardrails:
 - Tool calls still go through plugins and audit logging.
 
 HTTP proxy write gates are not complete in v0. Treat HTTP proxy connectors as advanced/manual configuration.
+
+### MemPalace proxy setup
+
+MemPalace is treated as a local stdio MCP server. During `mvmt init`, mvmt tries to detect:
+
+- the `mempalace` executable on `PATH`,
+- the Python executable from the `mempalace` script shebang,
+- the palace path from `~/.mempalace/config.json`.
+
+If detection is incomplete, init prompts for the missing command or palace path. The generated proxy looks like:
+
+```yaml
+proxy:
+  - name: mempalace
+    source: mempalace
+    transport: stdio
+    command: /Users/you/.local/pipx/venvs/mempalace/bin/python
+    args: ["-m", "mempalace.mcp_server", "--palace", "/Users/you/.mempalace/palace"]
+    env: {}
+    writeAccess: false
+    enabled: true
+```
+
+When `writeAccess: false`, mvmt hides and rejects known MemPalace write tools including drawer creation/deletion, KG mutation, tunnel creation/deletion, hook settings, and diary writes. Read/search/list tools remain visible.
 
 ## How to add a native connector
 

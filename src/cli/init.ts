@@ -1,5 +1,6 @@
 import { checkbox, confirm, input, select } from '@inquirer/prompts';
 import chalk from 'chalk';
+import { constants as fsConstants } from 'fs';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
@@ -13,6 +14,18 @@ import {
   TunnelConfig,
 } from '../config/schema.js';
 import { defaultTunnelCommand, missingTunnelDependency } from '../utils/tunnel.js';
+
+export interface DetectedMemPalace {
+  executable?: string;
+  command?: string;
+  palacePath?: string;
+}
+
+export interface MemPalaceConfigInput {
+  command: string;
+  palacePath: string;
+  writeAccess: boolean;
+}
 
 export async function init(): Promise<void> {
   printBanner();
@@ -32,14 +45,15 @@ export async function init(): Promise<void> {
 
   console.log('Configure the local data mvmt is allowed to expose.\n');
 
+  console.log('Checking available connectors...\n');
+  const [vaults, detectedMemPalace] = await Promise.all([detectObsidianVaults(), detectMemPalace()]);
+  printAvailableConnectors(vaults, detectedMemPalace);
+
   const filesystemAccess = await promptForFilesystemFolders();
 
   let obsidianPath: string | undefined;
   let obsidianWriteAccess = false;
-
-  console.log('\nChecking native connectors...\n');
-  const vaults = await detectObsidianVaults();
-  printAvailableConnectors(vaults);
+  let memPalaceConfig: MemPalaceConfigInput | undefined;
 
   const wantObsidian = await confirm({
     message: 'Enable the Obsidian connector?',
@@ -53,6 +67,14 @@ export async function init(): Promise<void> {
         default: false,
       });
     }
+  }
+
+  const wantMemPalace = await confirm({
+    message: 'Enable the MemPalace connector?',
+    default: Boolean(detectedMemPalace.command && detectedMemPalace.palacePath),
+  });
+  if (wantMemPalace) {
+    memPalaceConfig = await promptForMemPalace(detectedMemPalace);
   }
 
   const plugins = await promptForPlugins();
@@ -76,6 +98,7 @@ export async function init(): Promise<void> {
     obsidianWriteAccess,
     access,
     plugins,
+    memPalaceConfig,
   );
 
   await fs.mkdir(path.dirname(configPath), { recursive: true });
@@ -96,6 +119,7 @@ export function buildConfig(
   obsidianWriteAccess = false,
   access: { access: 'local' | 'tunnel'; tunnel?: TunnelConfig } = { access: 'local' },
   plugins: PluginConfig[] = [],
+  memPalace?: MemPalaceConfigInput,
 ): MvmtConfig {
   const proxy: MvmtConfig['proxy'] = [];
 
@@ -112,6 +136,10 @@ export function buildConfig(
     });
   }
 
+  if (memPalace) {
+    proxy.push(createMemPalaceProxyConfig(memPalace));
+  }
+
   return {
     version: 1,
     server: {
@@ -125,6 +153,19 @@ export function buildConfig(
     ...(obsidianPath
       ? { obsidian: { path: obsidianPath, enabled: true, writeAccess: obsidianWriteAccess } }
       : {}),
+  };
+}
+
+export function createMemPalaceProxyConfig(memPalace: MemPalaceConfigInput): MvmtConfig['proxy'][number] {
+  return {
+    name: 'mempalace',
+    source: 'mempalace',
+    transport: 'stdio' as const,
+    command: memPalace.command,
+    args: ['-m', 'mempalace.mcp_server', '--palace', memPalace.palacePath],
+    env: {},
+    writeAccess: memPalace.writeAccess,
+    enabled: true,
   };
 }
 
@@ -294,6 +335,69 @@ export async function countNotes(vaultPath: string): Promise<number> {
   return count;
 }
 
+export async function detectMemPalace(): Promise<DetectedMemPalace> {
+  const executable = await findExecutableOnPath('mempalace');
+  const command = executable ? await readShebangCommand(executable) : undefined;
+  const palacePath = await detectMemPalacePalacePath();
+
+  return {
+    ...(executable ? { executable } : {}),
+    ...(command ? { command } : {}),
+    ...(palacePath ? { palacePath } : {}),
+  };
+}
+
+async function detectMemPalacePalacePath(): Promise<string | undefined> {
+  const configPath = path.join(os.homedir(), '.mempalace', 'config.json');
+  try {
+    const raw = await fs.readFile(configPath, 'utf-8');
+    const parsed = JSON.parse(raw) as { palace_path?: unknown };
+    if (typeof parsed.palace_path === 'string' && parsed.palace_path.trim()) {
+      return expandHome(parsed.palace_path.trim());
+    }
+  } catch {
+    // Config is optional.
+  }
+
+  const defaultPath = path.join(os.homedir(), '.mempalace', 'palace');
+  if (await pathExists(defaultPath)) return defaultPath;
+  return undefined;
+}
+
+export async function findExecutableOnPath(
+  executableName: string,
+  pathValue = process.env.PATH || '',
+): Promise<string | undefined> {
+  for (const dir of pathValue.split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, executableName);
+    try {
+      await fs.access(candidate, fsConstants.X_OK);
+      return candidate;
+    } catch {
+      // Not executable or not present.
+    }
+  }
+  return undefined;
+}
+
+export async function readShebangCommand(filePath: string): Promise<string | undefined> {
+  let firstLine: string;
+  try {
+    const raw = await fs.readFile(filePath, 'utf-8');
+    firstLine = raw.split(/\r?\n/, 1)[0];
+  } catch {
+    return undefined;
+  }
+
+  if (!firstLine.startsWith('#!')) return undefined;
+  const parts = firstLine.slice(2).trim().split(/\s+/).filter(Boolean);
+  const command = parts[0];
+  if (!command || command.endsWith('/env') || command === 'env') return undefined;
+  if (!path.isAbsolute(command)) return undefined;
+  return (await pathExists(command)) ? command : undefined;
+}
+
 async function promptForObsidianVault(vaults: string[]): Promise<string | undefined> {
   let chosenPath: string;
   if (vaults.length === 1) {
@@ -331,6 +435,45 @@ async function promptForObsidianVault(vaults: string[]): Promise<string | undefi
     console.log(chalk.dim('Expected a .obsidian directory inside the path. Skipping Obsidian.'));
     return undefined;
   }
+}
+
+export async function promptForMemPalace(detected: DetectedMemPalace): Promise<MemPalaceConfigInput> {
+  const commandAnswer = await input({
+    message: 'MemPalace MCP Python executable:',
+    default: detected.command || 'python',
+    validate: async (value) => {
+      const command = normalizeExecutableInput(value);
+      if (!command) return 'Enter a Python executable that can import mempalace';
+      if (path.isAbsolute(command) && !(await pathExists(command))) return 'Executable does not exist';
+      return true;
+    },
+  });
+
+  const palaceAnswer = await input({
+    message: 'Path to MemPalace palace:',
+    default: detected.palacePath || path.join(os.homedir(), '.mempalace', 'palace'),
+    validate: async (value) => {
+      if (!value.trim()) return 'Enter a palace path';
+      const resolved = expandHome(value.trim());
+      try {
+        const stat = await fs.stat(resolved);
+        return stat.isDirectory() ? true : 'Path must be a directory';
+      } catch {
+        return 'Directory does not exist';
+      }
+    },
+  });
+
+  const writeAccess = await confirm({
+    message: 'Allow MemPalace write tools? This lets AI clients add, update, and delete memories. Read-only is recommended.',
+    default: false,
+  });
+
+  return {
+    command: normalizeExecutableInput(commandAnswer),
+    palacePath: expandHome(palaceAnswer.trim()),
+    writeAccess,
+  };
 }
 
 async function promptForFilesystemFolders(): Promise<{ paths: string[]; writeAccess: boolean }> {
@@ -379,8 +522,9 @@ function printBanner(): void {
   console.log(`\n${chalk.bold('mvmt')} - local MCP hub\n`);
 }
 
-function printAvailableConnectors(vaults: string[]): void {
+function printAvailableConnectors(vaults: string[], memPalace: DetectedMemPalace): void {
   console.log('Available connectors:');
+  console.log('  - Filesystem manual folder access');
   console.log(
     `  - Obsidian ${chalk.dim(
       vaults.length > 0
@@ -388,6 +532,15 @@ function printAvailableConnectors(vaults: string[]): void {
         : 'no vault auto-detected; manual path supported',
     )}`,
   );
+  const memPalaceStatus =
+    memPalace.command && memPalace.palacePath
+      ? 'detected MCP command and palace path'
+      : memPalace.command
+        ? 'detected MCP command; palace path required'
+        : memPalace.palacePath
+          ? 'detected palace path; MCP command required'
+          : 'not detected; manual path and command supported';
+  console.log(`  - MemPalace ${chalk.dim(memPalaceStatus)}`);
   console.log('');
 }
 
@@ -404,4 +557,10 @@ function expandHome(inputPath: string): string {
   if (inputPath === '~') return os.homedir();
   if (inputPath.startsWith(`~${path.sep}`)) return path.join(os.homedir(), inputPath.slice(2));
   return path.resolve(inputPath);
+}
+
+function normalizeExecutableInput(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed === '~' || trimmed.startsWith(`~${path.sep}`)) return expandHome(trimmed);
+  return trimmed;
 }

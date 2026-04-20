@@ -2,11 +2,11 @@
 
 **A local-first MCP layer for scoped access to files, vaults, and tools.**
 
-mvmt runs as a local MCP server between your data sources and your clients. You choose which folders, vaults, and tools are exposed, with read/write access controlled per source.
+mvmt runs as a local MCP server between your data sources and your clients. You choose which folders, vaults, memory palaces, and tools are exposed, with read/write access controlled per source.
 
 - **One server, every client** — Claude, Cursor, Codex, VS Code, and any MCP-compatible tool connect to a single local endpoint.
 - **Read-only by default** — write access is opt-in per connector. Nothing writes unless you said so.
-- **Scoped, not open** — choose exact folders and Obsidian vaults. No full-disk access, no guessing.
+- **Scoped, not open** — choose exact folders, Obsidian vaults, and MemPalace paths. No full-disk access, no guessing.
 - **Secure out of the box** — bearer-token auth, origin checks, environment scrubbing, audit log, and an optional pattern-based redactor for configured patterns.
 - **Tunnel-ready** — expose mvmt to cloud clients like claude.ai over public HTTPS, with OAuth/PKCE for web clients.
 
@@ -34,6 +34,7 @@ mvmt start -i # -i stands for interactive mode
 | --- | --- |
 | Local filesystem folders | supported, read-only by default |
 | Native Obsidian connector | supported, read-only by default |
+| MemPalace connector setup | supported as stdio proxy, read-only by default |
 | Local Streamable HTTP | supported |
 | Stdio mode | supported |
 | Interactive start mode | supported |
@@ -101,7 +102,7 @@ See [Client Setup](docs/client-setup.md) for step-by-step instructions for Claud
 `mvmt init` creates `~/.mvmt/config.yaml` with everything you selected during setup. The config controls four things:
 
 - **`server`** — port, allowed origins, and whether to start a tunnel for public access.
-- **`proxy`** — external MCP servers that mvmt proxies (e.g. the filesystem connector).
+- **`proxy`** — external MCP servers that mvmt proxies (e.g. filesystem and MemPalace).
 - **`obsidian`** — the native Obsidian vault connector.
 - **`plugins`** — security plugins that inspect tool results before they reach clients (e.g. the pattern-based redactor).
 
@@ -115,6 +116,8 @@ See [Configuration](docs/configuration.md) for the full schema reference, field 
 | --- | --- |
 | `mvmt init` | Interactive setup wizard — choose folders, connectors, plugins, and access mode |
 | `mvmt start` | Start the MCP server (HTTP by default, `--stdio` for direct client launch, `-i` for interactive) |
+| `mvmt connectors list` | Show supported connector setup status |
+| `mvmt connectors add mempalace` | Add or replace the MemPalace connector setup |
 | `mvmt show` | Print the current HTTP bearer token |
 | `mvmt rotate` | Generate a new bearer token and print it |
 | `mvmt doctor` | Validate config and check connector health |
@@ -135,17 +138,29 @@ Update checks never install anything. They are skipped when `MVMT_NO_UPDATE_CHEC
 
 Interactive setup:
 
-1. Asks whether to expose filesystem folders. Default: no filesystem access.
-2. If filesystem access is enabled, asks for exact folders and whether writes are allowed. Default: read-only.
-3. Checks available local connectors. Currently, the native connector is Obsidian.
+1. Checks available connectors: filesystem folder access, Obsidian, and MemPalace.
+2. Asks whether to expose filesystem folders. Default: no filesystem access.
+3. If filesystem access is enabled, asks for exact folders and whether writes are allowed. Default: read-only.
 4. Detects Obsidian vaults in common locations, including iCloud Obsidian on macOS.
 5. Asks whether Obsidian writes should be enabled. Default: read-only.
-6. Asks which built-in security plugins to enable. Currently: pattern-based redactor.
-7. If pattern redaction is enabled, asks for mode and default patterns.
-8. Asks whether mvmt should be local-only or start a tunnel for a public URL.
-9. Writes `~/.mvmt/config.yaml` with mode `600` on non-Windows systems.
+6. Detects MemPalace from your local install/config when possible, then asks whether memory writes should be enabled. Default: read-only.
+7. Asks which built-in security plugins to enable. Currently: pattern-based redactor.
+8. If pattern redaction is enabled, asks for mode and default patterns.
+9. Asks whether mvmt should be local-only or start a tunnel for a public URL.
+10. Writes `~/.mvmt/config.yaml` with mode `600` on non-Windows systems.
 
 Running `mvmt init` against an existing config prompts before overwriting.
+
+### `mvmt connectors`
+
+Manage supported local connector setups without regenerating the whole config.
+
+```bash
+mvmt connectors list
+mvmt connectors add mempalace
+```
+
+`connectors add mempalace` detects your local MemPalace command and palace path when possible, asks whether memory writes should be enabled, updates `~/.mvmt/config.yaml`, and tells you to restart mvmt. It does not install MemPalace or manage Python versions.
 
 ### `mvmt start`
 
@@ -250,13 +265,15 @@ mvmt rotate
 
 A connector is the code that gives mvmt access to one local data source or tool surface. It owns discovery, permissions, tool definitions, tool execution, and cleanup for that source.
 
-mvmt currently ships two connectors. Both are read-only by default with opt-in write access.
+mvmt currently supports three connector setups. All are read-only by default with opt-in write access.
 
 **Obsidian** — native connector that reads markdown files directly from a vault. Tools: `search_notes`, `read_note`, `list_notes`, `list_tags`, and `append_to_daily` (write, opt-in). Path traversal is blocked; symlinks are skipped.
 
 **Filesystem** — proxies the official `@modelcontextprotocol/server-filesystem` MCP server as a stdio child process. When `writeAccess: false`, mvmt hides write tools from `listTools` and rejects them at `callTool`.
 
-Tools from all connectors are prefixed with the connector ID (e.g. `obsidian__search_notes`, `proxy_filesystem__read_file`) to avoid name collisions.
+**MemPalace** — proxies the local MemPalace MCP server as a stdio child process. `mvmt init` tries to detect your `mempalace` command and palace path. When `writeAccess: false`, mvmt hides known MemPalace write tools such as drawer creation, tunnel deletion, KG mutation, hook settings, and diary writes.
+
+Tools from all connectors are prefixed with the connector ID (e.g. `obsidian__search_notes`, `proxy_filesystem__read_file`, `proxy_mempalace__mempalace_search`) to avoid name collisions.
 
 To add a native connector in v0, implement the `Connector` interface, add config schema for its scope, wire it into startup, and add tests for path/scope/write behavior. See [Connectors](docs/connectors.md) for the implementation checklist.
 
