@@ -118,6 +118,28 @@ describe('OAuthStore', () => {
     ).toThrow(/Redirect URI/);
   });
 
+  it('binds authorization codes to the requested resource', () => {
+    const store = new OAuthStore();
+    const { verifier, challenge } = pkcePair();
+    const code = store.issueCode({
+      clientId: 'chatgpt',
+      redirectUri: 'https://chatgpt.com/connector/oauth/callback',
+      resource: 'https://mcp.example.com/mcp',
+      codeChallenge: challenge,
+      codeChallengeMethod: 'S256',
+    });
+
+    expect(() =>
+      store.consumeCode({
+        code: code.code,
+        clientId: 'chatgpt',
+        redirectUri: 'https://chatgpt.com/connector/oauth/callback',
+        resource: 'https://other.example.com/mcp',
+        codeVerifier: verifier,
+      }),
+    ).toThrow(/Resource mismatch/);
+  });
+
   it('expires access tokens', () => {
     let now = 1_000_000;
     const store = new OAuthStore({ tokenTtlMs: 1000, now: () => now });

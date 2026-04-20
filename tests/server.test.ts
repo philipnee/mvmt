@@ -161,6 +161,60 @@ describe('startHttpServer lifecycle', () => {
     }
   });
 
+  it('exchanges an authorization code when the OAuth resource parameter is echoed', async () => {
+    const router = new ToolRouter([new EmptyConnector()]);
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const server = await startHttpServer(router, { port: 0, tokenPath });
+
+    try {
+      const sessionToken = fs.readFileSync(tokenPath, 'utf-8').trim();
+      const resource = `http://127.0.0.1:${server.port}/mcp`;
+      const redirectUri = 'https://chatgpt.com/connector/oauth/test-callback';
+      const verifier = 'test-verifier';
+      const authorize = await fetch(`http://127.0.0.1:${server.port}/authorize`, {
+        method: 'POST',
+        redirect: 'manual',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          response_type: 'code',
+          client_id: 'chatgpt',
+          redirect_uri: redirectUri,
+          resource,
+          code_challenge: verifier,
+          code_challenge_method: 'plain',
+          session_token: sessionToken,
+        }),
+      });
+      expect(authorize.status).toBe(302);
+      const location = authorize.headers.get('location');
+      expect(location).toBeTruthy();
+      const code = new URL(location!).searchParams.get('code');
+      expect(code).toBeTruthy();
+
+      const token = await fetch(`http://127.0.0.1:${server.port}/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'authorization_code',
+          code: code!,
+          client_id: 'chatgpt',
+          redirect_uri: redirectUri,
+          resource,
+          code_verifier: verifier,
+        }),
+      });
+      expect(token.status).toBe(200);
+      const body = await token.json();
+      expect(body.token_type).toBe('Bearer');
+      expect(body.access_token).toBeTypeOf('string');
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('returns a close handle that releases the listening port', async () => {
     const router = new ToolRouter([new EmptyConnector()]);
     await router.initialize();

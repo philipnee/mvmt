@@ -222,6 +222,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     const authCode = oauth.issueCode({
       clientId: params.clientId,
       redirectUri: params.redirectUri,
+      resource: params.resource,
       codeChallenge: params.codeChallenge,
       codeChallengeMethod: params.codeChallengeMethod,
       scope: params.scope,
@@ -246,6 +247,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     const code = typeof body.code === 'string' ? body.code : undefined;
     const clientId = typeof body.client_id === 'string' ? body.client_id : undefined;
     const redirectUri = typeof body.redirect_uri === 'string' ? body.redirect_uri : undefined;
+    const resource = typeof body.resource === 'string' ? body.resource : undefined;
     const codeVerifier = typeof body.code_verifier === 'string' ? body.code_verifier : undefined;
 
     if (!code || !clientId || !redirectUri || !codeVerifier) {
@@ -255,7 +257,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     }
 
     try {
-      const accessToken = oauth.consumeCode({ code, clientId, redirectUri, codeVerifier });
+      const accessToken = oauth.consumeCode({ code, clientId, redirectUri, resource, codeVerifier });
       logHttpRequest(requestLog, req, 200, 'oauth.token', undefined, clientId);
       res.json({
         access_token: accessToken.token,
@@ -458,6 +460,7 @@ type AuthorizeParams = {
   responseType: string;
   clientId: string;
   redirectUri: string;
+  resource?: string;
   state?: string;
   scope?: string;
   codeChallenge: string;
@@ -468,6 +471,7 @@ function parseAuthorizeParams(source: Record<string, unknown>): AuthorizeParams 
   const responseType = stringField(source.response_type);
   const clientId = stringField(source.client_id);
   const redirectUri = stringField(source.redirect_uri);
+  const resource = stringField(source.resource);
   const codeChallenge = stringField(source.code_challenge);
   // S256 is strongly preferred. Defaulting to plain is compatibility behavior
   // for simple clients that omit code_challenge_method.
@@ -484,6 +488,13 @@ function parseAuthorizeParams(source: Record<string, unknown>): AuthorizeParams 
   } catch {
     return { error: 'Invalid redirect_uri' };
   }
+  if (resource) {
+    try {
+      new URL(resource);
+    } catch {
+      return { error: 'Invalid resource' };
+    }
+  }
 
   if (codeChallengeMethodRaw !== 'S256' && codeChallengeMethodRaw !== 'plain') {
     return { error: 'Unsupported code_challenge_method' };
@@ -493,6 +504,7 @@ function parseAuthorizeParams(source: Record<string, unknown>): AuthorizeParams 
     responseType,
     clientId,
     redirectUri,
+    resource,
     state: stringField(source.state),
     scope: stringField(source.scope),
     codeChallenge,

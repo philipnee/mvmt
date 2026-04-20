@@ -7,6 +7,7 @@ export interface AuthorizationCode {
   code: string;
   clientId: string;
   redirectUri: string;
+  resource?: string;
   codeChallenge: string;
   codeChallengeMethod: CodeChallengeMethod;
   scope?: string;
@@ -24,6 +25,7 @@ export interface AccessToken {
 export interface IssueCodeInput {
   clientId: string;
   redirectUri: string;
+  resource?: string;
   codeChallenge: string;
   codeChallengeMethod: CodeChallengeMethod;
   scope?: string;
@@ -33,6 +35,7 @@ export interface ConsumeCodeInput {
   code: string;
   clientId: string;
   redirectUri: string;
+  resource?: string;
   codeVerifier: string;
 }
 
@@ -68,6 +71,7 @@ export class OAuthStore {
       code,
       clientId: input.clientId,
       redirectUri: input.redirectUri,
+      resource: input.resource,
       codeChallenge: input.codeChallenge,
       codeChallengeMethod: input.codeChallengeMethod,
       scope: input.scope,
@@ -95,6 +99,9 @@ export class OAuthStore {
     }
     if (entry.redirectUri !== input.redirectUri) {
       throw new OAuthError('invalid_grant', 'Redirect URI mismatch for authorization code');
+    }
+    if (entry.resource && entry.resource !== input.resource) {
+      throw new OAuthError('invalid_grant', 'Resource mismatch for authorization code');
     }
     if (!verifyPkce(entry.codeChallenge, entry.codeChallengeMethod, input.codeVerifier)) {
       throw new OAuthError('invalid_grant', 'PKCE verification failed');
@@ -199,6 +206,7 @@ function isLocalHost(host: string): boolean {
 export interface AuthorizePageParams {
   clientId: string;
   redirectUri: string;
+  resource?: string;
   state?: string;
   scope?: string;
   codeChallenge: string;
@@ -243,6 +251,7 @@ export function renderAuthorizePage(params: AuthorizePageParams): string {
     ${hidden('response_type', params.responseType)}
     ${hidden('client_id', params.clientId)}
     ${hidden('redirect_uri', params.redirectUri)}
+    ${hidden('resource', params.resource)}
     ${hidden('state', params.state)}
     ${hidden('scope', params.scope)}
     ${hidden('code_challenge', params.codeChallenge)}
