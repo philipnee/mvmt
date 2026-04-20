@@ -1,6 +1,19 @@
 export { doctor, collectDoctorReport } from './cli/doctor.js';
 export type { DoctorOptions, DoctorReport, DoctorStatus } from './cli/doctor.js';
-export { init, buildConfig, countNotes, detectObsidianVaults } from './cli/init.js';
+export { addConnector, getConnectorSetupStatuses, listConnectors, upsertProxyConfig } from './cli/connectors.js';
+export type { ConnectorCommandOptions, ConnectorSetupStatus } from './cli/connectors.js';
+export {
+  init,
+  buildConfig,
+  createMemPalaceProxyConfig,
+  countNotes,
+  detectMemPalace,
+  detectObsidianVaults,
+  findExecutableOnPath,
+  readShebangCommand,
+  promptForMemPalace,
+} from './cli/init.js';
+export type { DetectedMemPalace, MemPalaceConfigInput } from './cli/init.js';
 export { start } from './cli/start.js';
 export type { StartOptions } from './cli/start.js';
 export { rotateToken, showToken } from './cli/token.js';

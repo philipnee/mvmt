@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { Command } from 'commander';
+import { addConnector, listConnectors } from '../src/cli/connectors.js';
 import { doctor } from '../src/cli/doctor.js';
 import { init } from '../src/cli/init.js';
 import { start } from '../src/cli/start.js';
@@ -66,6 +67,26 @@ program
   .action(async (options: { config?: string; json?: boolean; timeoutMs?: string }) => {
     const globalOptions = program.opts<{ updateCheck?: boolean }>();
     await doctor({ ...options, updateCheck: globalOptions.updateCheck !== false });
+  });
+
+const connectorsCommand = program
+  .command('connectors')
+  .description('List or add supported local connector setups');
+
+connectorsCommand
+  .command('list')
+  .description('Show supported connector setup status')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (options: { config?: string }) => {
+    await listConnectors(options);
+  });
+
+connectorsCommand
+  .command('add [name]')
+  .description('Add a supported connector setup to config')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (name: string | undefined, options: { config?: string }) => {
+    await addConnector(name, options);
   });
 
 program

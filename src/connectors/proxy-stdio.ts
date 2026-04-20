@@ -17,14 +17,17 @@ export class StdioProxyConnector implements Connector {
   private transport?: StdioClientTransport;
   private tools: ToolDefinition[] = [];
   private readonly readOnlyFilesystem: boolean;
+  private readonly readOnlyMemPalace: boolean;
   private readonly readOnlyGeneric: boolean;
 
   constructor(private readonly config: StdioProxyConfig) {
     this.id = `proxy_${sanitizeName(config.name)}`;
     this.displayName = config.name;
     const isFs = isFilesystemProxy(config);
+    const isMemPalace = isMemPalaceProxy(config);
     this.readOnlyFilesystem = isFs && config.writeAccess !== true;
-    this.readOnlyGeneric = !isFs && config.writeAccess === false;
+    this.readOnlyMemPalace = isMemPalace && config.writeAccess !== true;
+    this.readOnlyGeneric = !isFs && !isMemPalace && config.writeAccess === false;
   }
 
   async initialize(): Promise<void> {
@@ -82,6 +85,7 @@ export class StdioProxyConnector implements Connector {
 
   private isToolAllowed(name: string): boolean {
     if (this.readOnlyFilesystem && !isReadOnlyFilesystemTool(name)) return false;
+    if (this.readOnlyMemPalace && isMemPalaceWriteTool(name)) return false;
     if (this.readOnlyGeneric && isLikelyWriteTool(name)) return false;
     return true;
   }
@@ -95,6 +99,11 @@ export function sanitizeName(name: string): string {
 function isFilesystemProxy(config: StdioProxyConfig): boolean {
   const fingerprint = [config.name, config.command, ...config.args].join(' ').toLowerCase();
   return fingerprint.includes('filesystem');
+}
+
+function isMemPalaceProxy(config: StdioProxyConfig): boolean {
+  const fingerprint = [config.name, config.command, ...config.args].join(' ').toLowerCase();
+  return fingerprint.includes('mempalace');
 }
 
 function isReadOnlyFilesystemTool(name: string): boolean {
@@ -112,6 +121,22 @@ const READ_ONLY_FILESYSTEM_TOOLS = new Set([
   'read_text_file',
   'search_files',
 ]);
+
+const MEMPALACE_WRITE_TOOLS = new Set([
+  'mempalace_kg_add',
+  'mempalace_kg_invalidate',
+  'mempalace_create_tunnel',
+  'mempalace_delete_tunnel',
+  'mempalace_add_drawer',
+  'mempalace_delete_drawer',
+  'mempalace_update_drawer',
+  'mempalace_diary_write',
+  'mempalace_hook_settings',
+]);
+
+export function isMemPalaceWriteTool(name: string): boolean {
+  return MEMPALACE_WRITE_TOOLS.has(name.toLowerCase());
+}
 
 const WRITE_TOOL_PREFIXES = [
   'write_',

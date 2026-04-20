@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { buildConfig } from '../src/cli/init.js';
+import fs from 'fs/promises';
+import os from 'os';
+import path from 'path';
+import { buildConfig, findExecutableOnPath, readShebangCommand } from '../src/cli/init.js';
 
 describe('init helpers', () => {
   it('builds config from explicit local scopes and native Obsidian path', () => {
@@ -116,5 +119,50 @@ describe('init helpers', () => {
         ],
       },
     ]);
+  });
+
+  it('adds a MemPalace proxy when configured', () => {
+    const config = buildConfig(undefined, 4141, [], false, false, { access: 'local' }, [], {
+      command: '/venv/bin/python',
+      palacePath: '/Users/me/.mempalace/palace',
+      writeAccess: false,
+    });
+
+    expect(config.proxy).toEqual([
+      {
+        name: 'mempalace',
+        source: 'mempalace',
+        transport: 'stdio',
+        command: '/venv/bin/python',
+        args: ['-m', 'mempalace.mcp_server', '--palace', '/Users/me/.mempalace/palace'],
+        env: {},
+        writeAccess: false,
+        enabled: true,
+      },
+    ]);
+  });
+
+  it('finds executables on an explicit PATH', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-init-'));
+    const executable = path.join(dir, 'mempalace');
+    await fs.writeFile(executable, '#!/usr/bin/env node\n', 'utf-8');
+    await fs.chmod(executable, 0o755);
+
+    await expect(findExecutableOnPath('mempalace', dir)).resolves.toBe(executable);
+    await expect(findExecutableOnPath('missing', dir)).resolves.toBeUndefined();
+  });
+
+  it('reads absolute shebang commands and ignores env shebangs', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-init-'));
+    const python = path.join(dir, 'python');
+    const pipxScript = path.join(dir, 'mempalace');
+    const envScript = path.join(dir, 'mempalace-env');
+
+    await fs.writeFile(python, '', 'utf-8');
+    await fs.writeFile(pipxScript, `#!${python}\n`, 'utf-8');
+    await fs.writeFile(envScript, '#!/usr/bin/env python\n', 'utf-8');
+
+    await expect(readShebangCommand(pipxScript)).resolves.toBe(python);
+    await expect(readShebangCommand(envScript)).resolves.toBeUndefined();
   });
 });

@@ -16,6 +16,8 @@ Filesystem access is explicit by folder path. The default is read-only. Write to
 
 Obsidian is a native connector. The scope is a single vault path. The default is read-only. `append_to_daily` is hidden and rejected unless Obsidian write access is enabled.
 
+MemPalace is a stdio proxy connector. The scope is a single palace path. The default is read-only. Known memory write tools are hidden and rejected unless MemPalace write access is enabled.
+
 Future connectors should follow the same pattern: exact scope first, read-only default where possible, and separate write consent.
 
 ## Token Handling

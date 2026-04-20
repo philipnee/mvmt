@@ -27,6 +27,19 @@ proxy:
     writeAccess: false
     enabled: true
 
+  - name: mempalace
+    source: mempalace
+    transport: stdio
+    command: /Users/you/.local/pipx/venvs/mempalace/bin/python
+    args:
+      - -m
+      - mempalace.mcp_server
+      - --palace
+      - /Users/you/.mempalace/palace
+    env: {}
+    writeAccess: false
+    enabled: true
+
 obsidian:
   path: /Users/you/Documents/ObsidianVault
   enabled: true
@@ -113,7 +126,7 @@ server:
 
 A list of external MCP servers that mvmt proxies. Each entry launches a child process (stdio) or connects to an existing server (http) and exposes its tools through mvmt.
 
-`mvmt init` creates proxy entries when you choose to expose filesystem folders. You can also add entries by hand for other MCP servers.
+`mvmt init` creates proxy entries when you choose to expose filesystem folders or enable MemPalace. You can also add entries by hand for other MCP servers.
 
 | Field | Default | Description |
 | --- | --- | --- |
@@ -130,6 +143,8 @@ A list of external MCP servers that mvmt proxies. Each entry launches a child pr
 Schema rules:
 - `transport: stdio` requires `command`.
 - `transport: http` requires `url`.
+
+MemPalace is represented as a stdio proxy because mvmt launches its MCP server as a child process. `mvmt init` tries to detect the Python executable from the local `mempalace` command shebang and the palace path from `~/.mempalace/config.json`. With `writeAccess: false`, known MemPalace write tools are hidden and rejected.
 
 ### `obsidian`
 
