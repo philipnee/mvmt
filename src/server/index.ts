@@ -25,6 +25,7 @@ type McpSession = {
 export interface HttpServerOptions {
   port: number;
   allowedOrigins?: string[];
+  tokenPath?: string;
 }
 
 export interface StartedHttpServer {
@@ -79,11 +80,12 @@ export async function startStdioServer(router: ToolRouter): Promise<{ close(): P
 
 export async function startHttpServer(router: ToolRouter, options: HttpServerOptions): Promise<StartedHttpServer> {
   const { port } = options;
+  const tokenPath = options.tokenPath;
   const app = express();
   app.use(express.json({ limit: '10mb' }));
   app.use(express.urlencoded({ extended: false, limit: '64kb' }));
 
-  generateSessionToken();
+  generateSessionToken(tokenPath);
   const oauth = new OAuthStore();
   const oauthCleanup = setInterval(() => oauth.cleanup(), 60 * 1000);
   oauthCleanup.unref();
@@ -111,7 +113,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     }
     if (
       oauth.validateAccessToken(req.headers.authorization) ||
-      validateSessionToken(req.headers.authorization)
+      validateSessionToken(req.headers.authorization, tokenPath)
     ) {
       next();
       return;
@@ -186,7 +188,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     }
 
     const sessionTokenRaw = typeof req.body?.session_token === 'string' ? req.body.session_token : '';
-    if (!validateSessionToken(`Bearer ${sessionTokenRaw}`)) {
+    if (!validateSessionToken(`Bearer ${sessionTokenRaw}`, tokenPath)) {
       res
         .status(401)
         .type('text/html')

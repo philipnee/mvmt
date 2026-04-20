@@ -5,33 +5,33 @@ import path from 'path';
 
 export const TOKEN_PATH = path.join(os.homedir(), '.mvmt', '.session-token');
 
-export function generateSessionToken(): string {
+export function generateSessionToken(tokenPath = TOKEN_PATH): string {
   const token = crypto.randomBytes(32).toString('base64url');
 
-  writeSessionToken(token);
+  writeSessionToken(token, tokenPath);
   return token;
 }
 
-export function readSessionToken(): string | undefined {
+export function readSessionToken(tokenPath = TOKEN_PATH): string | undefined {
   try {
-    const token = fs.readFileSync(TOKEN_PATH, 'utf-8').trim();
+    const token = fs.readFileSync(tokenPath, 'utf-8').trim();
     return token.length > 0 ? token : undefined;
   } catch {
     return undefined;
   }
 }
 
-export function validateSessionToken(authHeader: string | undefined): boolean {
-  const expectedToken = readSessionToken();
+export function validateSessionToken(authHeader: string | undefined, tokenPath = TOKEN_PATH): boolean {
+  const expectedToken = readSessionToken(tokenPath);
   if (!expectedToken) return false;
   return validateToken(authHeader, expectedToken);
 }
 
-function writeSessionToken(token: string): void {
-  fs.mkdirSync(path.dirname(TOKEN_PATH), { recursive: true });
-  fs.writeFileSync(TOKEN_PATH, token, { mode: 0o600 });
+function writeSessionToken(token: string, tokenPath: string): void {
+  fs.mkdirSync(path.dirname(tokenPath), { recursive: true });
+  fs.writeFileSync(tokenPath, token, { mode: 0o600 });
   if (process.platform !== 'win32') {
-    fs.chmodSync(TOKEN_PATH, 0o600);
+    fs.chmodSync(tokenPath, 0o600);
   }
 }
 
