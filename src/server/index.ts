@@ -154,6 +154,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       // S256 is strongly preferred. plain is kept for compatibility with
       // simple MCP/OAuth clients during the v0 tunnel flow.
       code_challenge_methods_supported: ['S256', 'plain'],
+      authorization_response_iss_parameter_supported: true,
       token_endpoint_auth_methods_supported: ['none'],
       scopes_supported: ['mcp'],
     });
@@ -230,6 +231,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
 
     const redirect = new URL(params.redirectUri);
     redirect.searchParams.set('code', authCode.code);
+    redirect.searchParams.set('iss', getBaseUrl(req));
     if (params.state) redirect.searchParams.set('state', params.state);
     logHttpRequest(requestLog, req, 302, 'oauth.authorize', undefined, params.clientId);
     res.redirect(302, redirect.toString());

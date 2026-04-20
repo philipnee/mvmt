@@ -92,6 +92,7 @@ describe('startHttpServer lifecycle', () => {
         expect(metadata.registration_endpoint).toBe(`http://127.0.0.1:${server.port}/register`);
         expect(metadata.authorization_endpoint).toBe(`http://127.0.0.1:${server.port}/authorize`);
         expect(metadata.token_endpoint).toBe(`http://127.0.0.1:${server.port}/token`);
+        expect(metadata.authorization_response_iss_parameter_supported).toBe(true);
       }
     } finally {
       await server.close();
@@ -190,8 +191,10 @@ describe('startHttpServer lifecycle', () => {
       expect(authorize.status).toBe(302);
       const location = authorize.headers.get('location');
       expect(location).toBeTruthy();
-      const code = new URL(location!).searchParams.get('code');
+      const redirect = new URL(location!);
+      const code = redirect.searchParams.get('code');
       expect(code).toBeTruthy();
+      expect(redirect.searchParams.get('iss')).toBe(`http://127.0.0.1:${server.port}`);
 
       const token = await fetch(`http://127.0.0.1:${server.port}/token`, {
         method: 'POST',
