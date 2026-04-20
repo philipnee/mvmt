@@ -18,15 +18,12 @@ mvmt runs as a local MCP server between your data sources and your clients. You 
 ## Quick Start
 
 ```bash
-git clone git@github.com:philipnee/mvmt.git
-cd mvmt
-npm install
-npm run build
-npm link
-
+npm install -g mvmt
 mvmt init
-mvmt start -i # -i stands for interactive mode
+mvmt start -i
 ```
+
+For source installs, connector setup, client tokens, and troubleshooting, see the [Setup Guide](docs/setup.md).
 
 ## Status
 
@@ -72,6 +69,7 @@ Not yet enforced: TLS on localhost, per-client tokens, rate limiting, and full w
 
 ## Project Docs
 
+- [Setup guide](docs/setup.md)
 - [Client setup](docs/client-setup.md)
 - [Configuration](docs/configuration.md)
 - [Connectors](docs/connectors.md)
