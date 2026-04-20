@@ -58,6 +58,20 @@ export function formatMcpPublicUrl(publicUrl: string): string {
   return `${publicUrl.replace(/\/+$/, '')}/mcp`;
 }
 
+export function normalizeTunnelBaseUrl(value: string): string {
+  const parsed = new URL(value.trim());
+  parsed.hash = '';
+  parsed.search = '';
+  if (parsed.pathname === '/mcp' || parsed.pathname === '/') {
+    parsed.pathname = '';
+  }
+  return parsed.toString().replace(/\/+$/, '');
+}
+
+export function cloudflareNamedTunnelCommand(configPath: string): string {
+  return `cloudflared tunnel --config ${shellQuote(configPath)} run`;
+}
+
 export function defaultTunnelCommand(provider: Exclude<TunnelConfig['provider'], 'custom'>): string {
   const sshFlags = [
     '-T',
@@ -84,6 +98,9 @@ export function missingTunnelDependency(
   if (tunnel?.provider === 'cloudflare-quick' && !isAvailable('cloudflared')) {
     return 'cloudflared';
   }
+  if (tunnel?.provider === 'custom' && commandStartsWith(tunnel.command, 'cloudflared') && !isAvailable('cloudflared')) {
+    return 'cloudflared';
+  }
   return undefined;
 }
 
@@ -102,6 +119,16 @@ export function extractPublicUrl(text: string): string | undefined {
 function isCommandAvailable(command: string): boolean {
   const result = spawnSync(command, ['--version'], { stdio: 'ignore' });
   return !result.error;
+}
+
+function commandStartsWith(command: string, executable: string): boolean {
+  const trimmed = command.trim();
+  return trimmed === executable || trimmed.startsWith(`${executable} `);
+}
+
+function shellQuote(value: string): string {
+  if (/^[A-Za-z0-9_/:=.,@%+-]+$/.test(value)) return value;
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 function waitForPublicUrl(

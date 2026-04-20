@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  cloudflareNamedTunnelCommand,
   extractPublicUrl,
   formatMcpPublicUrl,
   missingTunnelDependency,
+  normalizeTunnelBaseUrl,
   renderTunnelCommand,
   startTunnel,
 } from '../src/utils/tunnel.js';
@@ -57,12 +59,38 @@ describe('tunnel utilities', () => {
     );
   });
 
+  it('normalizes user-entered public tunnel URLs', () => {
+    expect(normalizeTunnelBaseUrl('https://pnee.gofrieda.org/mcp')).toBe('https://pnee.gofrieda.org');
+    expect(normalizeTunnelBaseUrl('https://pnee.gofrieda.org/')).toBe('https://pnee.gofrieda.org');
+  });
+
+  it('builds a Cloudflare named tunnel command from a config file path', () => {
+    expect(cloudflareNamedTunnelCommand('/Users/me/.cloudflared/mvmt.yml')).toBe(
+      'cloudflared tunnel --config /Users/me/.cloudflared/mvmt.yml run',
+    );
+    expect(cloudflareNamedTunnelCommand('/Users/me/Cloudflare Tunnels/mvmt.yml')).toBe(
+      "cloudflared tunnel --config '/Users/me/Cloudflare Tunnels/mvmt.yml' run",
+    );
+  });
+
   it('reports missing cloudflared for Cloudflare Quick Tunnel configs', () => {
     expect(
       missingTunnelDependency(
         {
           provider: 'cloudflare-quick',
           command: 'cloudflared tunnel --url http://127.0.0.1:{port}',
+        },
+        () => false,
+      ),
+    ).toBe('cloudflared');
+  });
+
+  it('reports missing cloudflared for custom commands that use cloudflared', () => {
+    expect(
+      missingTunnelDependency(
+        {
+          provider: 'custom',
+          command: 'cloudflared tunnel --config /Users/me/.cloudflared/mvmt.yml run',
         },
         () => false,
       ),

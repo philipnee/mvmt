@@ -308,7 +308,7 @@ mvmt is local-first. Cloud clients like claude.ai cannot reach `127.0.0.1` direc
 
 Quick tunnels are temporary, which means you lose the URL when mvmt is shut down. Use a named tunnel or reserved domain to keep the same URL.
 
-Recommended quick tunnel: Cloudflare. It has been more stable than `localhost.run`.
+Recommended quick tunnel: Cloudflare. For stable hostnames such as `pnee.example.com`, use a Cloudflare named tunnel; `mvmt init` and interactive `tunnel config` can save that custom command and public URL.
 
 > [!WARNING]
 > Remote web clients authorize with OAuth/PKCE. Direct HTTP clients use bearer tokens. Auth controls who connects; connector scope controls what they can access.
