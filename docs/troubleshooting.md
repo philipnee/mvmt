@@ -55,3 +55,24 @@ mvmt show
 Then update or restart the client with that token.
 
 If the token file is rejected even though mvmt is running, check that the client actually sent the new token. Existing MCP clients may need to be restarted after rotation.
+
+## Remote client cannot connect and no tool calls appear
+
+OAuth and MCP handshake failures can happen before a tool call exists, so they do not appear in the tool-call audit log. In interactive mode, turn live logs on:
+
+```bash
+mvmt start -i
+> logs on
+```
+
+Then retry the client connection. You should see sanitized events such as:
+
+```text
+oauth.discovery GET /.well-known/oauth-authorization-server/mcp 200
+oauth.register POST /register 201
+oauth.authorize GET /authorize 200
+oauth.token POST /token 400 invalid_grant
+mcp.auth GET /mcp 401 missing_or_invalid_bearer
+```
+
+These live events do not include bearer tokens, session tokens, authorization codes, code challenges, redirect URIs, or full query strings.

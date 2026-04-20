@@ -11,7 +11,7 @@ import { ObsidianConnector } from '../connectors/obsidian.js';
 import { createProxyConnector } from '../connectors/factory.js';
 import { createPlugins } from '../plugins/factory.js';
 import { ToolResultPlugin } from '../plugins/types.js';
-import { startHttpServer, startStdioServer } from '../server/index.js';
+import { HttpRequestLogEntry, startHttpServer, startStdioServer } from '../server/index.js';
 import { ToolRouter } from '../server/router.js';
 import { AUDIT_LOG_PATH, AuditEntry, AuditLogger, createAuditLogger } from '../utils/audit.js';
 import { createLogger, Logger } from '../utils/logger.js';
@@ -89,6 +89,11 @@ export async function start(options: StartOptions = {}): Promise<void> {
     const httpServer = await startHttpServer(router, {
       port,
       allowedOrigins: config.server.allowedOrigins,
+      requestLog: interactiveMode
+        ? (entry) => (audit as InteractiveAuditLogger).recordHttp(entry)
+        : options.verbose
+          ? (entry) => logger.debug(formatHttpRequestEntry(entry))
+          : undefined,
     });
     cleanupTasks.push(() => httpServer.close());
     const tunnelController = new TunnelController(config.server, port, logger);
@@ -326,6 +331,7 @@ function printStartupBanner(
   if (interactiveMode) {
     console.log(`${chalk.bold('Token')}        type ${chalk.cyan('token show')} to print the bearer token`);
     console.log(`${chalk.bold('Tool-call log')} ${AUDIT_LOG_PATH}`);
+    console.log(`${chalk.bold('Live events')}   OAuth, MCP auth, and tool-call attempts`);
     console.log(`\n${chalk.dim('Interactive mode: type "help" for commands.')}`);
   } else {
     console.log(`${chalk.bold('Token')}        ${TOKEN_PATH}`);
@@ -408,6 +414,12 @@ class InteractiveAuditLogger implements AuditLogger {
     this.inner.record(entry);
     if (this.liveLogs && this.writer) {
       this.writer(formatAuditEntry(entry));
+    }
+  }
+
+  recordHttp(entry: HttpRequestLogEntry): void {
+    if (this.liveLogs && this.writer) {
+      this.writer(formatHttpRequestEntry(entry));
     }
   }
 
@@ -595,8 +607,8 @@ function printLogsHelp(): void {
   console.log('');
   console.log(chalk.bold('Logs'));
   console.log('  logs show    show live log state');
-  console.log('  logs on      turn live tool-call logs on');
-  console.log('  logs off     turn live tool-call logs off');
+  console.log('  logs on      turn live request/tool logs on');
+  console.log('  logs off     turn live request/tool logs off');
   console.log('');
 }
 
@@ -866,4 +878,17 @@ function formatAuditEntry(entry: AuditEntry): string {
         )
       : '';
   return `${time} ${status} ${chalk.cyan(entry.connectorId)} ${entry.tool}${args}${redactions} ${chalk.dim(`${entry.durationMs}ms`)}`;
+}
+
+function formatHttpRequestEntry(entry: HttpRequestLogEntry): string {
+  const status =
+    entry.status >= 500
+      ? chalk.red(String(entry.status))
+      : entry.status >= 400
+        ? chalk.yellow(String(entry.status))
+        : chalk.green(String(entry.status));
+  const time = chalk.dim(new Date(entry.ts).toLocaleTimeString());
+  const client = entry.clientId ? chalk.dim(` client=${entry.clientId}`) : '';
+  const detail = entry.detail ? chalk.dim(` ${entry.detail}`) : '';
+  return `${time} ${status} ${chalk.magenta(entry.kind)} ${entry.method} ${entry.path}${client}${detail}`;
 }

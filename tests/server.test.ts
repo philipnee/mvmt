@@ -99,6 +99,68 @@ describe('startHttpServer lifecycle', () => {
     }
   });
 
+  it('emits sanitized request logs for OAuth discovery, registration, and auth failures', async () => {
+    const router = new ToolRouter([new EmptyConnector()]);
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const requestLogs: Array<{ kind: string; path: string; status: number; detail?: string; clientId?: string }> = [];
+    const server = await startHttpServer(router, {
+      port: 0,
+      tokenPath,
+      requestLog: (entry) => requestLogs.push(entry),
+    });
+
+    try {
+      await fetch(`http://127.0.0.1:${server.port}/.well-known/oauth-authorization-server/mcp`);
+      await fetch(`http://127.0.0.1:${server.port}/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          client_id: 'test-client',
+          redirect_uris: ['https://client.example/callback'],
+        }),
+      });
+      await fetch(
+        `http://127.0.0.1:${server.port}/authorize?response_type=code&client_id=test-client&redirect_uri=https%3A%2F%2Fclient.example%2Fcallback&code_challenge=secret-challenge&code_challenge_method=plain`,
+      );
+      await fetch(`http://127.0.0.1:${server.port}/mcp`);
+
+      expect(requestLogs).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'oauth.discovery',
+            path: '/.well-known/oauth-authorization-server/mcp',
+            status: 200,
+          }),
+          expect.objectContaining({
+            kind: 'oauth.register',
+            path: '/register',
+            status: 201,
+            clientId: 'test-client',
+          }),
+          expect.objectContaining({
+            kind: 'oauth.authorize',
+            path: '/authorize',
+            status: 200,
+            clientId: 'test-client',
+          }),
+          expect.objectContaining({
+            kind: 'mcp.auth',
+            path: '/mcp',
+            status: 401,
+            detail: 'missing_or_invalid_bearer',
+          }),
+        ]),
+      );
+      expect(JSON.stringify(requestLogs)).not.toContain('secret-challenge');
+      expect(JSON.stringify(requestLogs)).not.toContain('client.example/callback');
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('returns a close handle that releases the listening port', async () => {
     const router = new ToolRouter([new EmptyConnector()]);
     await router.initialize();

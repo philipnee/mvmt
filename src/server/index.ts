@@ -26,11 +26,22 @@ export interface HttpServerOptions {
   port: number;
   allowedOrigins?: string[];
   tokenPath?: string;
+  requestLog?: (entry: HttpRequestLogEntry) => void;
 }
 
 export interface StartedHttpServer {
   port: number;
   close(): Promise<void>;
+}
+
+export interface HttpRequestLogEntry {
+  ts: string;
+  kind: string;
+  method: string;
+  path: string;
+  status: number;
+  detail?: string;
+  clientId?: string;
 }
 
 export function createMcpServer(router: ToolRouter): Server {
@@ -81,6 +92,7 @@ export async function startStdioServer(router: ToolRouter): Promise<{ close(): P
 export async function startHttpServer(router: ToolRouter, options: HttpServerOptions): Promise<StartedHttpServer> {
   const { port } = options;
   const tokenPath = options.tokenPath;
+  const requestLog = options.requestLog;
   const app = express();
   app.use(express.json({ limit: '10mb' }));
   app.use(express.urlencoded({ extended: false, limit: '64kb' }));
@@ -108,6 +120,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
 
   const authMiddleware: express.RequestHandler = (req, res, next) => {
     if (!originCheck(req)) {
+      logHttpRequest(requestLog, req, 403, authLogKind(req), 'origin_not_allowed');
       res.status(403).json({ error: 'Origin not allowed' });
       return;
     }
@@ -124,11 +137,13 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       'WWW-Authenticate',
       `Bearer realm="mvmt", resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`,
     );
+    logHttpRequest(requestLog, req, 401, authLogKind(req), 'missing_or_invalid_bearer');
     res.status(401).json({ error: 'Invalid or missing bearer token' });
   };
 
   const authorizationServerMetadata = (req: Request, res: Response) => {
     const baseUrl = getBaseUrl(req);
+    logHttpRequest(requestLog, req, 200, 'oauth.discovery');
     res.json({
       issuer: baseUrl,
       authorization_endpoint: `${baseUrl}/authorize`,
@@ -148,6 +163,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
 
   const protectedResourceMetadata = (req: Request, res: Response) => {
     const baseUrl = getBaseUrl(req);
+    logHttpRequest(requestLog, req, 200, 'oauth.resource');
     res.json({
       resource: `${baseUrl}/mcp`,
       authorization_servers: [baseUrl],
@@ -164,6 +180,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       typeof requested.client_id === 'string' && requested.client_id.length > 0
         ? (requested.client_id as string)
         : `mvmt-${Date.now().toString(36)}`;
+    logHttpRequest(requestLog, req, 201, 'oauth.register', undefined, clientId);
     res.status(201).json({
       client_id: clientId,
       token_endpoint_auth_method: 'none',
@@ -176,21 +193,25 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   app.get('/authorize', (req, res) => {
     const params = parseAuthorizeParams(req.query);
     if ('error' in params) {
+      logHttpRequest(requestLog, req, 400, 'oauth.authorize', params.error);
       res.status(400).type('text/plain').send(params.error);
       return;
     }
+    logHttpRequest(requestLog, req, 200, 'oauth.authorize', undefined, params.clientId);
     res.type('text/html').send(renderAuthorizePage(params));
   });
 
   app.post('/authorize', (req, res) => {
     const params = parseAuthorizeParams(req.body ?? {});
     if ('error' in params) {
+      logHttpRequest(requestLog, req, 400, 'oauth.authorize', params.error);
       res.status(400).type('text/plain').send(params.error);
       return;
     }
 
     const sessionTokenRaw = typeof req.body?.session_token === 'string' ? req.body.session_token : '';
     if (!validateSessionToken(`Bearer ${sessionTokenRaw}`, tokenPath)) {
+      logHttpRequest(requestLog, req, 401, 'oauth.authorize', 'invalid_session_token', params.clientId);
       res
         .status(401)
         .type('text/html')
@@ -209,6 +230,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     const redirect = new URL(params.redirectUri);
     redirect.searchParams.set('code', authCode.code);
     if (params.state) redirect.searchParams.set('state', params.state);
+    logHttpRequest(requestLog, req, 302, 'oauth.authorize', undefined, params.clientId);
     res.redirect(302, redirect.toString());
   });
 
@@ -216,6 +238,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     const body = (req.body ?? {}) as Record<string, unknown>;
     const grantType = typeof body.grant_type === 'string' ? body.grant_type : undefined;
     if (grantType !== 'authorization_code') {
+      logHttpRequest(requestLog, req, 400, 'oauth.token', 'unsupported_grant_type');
       res.status(400).json({ error: 'unsupported_grant_type' });
       return;
     }
@@ -226,12 +249,14 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     const codeVerifier = typeof body.code_verifier === 'string' ? body.code_verifier : undefined;
 
     if (!code || !clientId || !redirectUri || !codeVerifier) {
+      logHttpRequest(requestLog, req, 400, 'oauth.token', 'invalid_request', clientId);
       res.status(400).json({ error: 'invalid_request' });
       return;
     }
 
     try {
       const accessToken = oauth.consumeCode({ code, clientId, redirectUri, codeVerifier });
+      logHttpRequest(requestLog, req, 200, 'oauth.token', undefined, clientId);
       res.json({
         access_token: accessToken.token,
         token_type: 'Bearer',
@@ -240,25 +265,30 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       });
     } catch (err) {
       if (err instanceof OAuthError) {
+        logHttpRequest(requestLog, req, 400, 'oauth.token', err.code, clientId);
         res.status(400).json({ error: err.code, error_description: err.message });
         return;
       }
       log.warn(`Token exchange failed: ${err instanceof Error ? err.message : 'unknown'}`);
+      logHttpRequest(requestLog, req, 500, 'oauth.token', 'server_error', clientId);
       res.status(500).json({ error: 'server_error' });
     }
   });
 
   app.post('/mcp', authMiddleware, async (req, res) => {
     await handleMcpRequest(req, res, router, sessions);
+    logHttpRequest(requestLog, req, res.statusCode, 'mcp.request');
   });
 
   app.get('/mcp', authMiddleware, async (req, res) => {
     await handleMcpRequest(req, res, router, sessions);
+    logHttpRequest(requestLog, req, res.statusCode, 'mcp.request');
   });
 
   app.delete('/mcp', authMiddleware, async (req, res) => {
     const sessionId = getSessionId(req);
     if (!sessionId || !sessions.has(sessionId)) {
+      logHttpRequest(requestLog, req, 404, 'mcp.request', 'session_not_found');
       res.status(404).json({ error: 'Session not found' });
       return;
     }
@@ -266,10 +296,12 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     const session = sessions.get(sessionId)!;
     await session.transport.close();
     sessions.delete(sessionId);
+    logHttpRequest(requestLog, req, 200, 'mcp.request');
     res.status(200).json({ ok: true });
   });
 
   app.get('/health', authMiddleware, (_req, res) => {
+    logHttpRequest(requestLog, _req, 200, 'health.request');
     res.json({
       status: 'ok',
       uptime: Math.floor(process.uptime()),
@@ -355,6 +387,32 @@ async function handleMcpRequest(
   if (transport.sessionId) {
     sessions.set(transport.sessionId, { transport, server, lastActivity: Date.now() });
   }
+}
+
+function authLogKind(req: Request): string {
+  if (req.path === '/mcp') return 'mcp.auth';
+  if (req.path === '/health') return 'health.auth';
+  return 'http.auth';
+}
+
+function logHttpRequest(
+  requestLog: ((entry: HttpRequestLogEntry) => void) | undefined,
+  req: Request,
+  status: number,
+  kind: string,
+  detail?: string,
+  clientId?: string,
+): void {
+  if (!requestLog) return;
+  requestLog({
+    ts: new Date().toISOString(),
+    kind,
+    method: req.method,
+    path: req.path,
+    status,
+    ...(detail ? { detail } : {}),
+    ...(clientId ? { clientId } : {}),
+  });
 }
 
 function getSessionId(req: Request): string | undefined {
