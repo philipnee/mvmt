@@ -1,5 +1,7 @@
 import fs from 'node:fs';
 import { createServer } from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { Request } from 'express';
 import {
@@ -10,7 +12,6 @@ import {
 } from '../src/server/index.js';
 import { ToolRouter } from '../src/server/router.js';
 import { Connector } from '../src/connectors/types.js';
-import { TOKEN_PATH } from '../src/utils/token.js';
 
 function req(origin?: string): Request {
   return { headers: origin === undefined ? {} : { origin } } as unknown as Request;
@@ -76,19 +77,23 @@ describe('startHttpServer lifecycle', () => {
   it('returns a close handle that releases the listening port', async () => {
     const router = new ToolRouter([new EmptyConnector()]);
     await router.initialize();
-    const server = await startHttpServer(router, { port: 0 });
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const server = await startHttpServer(router, { port: 0, tokenPath });
+    const port = server.port;
 
     try {
-      const token = fs.readFileSync(TOKEN_PATH, 'utf-8').trim();
-      const response = await fetch(`http://127.0.0.1:${server.port}/health`, {
+      const token = fs.readFileSync(tokenPath, 'utf-8').trim();
+      const response = await fetch(`http://127.0.0.1:${port}/health`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       expect(response.status).toBe(200);
     } finally {
       await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
     }
 
-    await expect(canListenOn(server.port)).resolves.toBe(true);
+    await expect(canListenOn(port)).resolves.toBe(true);
     await expect(server.close()).resolves.toBeUndefined();
   });
 });
