@@ -106,7 +106,7 @@ Configures the tunnel process that mvmt starts alongside the HTTP server when `a
 
 | Field | Required | Description |
 | --- | --- | --- |
-| `provider` | yes | `cloudflare-quick` or `localhost-run`. `mvmt init` offers these two. The schema also accepts `pinggy` and `custom` for manual configs, but those are not part of the guided v0 flow. |
+| `provider` | yes | `cloudflare-quick`, `localhost-run`, or `custom`. Use `custom` for Cloudflare named tunnels and other stable providers. The schema also accepts `pinggy` for manual configs. |
 | `command` | yes | Shell command to start the tunnel. Use `{port}` as a placeholder for the mvmt port. |
 | `url` | no | Set this if your tunnel has a stable URL that it does not print on startup. mvmt uses it to display the public MCP URL. |
 
@@ -120,6 +120,19 @@ server:
   tunnel:
     provider: cloudflare-quick
     command: cloudflared tunnel --url http://127.0.0.1:{port}
+```
+
+Stable Cloudflare named tunnel:
+
+```yaml
+server:
+  port: 4141
+  allowedOrigins: []
+  access: tunnel
+  tunnel:
+    provider: custom
+    command: cloudflared tunnel --config /Users/you/.cloudflared/mvmt.yml run
+    url: https://you.example.com
 ```
 
 ### `proxy`

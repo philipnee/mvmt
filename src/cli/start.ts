@@ -1,7 +1,7 @@
 import readline from 'node:readline';
 import fs from 'fs/promises';
 import path from 'path';
-import { select } from '@inquirer/prompts';
+import { input, select } from '@inquirer/prompts';
 import chalk from 'chalk';
 import yaml from 'yaml';
 import { expandHome, getConfigPath, loadConfig } from '../config/loader.js';
@@ -17,9 +17,11 @@ import { AUDIT_LOG_PATH, AuditEntry, AuditLogger, createAuditLogger } from '../u
 import { createLogger, Logger } from '../utils/logger.js';
 import { generateSessionToken, readSessionToken, TOKEN_PATH } from '../utils/token.js';
 import {
+  cloudflareNamedTunnelCommand,
   defaultTunnelCommand,
   formatMcpPublicUrl,
   missingTunnelDependency,
+  normalizeTunnelBaseUrl,
   RunningTunnel,
   startTunnel,
 } from '../utils/tunnel.js';
@@ -728,18 +730,17 @@ function printTunnelLogs(state: InteractivePromptState): void {
 
 async function promptForTunnelConfig(port: number): Promise<TunnelConfig> {
   while (true) {
-    const provider = await select<'cloudflare-quick' | 'localhost-run'>({
+    const provider = await select<'cloudflare-quick' | 'cloudflare-named' | 'localhost-run' | 'custom'>({
       message: 'Which tunnel?',
       choices: [
-        { name: 'Cloudflare Quick Tunnel (recommended, requires cloudflared)', value: 'cloudflare-quick' },
+        { name: 'Cloudflare Quick Tunnel (temporary URL, requires cloudflared)', value: 'cloudflare-quick' },
+        { name: 'Cloudflare Named Tunnel (stable domain, requires existing cloudflared config)', value: 'cloudflare-named' },
         { name: 'localhost.run (fallback, less stable)', value: 'localhost-run' },
+        { name: 'Custom tunnel command', value: 'custom' },
       ],
     });
 
-    const tunnel: TunnelConfig = {
-      provider,
-      command: defaultTunnelCommand(provider),
-    };
+    const tunnel = await promptForTunnelDetails(provider);
     const missingDependency = missingTunnelDependency(tunnel);
     if (missingDependency) {
       printMissingTunnelDependencyWarning(missingDependency, (line) => console.log(chalk.yellow(line)));
@@ -747,6 +748,72 @@ async function promptForTunnelConfig(port: number): Promise<TunnelConfig> {
       continue;
     }
     return tunnel;
+  }
+}
+
+async function promptForTunnelDetails(
+  provider: 'cloudflare-quick' | 'cloudflare-named' | 'localhost-run' | 'custom',
+): Promise<TunnelConfig> {
+  if (provider === 'cloudflare-named') {
+    console.log(chalk.dim('Use this after creating a Cloudflare named tunnel and DNS route.'));
+    const configPath = await input({
+      message: 'Cloudflared config file',
+      default: '~/.cloudflared/config.yml',
+      validate: async (value) => {
+        const resolved = expandHome(value.trim());
+        return (await pathExists(resolved)) ? true : `File not found: ${resolved}`;
+      },
+    });
+    const publicUrl = await input({
+      message: 'Public base URL',
+      default: 'https://example.com',
+      validate: validatePublicUrlInput,
+    });
+    return {
+      provider: 'custom',
+      command: cloudflareNamedTunnelCommand(expandHome(configPath.trim())),
+      url: normalizeTunnelBaseUrl(publicUrl),
+    };
+  }
+
+  if (provider === 'custom') {
+    const command = await input({
+      message: 'Tunnel command (use {port} where mvmt should insert the local port)',
+      validate: (value) => (value.trim().length > 0 ? true : 'Enter a tunnel command'),
+    });
+    const publicUrl = await input({
+      message: 'Public base URL (optional, recommended if the command does not print one)',
+      default: '',
+      validate: (value) => (value.trim().length === 0 ? true : validatePublicUrlInput(value)),
+    });
+    return {
+      provider: 'custom',
+      command: command.trim(),
+      ...(publicUrl.trim().length > 0 ? { url: normalizeTunnelBaseUrl(publicUrl) } : {}),
+    };
+  }
+
+  return {
+    provider,
+    command: defaultTunnelCommand(provider),
+  };
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function validatePublicUrlInput(value: string): true | string {
+  try {
+    const url = new URL(normalizeTunnelBaseUrl(value));
+    return url.protocol === 'https:' ? true : 'Enter an https:// URL';
+  } catch {
+    return 'Enter a valid public URL, for example https://pnee.gofrieda.org';
   }
 }
 

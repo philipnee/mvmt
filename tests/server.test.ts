@@ -74,6 +74,31 @@ describe('SSE request helpers', () => {
 });
 
 describe('startHttpServer lifecycle', () => {
+  it('serves OAuth authorization metadata for the root and MCP resource path', async () => {
+    const router = new ToolRouter([new EmptyConnector()]);
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const server = await startHttpServer(router, { port: 0, tokenPath });
+
+    try {
+      for (const pathSuffix of [
+        '/.well-known/oauth-authorization-server',
+        '/.well-known/oauth-authorization-server/mcp',
+      ]) {
+        const response = await fetch(`http://127.0.0.1:${server.port}${pathSuffix}`);
+        expect(response.status).toBe(200);
+        const metadata = await response.json();
+        expect(metadata.registration_endpoint).toBe(`http://127.0.0.1:${server.port}/register`);
+        expect(metadata.authorization_endpoint).toBe(`http://127.0.0.1:${server.port}/authorize`);
+        expect(metadata.token_endpoint).toBe(`http://127.0.0.1:${server.port}/token`);
+      }
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('returns a close handle that releases the listening port', async () => {
     const router = new ToolRouter([new EmptyConnector()]);
     await router.initialize();

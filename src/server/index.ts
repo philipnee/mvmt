@@ -127,7 +127,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     res.status(401).json({ error: 'Invalid or missing bearer token' });
   };
 
-  app.get('/.well-known/oauth-authorization-server', (req, res) => {
+  const authorizationServerMetadata = (req: Request, res: Response) => {
     const baseUrl = getBaseUrl(req);
     res.json({
       issuer: baseUrl,
@@ -142,7 +142,9 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       token_endpoint_auth_methods_supported: ['none'],
       scopes_supported: ['mcp'],
     });
-  });
+  };
+  app.get('/.well-known/oauth-authorization-server', authorizationServerMetadata);
+  app.get('/.well-known/oauth-authorization-server/mcp', authorizationServerMetadata);
 
   const protectedResourceMetadata = (req: Request, res: Response) => {
     const baseUrl = getBaseUrl(req);
