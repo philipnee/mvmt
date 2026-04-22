@@ -65,7 +65,7 @@ export class StdioProxyConnector implements Connector {
         content: [
           {
             type: 'text',
-            text: `Error: write access is disabled for tool "${name}". Set writeAccess: true for proxy "${this.displayName}" in ~/.mvmt/config.yaml or re-run mvmt init to enable writes.`,
+            text: `Error: write access is disabled for tool "${name}". Set writeAccess: true for proxy "${this.displayName}" in ~/.mvmt/config.yaml or re-run mvmt config setup to enable writes.`,
           },
         ],
         isError: true,

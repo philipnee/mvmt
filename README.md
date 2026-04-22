@@ -19,8 +19,15 @@ mvmt runs as a local MCP server between your data sources and your clients. You 
 
 ```bash
 npm install -g mvmt
-mvmt init
-mvmt start -i
+mvmt serve -i
+```
+
+On first run, `mvmt serve` walks you through folders, connectors, plugins, and local-only vs tunnel access, then starts mvmt in the foreground.
+
+For a one-off read-only folder without touching your saved config:
+
+```bash
+mvmt serve --path ~/Documents -i
 ```
 
 For source installs, connector setup, client tokens, and troubleshooting, see the [Setup Guide](docs/setup.md).
@@ -35,7 +42,7 @@ For source installs, connector setup, client tokens, and troubleshooting, see th
 | Local Streamable HTTP | supported |
 | Stdio mode | supported |
 | Interactive start mode | supported |
-| Built-in pattern-based redactor plugin | supported, opt-in during `mvmt init` |
+| Built-in pattern-based redactor plugin | supported, opt-in during `mvmt config setup` or first `mvmt serve` |
 | Tunnel mode | supported for personal remote access; quick tunnel URLs are temporary |
 | Managed remote relay / per-client remote access | not in v0 |
 | HTTP proxy write gates | incomplete; advanced/manual config only |
@@ -45,7 +52,7 @@ For source installs, connector setup, client tokens, and troubleshooting, see th
 | Client | Transport | Status | Auth method | Known issues |
 | --- | --- | --- | --- | --- |
 | Claude Desktop | stdio | supported | process launch, no HTTP bearer token | Runs its own mvmt process per config |
-| Claude Code | Streamable HTTP | supported | bearer token header | Token must be refreshed after `mvmt start` or `mvmt rotate` |
+| Claude Code | Streamable HTTP | supported | bearer token header | Refresh only after `mvmt token rotate` |
 | Codex CLI | Streamable HTTP | supported | bearer token env var | Start Codex from a shell where the token env var is set |
 | Cursor | Streamable HTTP | expected | bearer token header | Client behavior may vary by Cursor MCP version |
 | VS Code / Copilot | Streamable HTTP | expected | bearer token header | Client behavior may vary by MCP extension/version |
@@ -58,7 +65,7 @@ Every file and data access in mvmt is gated. There is no open mode.
 
 - HTTP mode binds to `127.0.0.1`, not `0.0.0.0`.
 - HTTP requests to `/mcp` and `/health` require a bearer token.
-- Tokens are generated fresh on `mvmt start` and stored at `~/.mvmt/.session-token`.
+- The bearer token is stored at `~/.mvmt/.session-token`, reused across restarts, and rotated explicitly with `mvmt token rotate`.
 - Browser requests from non-localhost origins are rejected unless allowlisted.
 - Write access is opt-in per connector.
 - Stdio child processes receive a scrubbed environment.
@@ -89,7 +96,7 @@ Not yet enforced: TLS on localhost, per-client tokens, rate limiting, and full w
 Most MCP clients let you add servers through their settings UI. You need two things:
 
 - **URL**: `http://127.0.0.1:4141/mcp`
-- **Authorization header**: `Bearer <token from mvmt show>`
+- **Authorization header**: `Bearer <token from mvmt token>`
 
 Claude Desktop is the exception — it uses stdio mode and launches mvmt directly, so no token is needed.
 
@@ -97,14 +104,14 @@ See [Client Setup](docs/client-setup.md) for step-by-step instructions for Claud
 
 ## Configuration
 
-`mvmt init` creates `~/.mvmt/config.yaml` with everything you selected during setup. The config controls four things:
+`mvmt config setup` writes `~/.mvmt/config.yaml`, and the first `mvmt serve` run creates it automatically if it does not exist yet. The config controls four things:
 
 - **`server`** — port, allowed origins, and whether to start a tunnel for public access.
 - **`proxy`** — external MCP servers that mvmt proxies (e.g. filesystem and MemPalace).
 - **`obsidian`** — the native Obsidian vault connector.
 - **`plugins`** — security plugins that inspect tool results before they reach clients (e.g. the pattern-based redactor).
 
-You should not need to write this file by hand. To regenerate it, run `mvmt init` again. To validate it, run `mvmt doctor`.
+You should not need to write this file by hand. To re-run setup, use `mvmt config setup`. To inspect it, run `mvmt config`. To validate it, run `mvmt doctor`.
 
 See [Configuration](docs/configuration.md) for the full schema reference, field descriptions, and editing instructions.
 
@@ -112,13 +119,19 @@ See [Configuration](docs/configuration.md) for the full schema reference, field 
 
 | Command | Description |
 | --- | --- |
-| `mvmt init` | Interactive setup wizard — choose folders, connectors, plugins, and access mode |
-| `mvmt start` | Start the MCP server (HTTP by default, `--stdio` for direct client launch, `-i` for interactive) |
-| `mvmt connectors list` | Show supported connector setup status |
-| `mvmt connectors add mempalace` | Add or replace the MemPalace connector setup |
-| `mvmt show` | Print the current HTTP bearer token |
-| `mvmt rotate` | Generate a new bearer token and print it |
+| `mvmt serve` | Configure mvmt if needed, then start the MCP server |
 | `mvmt doctor` | Validate config and check connector health |
+| `mvmt config` | Show the saved mvmt config |
+| `mvmt config setup` | Run guided setup and save mvmt config |
+| `mvmt token` | Show the current bearer token and age |
+| `mvmt token rotate` | Generate a new bearer token and print it |
+| `mvmt tunnel` | Show tunnel status |
+| `mvmt tunnel config` | Choose a different tunnel and save it to config |
+| `mvmt tunnel start` | Start the configured tunnel for the running mvmt process |
+| `mvmt tunnel refresh` | Restart the configured tunnel and print the new URL |
+| `mvmt tunnel stop` | Stop public tunnel exposure without stopping mvmt |
+| `mvmt tunnel logs` | Show recent tunnel output |
+| `mvmt tunnel logs stream` | Stream live tunnel output |
 | `mvmt --version` | Print version and check for updates |
 
 ### `mvmt --version`
@@ -132,44 +145,17 @@ mvmt --version --no-update-check
 
 Update checks never install anything. They are skipped when `MVMT_NO_UPDATE_CHECK=1` or `CI` is set. Notices are written to stderr so JSON stdout stays usable.
 
-### `mvmt init`
-
-Interactive setup:
-
-1. Checks available connectors: filesystem folder access, Obsidian, and MemPalace.
-2. Asks whether to expose filesystem folders. Default: no filesystem access.
-3. If filesystem access is enabled, asks for exact folders and whether writes are allowed. Default: read-only.
-4. Detects Obsidian vaults in common locations, including iCloud Obsidian on macOS.
-5. Asks whether Obsidian writes should be enabled. Default: read-only.
-6. Detects MemPalace from your local install/config when possible, then asks whether memory writes should be enabled. Default: read-only.
-7. Asks which built-in security plugins to enable. Currently: pattern-based redactor.
-8. If pattern redaction is enabled, asks for mode and default patterns.
-9. Asks whether mvmt should be local-only or start a tunnel for a public URL.
-10. Writes `~/.mvmt/config.yaml` with mode `600` on non-Windows systems.
-
-Running `mvmt init` against an existing config prompts before overwriting.
-
-### `mvmt connectors`
-
-Manage supported local connector setups without regenerating the whole config.
-
-```bash
-mvmt connectors list
-mvmt connectors add mempalace
-```
-
-`connectors add mempalace` detects your local MemPalace command and palace path when possible, asks whether memory writes should be enabled, updates `~/.mvmt/config.yaml`, and tells you to restart mvmt. It does not install MemPalace or manage Python versions.
-
-### `mvmt start`
+### `mvmt serve`
 
 Starts the hub.
 
 ```bash
-mvmt start
-mvmt start -i
-mvmt start --port 4142
-mvmt start --config ~/.mvmt/config.yaml
-mvmt start --stdio
+mvmt serve
+mvmt serve -i
+mvmt serve --path ~/Documents
+mvmt serve --port 4142
+mvmt serve --config ~/.mvmt/config.yaml
+mvmt serve --stdio
 ```
 
 Options:
@@ -178,14 +164,21 @@ Options:
 | --- | --- |
 | `--port <n>` | Override `config.server.port` |
 | `--config <p>` | Use a specific config file |
+| `--path <dir>` | Temporarily expose a filesystem folder as read-only for this run only (repeatable) |
 | `--stdio` | Serve MCP over stdio instead of HTTP |
 | `--interactive`, `-i` | Start an interactive control prompt |
 | `--verbose` | Print more startup details |
 
+Behavior:
+
+- If no saved config exists, `mvmt serve` runs guided setup first, saves config, then starts.
+- If a saved config exists, `mvmt serve` starts immediately.
+- `mvmt serve --path ...` uses a temporary read-only filesystem config for that run only and does not modify the saved config.
+
 HTTP mode:
 
 - Binds to `127.0.0.1`.
-- Generates a fresh bearer token every launch.
+- Reuses the existing bearer token if one already exists.
 - Writes the token to `~/.mvmt/.session-token` with mode `600`.
 - Requires the token for `/mcp` and `/health`.
 
@@ -197,31 +190,43 @@ Stdio mode:
 
 Interactive mode:
 
-- Run `mvmt start -i`.
+- Run `mvmt serve -i`.
 - Keeps mvmt in the foreground with a prompt at the bottom.
-- Uses grouped commands for token, tunnel, and logs.
+- Uses the same grouped commands as the top-level CLI for config, token, and tunnel operations.
 - Live logs show connector, tool name, argument keys, duration, and error state without printing full argument values.
 
 Interactive command shape:
 
 ```text
+> config
+> config setup
+
 > token
-> token show
 > token rotate
 
 > tunnel
-> tunnel show
 > tunnel config
 > tunnel start
 > tunnel refresh
 > tunnel stop
 > tunnel logs
+> tunnel logs stream
 
 > logs
-> logs show
 > logs on
 > logs off
 ```
+
+### `mvmt config`
+
+Shows the saved mvmt config in a readable summary.
+
+```bash
+mvmt config
+mvmt config --config ~/.mvmt/config.yaml
+```
+
+Use `mvmt config setup` to rerun guided setup and overwrite the saved config explicitly.
 
 ### `mvmt doctor`
 
@@ -246,18 +251,36 @@ Checks include:
 
 `mvmt doctor` exits with status `0` when config is valid and all enabled connectors are healthy. It exits with status `1` when config is missing, invalid, or any enabled connector fails health checks.
 
-### `mvmt show` / `mvmt rotate`
+### `mvmt token` / `mvmt token rotate`
 
 Manages the HTTP bearer token used by `/mcp` and `/health`.
 
 ```bash
-mvmt show
-mvmt rotate
+mvmt token
+mvmt token rotate
 ```
 
-`mvmt show` prints the current token without regenerating it. `mvmt rotate` writes a new token to `~/.mvmt/.session-token` and prints it. Running HTTP servers validate against the token file on each request, so rotation takes effect immediately. Any connected client that stored the old token must be updated.
+`mvmt token` prints the current token, age, and file path. `mvmt token rotate` writes a new token to `~/.mvmt/.session-token` and prints it. Running HTTP servers validate against the token file on each request, so rotation takes effect immediately. Any connected client that stored the old token must be updated.
 
-`mvmt token show` and `mvmt token rotate` remain hidden compatibility aliases.
+Normal `mvmt serve` restarts reuse the same root token. OAuth access tokens minted from that root token remain valid across restart until they expire or you rotate the token.
+
+`mvmt token show` remains a hidden compatibility alias for raw token output.
+
+### `mvmt tunnel`
+
+Shows tunnel config and live runtime status.
+
+```bash
+mvmt tunnel
+mvmt tunnel config
+mvmt tunnel start
+mvmt tunnel refresh
+mvmt tunnel stop
+mvmt tunnel logs
+mvmt tunnel logs stream
+```
+
+`mvmt tunnel config` updates the saved tunnel config and, if mvmt is already running, applies it immediately. `mvmt tunnel logs` prints recent buffered tunnel output. `mvmt tunnel logs stream` follows live tunnel output from the running mvmt process.
 
 ## Connectors
 
@@ -269,7 +292,7 @@ mvmt currently supports three connector setups. All are read-only by default wit
 
 **Filesystem** — proxies the official `@modelcontextprotocol/server-filesystem` MCP server as a stdio child process. When `writeAccess: false`, mvmt hides write tools from `listTools` and rejects them at `callTool`.
 
-**MemPalace** — proxies the local MemPalace MCP server as a stdio child process. `mvmt init` tries to detect your `mempalace` command and palace path. When `writeAccess: false`, mvmt hides known MemPalace write tools such as drawer creation, tunnel deletion, KG mutation, hook settings, and diary writes.
+**MemPalace** — proxies the local MemPalace MCP server as a stdio child process. Guided setup tries to detect your `mempalace` command and palace path. When `writeAccess: false`, mvmt hides known MemPalace write tools such as drawer creation, tunnel deletion, KG mutation, hook settings, and diary writes.
 
 Tools from all connectors are prefixed with the connector ID (e.g. `obsidian__search_notes`, `proxy_filesystem__read_file`, `proxy_mempalace__mempalace_search`) to avoid name collisions.
 
@@ -291,7 +314,7 @@ To add a plugin in v0, implement the `ToolResultPlugin` interface, add config sc
 Every file and data access in mvmt is gated. There is no open mode.
 
 - **Localhost bind** — HTTP listens on `127.0.0.1` only.
-- **Bearer token** — 256-bit, generated on each start, constant-time validation, rotatable without restart.
+- **Bearer token** — 256-bit, stored at `~/.mvmt/.session-token`, reused across restart, constant-time validation, rotatable without restart.
 - **Origin allowlist** — browser requests from non-localhost origins are rejected unless explicitly allowed.
 - **Environment scrubbing** — stdio child processes receive only an allowlist of env vars.
 - **Write gates** — read-only by default per connector; write tools are hidden and rejected unless enabled.
@@ -304,11 +327,11 @@ See [Security Memo](docs/security-memo.md) for design notes and [Audit Log](docs
 
 ## Remote Access
 
-mvmt is local-first. Cloud clients like claude.ai cannot reach `127.0.0.1` directly. `mvmt init` can configure a tunnel that gives you a public HTTPS URL.
+mvmt is local-first. Cloud clients like claude.ai cannot reach `127.0.0.1` directly. `mvmt config setup` and `mvmt tunnel config` can configure a tunnel that gives you a public HTTPS URL.
 
 Quick tunnels are temporary, which means you lose the URL when mvmt is shut down. Use a named tunnel or reserved domain to keep the same URL.
 
-Recommended quick tunnel: Cloudflare. For stable hostnames such as `pnee.example.com`, use a Cloudflare named tunnel; `mvmt init` and interactive `tunnel config` can save that custom command and public URL.
+Recommended quick tunnel: Cloudflare. For stable hostnames such as `pnee.example.com`, use a Cloudflare named tunnel; `mvmt tunnel config` and interactive `tunnel config` can save that custom command and public URL.
 
 > [!WARNING]
 > Remote web clients authorize with OAuth/PKCE. Direct HTTP clients use bearer tokens. Auth controls who connects; connector scope controls what they can access.

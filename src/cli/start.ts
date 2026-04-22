@@ -1,34 +1,36 @@
 import readline from 'node:readline';
 import fs from 'fs/promises';
 import path from 'path';
-import { input, select } from '@inquirer/prompts';
 import chalk from 'chalk';
 import yaml from 'yaml';
-import { expandHome, getConfigPath, loadConfig } from '../config/loader.js';
+import { configExists, loadConfig, resolveConfigPath } from '../config/loader.js';
 import { MvmtConfig, TunnelConfig } from '../config/schema.js';
 import { Connector } from '../connectors/types.js';
 import { ObsidianConnector } from '../connectors/obsidian.js';
 import { createProxyConnector } from '../connectors/factory.js';
+import { createTemporaryFilesystemConfig, printConfigSummary, readFilesystemPaths } from './config.js';
+import { setupConfig } from './init.js';
 import { createPlugins } from '../plugins/factory.js';
 import { ToolResultPlugin } from '../plugins/types.js';
 import { HttpRequestLogEntry, startHttpServer, startStdioServer } from '../server/index.js';
 import { ToolRouter } from '../server/router.js';
 import { AUDIT_LOG_PATH, AuditEntry, AuditLogger, createAuditLogger } from '../utils/audit.js';
+import { getControlSocketPath, startJsonControlServer } from '../utils/control.js';
 import { createLogger, Logger } from '../utils/logger.js';
-import { generateSessionToken, readSessionToken, TOKEN_PATH } from '../utils/token.js';
+import { generateSessionToken, TOKEN_PATH } from '../utils/token.js';
 import {
-  cloudflareNamedTunnelCommand,
-  defaultTunnelCommand,
   formatMcpPublicUrl,
   missingTunnelDependency,
-  normalizeTunnelBaseUrl,
   RunningTunnel,
   startTunnel,
 } from '../utils/tunnel.js';
+import { printTokenSummary, readTokenSummary } from './token.js';
+import { printMissingTunnelDependencyWarning, promptForTunnelConfig } from './tunnel.js';
 
 export interface StartOptions {
   port?: string;
   config?: string;
+  path?: string[];
   stdio?: boolean;
   verbose?: boolean;
   interactive?: boolean;
@@ -51,7 +53,43 @@ export async function start(options: StartOptions = {}): Promise<void> {
     process.exit(1);
   }
 
-  const configPath = options.config ? expandHome(options.config) : getConfigPath();
+  const savedConfigPath = resolveConfigPath(options.config);
+  let configPath = savedConfigPath;
+  const requestedPaths = options.path ?? [];
+  const temporaryCleanupTasks: CleanupTask[] = [];
+  if (requestedPaths.length > 0) {
+    try {
+      const temporaryConfig = await createTemporaryFilesystemConfig({
+        paths: requestedPaths,
+        port: parsePort(options.port),
+      });
+      configPath = temporaryConfig.configPath;
+      temporaryCleanupTasks.push(temporaryConfig.cleanup);
+      logger.info('Using a temporary read-only filesystem config for this run only.');
+      logger.info(`Saved config at ${savedConfigPath} was not modified.`);
+      logger.info('Serving folders:');
+      for (const folder of readFilesystemPaths(temporaryConfig.config.proxy[0])) {
+        logger.info(`  ${folder}`);
+      }
+    } catch (err) {
+      logger.error(err instanceof Error ? err.message : 'Failed to update filesystem access.');
+      process.exit(1);
+    }
+  }
+
+  if (!configExists(configPath)) {
+    if (stdioMode) {
+      logger.error(`Config not found at ${configPath}`);
+      logger.error('Run `mvmt config setup` or `mvmt serve --path <dir>` first.');
+      process.exit(1);
+    }
+
+    await setupConfig({
+      config: configPath,
+      promptOnOverwrite: false,
+      printNextStep: false,
+    });
+  }
   const config = loadConfig(configPath);
   const port = parsePort(options.port) ?? config.server.port;
   const loaded = await initializeConnectors(config, stdioMode, logger);
@@ -62,7 +100,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
 
   if (loaded.length === 0) {
     emit('No connectors loaded. Nothing to serve.', stdioMode, logger, 'error');
-    emit('Check your config or run `mvmt init`.', stdioMode, logger, 'error');
+    emit('Check your config with `mvmt config` or rerun `mvmt config setup`.', stdioMode, logger, 'error');
     process.exit(1);
   }
 
@@ -76,7 +114,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
   // Tasks are appended as resources are acquired so only initialized
   // resources are cleaned up. See registerShutdown for the 5-second
   // force-exit timeout that guards against hung cleanup.
-  const cleanupTasks: CleanupTask[] = loaded.map((entry) => () => entry.connector.shutdown());
+  const cleanupTasks: CleanupTask[] = [...temporaryCleanupTasks, ...loaded.map((entry) => () => entry.connector.shutdown())];
   const shutdown = registerShutdown(cleanupTasks, stdioMode, logger);
 
   if (stdioMode) {
@@ -99,6 +137,62 @@ export async function start(options: StartOptions = {}): Promise<void> {
     const tunnelController = new TunnelController(config.server, port, logger);
     cleanupTasks.push(() => tunnelController.stop());
     const tunnel = await tunnelController.start();
+    const controlServer = await startJsonControlServer(getControlSocketPath(configPath), async (message, connection) => {
+      switch (message?.type) {
+        case 'tunnel.status':
+          connection.send({ ok: true, result: tunnelController.snapshot() });
+          connection.close();
+          return;
+        case 'tunnel.start':
+          await tunnelController.start();
+          connection.send({ ok: true, result: tunnelController.snapshot() });
+          connection.close();
+          return;
+        case 'tunnel.refresh':
+          await tunnelController.refresh();
+          connection.send({ ok: true, result: tunnelController.snapshot() });
+          connection.close();
+          return;
+        case 'tunnel.stop':
+          await tunnelController.stop();
+          connection.send({ ok: true, result: tunnelController.snapshot() });
+          connection.close();
+          return;
+        case 'tunnel.logs':
+          connection.send({ ok: true, result: tunnelController.snapshot() });
+          connection.close();
+          return;
+        case 'tunnel.config': {
+          if (!message.tunnel || typeof message.tunnel !== 'object') {
+            connection.send({ ok: false, error: 'Missing tunnel config' });
+            connection.close();
+            return;
+          }
+          const tunnelConfig = message.tunnel as TunnelConfig;
+          config.server.access = 'tunnel';
+          config.server.tunnel = tunnelConfig;
+          await saveRuntimeConfig(configPath, config);
+          await tunnelController.stop();
+          tunnelController.configure(tunnelConfig);
+          await tunnelController.start();
+          connection.send({ ok: true, result: tunnelController.snapshot() });
+          connection.close();
+          return;
+        }
+        case 'tunnel.logs.stream': {
+          connection.send({ kind: 'ready', logs: tunnelController.recentLogs() });
+          const unsubscribe = tunnelController.subscribeLogs((line) => {
+            connection.send({ kind: 'log', line });
+          });
+          connection.onClose(unsubscribe);
+          return;
+        }
+        default:
+          connection.send({ ok: false, error: `Unknown control request: ${String(message?.type ?? '(missing)')}` });
+          connection.close();
+      }
+    });
+    cleanupTasks.push(() => controlServer.close());
     printStartupBanner(port, loaded, plugins, router.getAllTools().length, tunnel?.url, interactiveMode);
     if (interactiveMode) {
       startInteractivePrompt({
@@ -117,7 +211,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
     const message = err instanceof Error ? err.message : 'Unknown error';
     if (message.includes('EADDRINUSE')) {
       logger.error(`Port ${port} is already in use.`);
-      logger.error(`Try: mvmt start --port ${port + 1}`);
+      logger.error(`Try: mvmt serve --port ${port + 1}`);
     } else {
       logger.error(`Failed to start server: ${message}`);
     }
@@ -131,6 +225,8 @@ export async function start(options: StartOptions = {}): Promise<void> {
 class TunnelController {
   private current: RunningTunnel | undefined;
   private readonly logs: string[] = [];
+  private readonly listeners = new Set<(line: string) => void>();
+  private lastError: string | undefined;
 
   constructor(
     private readonly serverConfig: MvmtConfig['server'],
@@ -158,10 +254,36 @@ class TunnelController {
     this.serverConfig.access = 'tunnel';
     this.serverConfig.tunnel = tunnel;
     this.logs.length = 0;
+    this.lastError = undefined;
   }
 
   recentLogs(): string[] {
     return [...this.logs];
+  }
+
+  snapshot(): {
+    configured: boolean;
+    running: boolean;
+    command?: string;
+    publicUrl?: string;
+    recentLogs: string[];
+    lastError?: string;
+  } {
+    return {
+      configured: this.configured,
+      running: this.running,
+      command: this.command,
+      publicUrl: this.publicUrl,
+      recentLogs: this.recentLogs(),
+      lastError: this.lastError,
+    };
+  }
+
+  subscribeLogs(listener: (line: string) => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
   }
 
   async start(): Promise<RunningTunnel | undefined> {
@@ -177,6 +299,7 @@ class TunnelController {
     const missingDependency = missingTunnelDependency(this.serverConfig.tunnel);
     if (missingDependency) {
       this.addLog(`${missingDependency}: command not found`);
+      this.lastError = `${missingDependency}: command not found`;
       printMissingTunnelDependencyWarning(missingDependency, (line) => this.logger.warn(line));
       return undefined;
     }
@@ -188,6 +311,7 @@ class TunnelController {
       });
       tunnel.url = tunnel.url || this.serverConfig.tunnel.url;
       this.current = tunnel;
+      this.lastError = undefined;
       if (!tunnel.url) {
         this.logger.warn('Tunnel process started, but mvmt could not detect a public URL from its output yet.');
         return tunnel;
@@ -195,7 +319,8 @@ class TunnelController {
       this.logger.info(`Tunnel URL: ${formatMcpPublicUrl(tunnel.url)}`);
       return tunnel;
     } catch (err) {
-      this.logger.warn(`Tunnel failed to start: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      this.lastError = err instanceof Error ? err.message : 'Unknown error';
+      this.logger.warn(`Tunnel failed to start: ${this.lastError}`);
       this.logger.warn('mvmt is still running locally.');
       return undefined;
     }
@@ -216,6 +341,9 @@ class TunnelController {
   private addLog(line: string): void {
     this.logs.push(line);
     if (this.logs.length > 100) this.logs.shift();
+    for (const listener of this.listeners) {
+      listener(line);
+    }
   }
 }
 
@@ -329,7 +457,7 @@ function printStartupBanner(
     console.log('');
   }
   if (interactiveMode) {
-    console.log(`${chalk.bold('Token')}        type ${chalk.cyan('token show')} to print the bearer token`);
+    console.log(`${chalk.bold('Token')}        type ${chalk.cyan('token')} to print the bearer token`);
     console.log(`${chalk.bold('Tool-call log')} ${AUDIT_LOG_PATH}`);
     console.log(`${chalk.bold('Live events')}   OAuth, MCP auth, and tool-call attempts`);
     console.log(`\n${chalk.dim('Interactive mode: type "help" for commands.')}`);
@@ -337,11 +465,11 @@ function printStartupBanner(
     console.log(`${chalk.bold('Token')}        ${TOKEN_PATH}`);
     console.log(`${chalk.bold('Tool-call log')} ${AUDIT_LOG_PATH}`);
     console.log('\nRead token with:');
-    console.log(`  ${chalk.cyan('mvmt show')}\n`);
+    console.log(`  ${chalk.cyan('mvmt token')}\n`);
     console.log('Connect from Claude Desktop:');
-    console.log(`  { "mcpServers": { "mvmt": { "url": "http://127.0.0.1:${port}/mcp", "headers": { "Authorization": "Bearer <token from mvmt show>" } } } }`);
+    console.log(`  { "mcpServers": { "mvmt": { "url": "http://127.0.0.1:${port}/mcp", "headers": { "Authorization": "Bearer <token from mvmt token>" } } } }`);
     console.log('\nOr via Claude Code:');
-    console.log(`  ${chalk.cyan(`claude mcp add --transport http --header "Authorization: Bearer $(mvmt show)" mvmt http://127.0.0.1:${port}/mcp`)}\n`);
+    console.log(`  ${chalk.cyan(`claude mcp add --transport http --header "Authorization: Bearer <token from mvmt token>" mvmt http://127.0.0.1:${port}/mcp`)}\n`);
   }
 }
 
@@ -509,19 +637,24 @@ async function handleInteractiveCommand(
   switch (command) {
     case '':
       return;
+    case 'config':
+      printConfigSummary(state.config, state.configPath, {
+        tunnel: state.tunnel.snapshot(),
+      });
+      return;
+    case 'config setup':
+      console.log(chalk.dim('Run `mvmt config setup` in another shell, then restart `mvmt serve` to apply the new config.'));
+      return;
     case 'token':
-      printTokenHelp();
+      printTokenSummary(readTokenSummary());
       return;
     case 'token show':
-      printCurrentToken();
+      printCurrentTokenValue();
       return;
     case 'token rotate':
       printRotatedToken();
       return;
     case 'logs':
-      printLogsHelp();
-      return;
-    case 'logs show':
       printLiveLogState(state);
       return;
     case 'logs on':
@@ -540,9 +673,6 @@ async function handleInteractiveCommand(
       printInteractiveUrls(state);
       return;
     case 'tunnel':
-      printTunnelHelp();
-      return;
-    case 'tunnel show':
       printTunnelStatus(state);
       return;
     case 'tunnel config':
@@ -560,6 +690,9 @@ async function handleInteractiveCommand(
     case 'tunnel logs':
       printTunnelLogs(state);
       return;
+    case 'tunnel logs stream':
+      console.log(chalk.dim('Use `mvmt tunnel logs stream` from another shell to follow tunnel output continuously.'));
+      return;
     case 'connectors':
       printConnectorSummary(state.loaded, state.totalTools);
       return;
@@ -572,9 +705,19 @@ async function handleInteractiveCommand(
 function printInteractiveHelp(): void {
   console.log('');
   console.log(chalk.bold('Commands'));
-  console.log('  token       show token commands');
-  console.log('  tunnel      show tunnel commands');
-  console.log('  logs        show live log commands');
+  console.log('  config              show saved mvmt config');
+  console.log('  config setup        rerun guided setup in another shell');
+  console.log('  token               show current bearer token and age');
+  console.log('  token rotate        generate and print a new bearer token');
+  console.log('  tunnel              show tunnel status');
+  console.log('  tunnel config       choose a different tunnel');
+  console.log('  tunnel start        start the configured tunnel');
+  console.log('  tunnel refresh      restart the tunnel and print the new URL');
+  console.log('  tunnel stop         stop public tunnel exposure');
+  console.log('  tunnel logs         show recent tunnel output');
+  console.log('  tunnel logs stream  stream tunnel output from another shell');
+  console.log('  logs                show live request/tool log state');
+  console.log('  logs on/off         toggle live request/tool logs');
   console.log('  status      show server, connector, token, and log status');
   console.log('  url         show local and public MCP URLs');
   console.log('  connectors  list loaded connectors');
@@ -583,46 +726,17 @@ function printInteractiveHelp(): void {
   console.log('');
 }
 
-function printTokenHelp(): void {
-  console.log('');
-  console.log(chalk.bold('Token'));
-  console.log('  token show      print current bearer token');
-  console.log('  token rotate    generate and print a new bearer token');
-  console.log('');
-}
-
-function printTunnelHelp(): void {
-  console.log('');
-  console.log(chalk.bold('Tunnel'));
-  console.log('  tunnel show      show tunnel status');
-  console.log('  tunnel config    choose a different tunnel');
-  console.log('  tunnel start     start the configured tunnel');
-  console.log('  tunnel refresh   restart the tunnel and print the new URL');
-  console.log('  tunnel stop      stop public tunnel exposure');
-  console.log('  tunnel logs      show recent tunnel output');
-  console.log('');
-}
-
-function printLogsHelp(): void {
-  console.log('');
-  console.log(chalk.bold('Logs'));
-  console.log('  logs show    show live log state');
-  console.log('  logs on      turn live request/tool logs on');
-  console.log('  logs off     turn live request/tool logs off');
-  console.log('');
-}
-
 function printLiveLogState(state: InteractivePromptState): void {
   console.log(`live logs: ${state.audit.getLiveLogs() ? chalk.green('on') : chalk.dim('off')}`);
 }
 
-function printCurrentToken(): void {
-  const token = readSessionToken();
-  if (!token) {
+function printCurrentTokenValue(): void {
+  const summary = readTokenSummary();
+  if (!summary.token) {
     console.log(chalk.red(`No session token found at ${TOKEN_PATH}`));
     return;
   }
-  console.log(token);
+  console.log(summary.token);
 }
 
 function printRotatedToken(): void {
@@ -635,7 +749,7 @@ function printInteractiveStatus(state: InteractivePromptState): void {
   console.log('');
   console.log(chalk.bold('Status'));
   printInteractiveUrls(state);
-  console.log(`token command  ${chalk.cyan('token show')}`);
+  console.log(`token command  ${chalk.cyan('token')}`);
   console.log(`tool-call log  ${AUDIT_LOG_PATH}`);
   console.log(`live logs      ${state.audit.getLiveLogs() ? chalk.green('on') : chalk.dim('off')}`);
   printTunnelStatus(state);
@@ -665,7 +779,7 @@ function printTunnelStatus(state: InteractivePromptState): void {
 
 async function handleTunnelStart(state: InteractivePromptState): Promise<void> {
   if (!state.tunnel.configured) {
-    console.log(chalk.yellow('No tunnel is configured. Run `tunnel config` or rerun `mvmt init`.'));
+    console.log(chalk.yellow('No tunnel is configured. Run `tunnel config` or `mvmt tunnel config`.'));
     return;
   }
   if (state.tunnel.running) {
@@ -681,7 +795,7 @@ async function handleTunnelStart(state: InteractivePromptState): Promise<void> {
 
 async function handleTunnelRefresh(state: InteractivePromptState): Promise<void> {
   if (!state.tunnel.configured) {
-    console.log(chalk.yellow('No tunnel is configured. Run `tunnel config` or rerun `mvmt init`.'));
+    console.log(chalk.yellow('No tunnel is configured. Run `tunnel config` or `mvmt tunnel config`.'));
     return;
   }
   console.log('Refreshing tunnel...');
@@ -740,110 +854,12 @@ function printTunnelLogs(state: InteractivePromptState): void {
   }
 }
 
-async function promptForTunnelConfig(port: number): Promise<TunnelConfig> {
-  while (true) {
-    const provider = await select<'cloudflare-quick' | 'cloudflare-named' | 'localhost-run' | 'custom'>({
-      message: 'Which tunnel?',
-      choices: [
-        { name: 'Cloudflare Quick Tunnel (temporary URL, requires cloudflared)', value: 'cloudflare-quick' },
-        { name: 'Cloudflare Named Tunnel (stable domain, requires existing cloudflared config)', value: 'cloudflare-named' },
-        { name: 'localhost.run (fallback, less stable)', value: 'localhost-run' },
-        { name: 'Custom tunnel command', value: 'custom' },
-      ],
-    });
-
-    const tunnel = await promptForTunnelDetails(provider);
-    const missingDependency = missingTunnelDependency(tunnel);
-    if (missingDependency) {
-      printMissingTunnelDependencyWarning(missingDependency, (line) => console.log(chalk.yellow(line)));
-      console.log(chalk.dim('Choose another tunnel provider, or press Ctrl+C and install the missing command first.'));
-      continue;
-    }
-    return tunnel;
-  }
-}
-
-async function promptForTunnelDetails(
-  provider: 'cloudflare-quick' | 'cloudflare-named' | 'localhost-run' | 'custom',
-): Promise<TunnelConfig> {
-  if (provider === 'cloudflare-named') {
-    console.log(chalk.dim('Use this after creating a Cloudflare named tunnel and DNS route.'));
-    const configPath = await input({
-      message: 'Cloudflared config file',
-      default: '~/.cloudflared/config.yml',
-      validate: async (value) => {
-        const resolved = expandHome(value.trim());
-        return (await pathExists(resolved)) ? true : `File not found: ${resolved}`;
-      },
-    });
-    const publicUrl = await input({
-      message: 'Public base URL',
-      default: 'https://example.com',
-      validate: validatePublicUrlInput,
-    });
-    return {
-      provider: 'custom',
-      command: cloudflareNamedTunnelCommand(expandHome(configPath.trim())),
-      url: normalizeTunnelBaseUrl(publicUrl),
-    };
-  }
-
-  if (provider === 'custom') {
-    const command = await input({
-      message: 'Tunnel command (use {port} where mvmt should insert the local port)',
-      validate: (value) => (value.trim().length > 0 ? true : 'Enter a tunnel command'),
-    });
-    const publicUrl = await input({
-      message: 'Public base URL (optional, recommended if the command does not print one)',
-      default: '',
-      validate: (value) => (value.trim().length === 0 ? true : validatePublicUrlInput(value)),
-    });
-    return {
-      provider: 'custom',
-      command: command.trim(),
-      ...(publicUrl.trim().length > 0 ? { url: normalizeTunnelBaseUrl(publicUrl) } : {}),
-    };
-  }
-
-  return {
-    provider,
-    command: defaultTunnelCommand(provider),
-  };
-}
-
-async function pathExists(filePath: string): Promise<boolean> {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function validatePublicUrlInput(value: string): true | string {
-  try {
-    const url = new URL(normalizeTunnelBaseUrl(value));
-    return url.protocol === 'https:' ? true : 'Enter an https:// URL';
-  } catch {
-    return 'Enter a valid public URL, for example https://pnee.gofrieda.org';
-  }
-}
-
 async function saveRuntimeConfig(configPath: string, config: MvmtConfig): Promise<void> {
   await fs.mkdir(path.dirname(configPath), { recursive: true });
   await fs.writeFile(configPath, yaml.stringify(config), 'utf-8');
   if (process.platform !== 'win32') {
     await fs.chmod(configPath, 0o600);
   }
-}
-
-function printMissingTunnelDependencyWarning(command: string, write: (line: string) => void): void {
-  if (command === 'cloudflared') {
-    write('Cloudflare Quick Tunnel requires `cloudflared`, but it is not installed or not on PATH.');
-    write('Install it with `brew install cloudflared`, or run `tunnel config` and choose another provider.');
-    return;
-  }
-  write(`Tunnel dependency is missing: ${command}`);
 }
 
 function printConnectorSummary(loaded: LoadedConnector[], totalTools: number): void {

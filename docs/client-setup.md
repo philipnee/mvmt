@@ -3,16 +3,16 @@
 All clients connect to the same mvmt endpoint. Start mvmt first, then get your token:
 
 ```bash
-mvmt start
-mvmt show
+mvmt serve
+mvmt token
 ```
 
-Or `token show` in interactive mode.
+Or `token` in interactive mode.
 
 Most MCP clients let you add servers through their settings UI. You only need two pieces of information:
 
 - **URL**: `http://127.0.0.1:4141/mcp`
-- **Authorization header**: `Bearer <token from mvmt show>`
+- **Authorization header**: `Bearer <token from mvmt token>`
 
 Stdio mode (Claude Desktop) is the exception — it launches mvmt directly and does not need a token.
 
@@ -20,7 +20,7 @@ Stdio mode (Claude Desktop) is the exception — it launches mvmt directly and d
 
 Claude Desktop uses stdio mode, so it launches mvmt as a child process. No token is needed.
 
-**Via UI**: Open Claude Desktop Settings > MCP Servers > Add. Set the command to `mvmt` and the arguments to `start --stdio`.
+**Via UI**: Open Claude Desktop Settings > MCP Servers > Add. Set the command to `mvmt` and the arguments to `serve --stdio`.
 
 **Via JSON config** (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
 
@@ -29,7 +29,7 @@ Claude Desktop uses stdio mode, so it launches mvmt as a child process. No token
   "mcpServers": {
     "mvmt": {
       "command": "mvmt",
-      "args": ["start", "--stdio"]
+      "args": ["serve", "--stdio"]
     }
   }
 }
@@ -38,20 +38,20 @@ Claude Desktop uses stdio mode, so it launches mvmt as a child process. No token
 ## Claude Code
 
 ```bash
-mvmt start
+mvmt serve
 claude mcp add --transport http \
-  --header "Authorization: Bearer $(mvmt show)" \
+  --header "Authorization: Bearer $(mvmt token show)" \
   mvmt http://127.0.0.1:4141/mcp
 ```
 
-If mvmt restarts, it generates a new token. Update the client token after each restart.
+If you rotate the mvmt token, update the client token afterward.
 
 ## Codex CLI
 
 Codex stores a bearer-token environment variable name, not the token value itself:
 
 ```bash
-export MVMT_TOKEN="$(mvmt show)"
+export MVMT_TOKEN="$(mvmt token show)"
 codex mcp add mvmt \
   --url http://127.0.0.1:4141/mcp \
   --bearer-token-env-var MVMT_TOKEN
@@ -60,7 +60,7 @@ codex mcp add mvmt \
 Start new Codex sessions from a shell where `MVMT_TOKEN` is set:
 
 ```bash
-MVMT_TOKEN="$(mvmt show)" codex
+MVMT_TOKEN="$(mvmt token show)" codex
 ```
 
 ## Cursor
@@ -75,7 +75,7 @@ MVMT_TOKEN="$(mvmt show)" codex
     "mvmt": {
       "url": "http://127.0.0.1:4141/mcp",
       "headers": {
-        "Authorization": "Bearer <paste token from mvmt show>"
+        "Authorization": "Bearer <paste token from mvmt token>"
       }
     }
   }
@@ -94,7 +94,7 @@ MVMT_TOKEN="$(mvmt show)" codex
     "mvmt": {
       "url": "http://127.0.0.1:4141/mcp",
       "headers": {
-        "Authorization": "Bearer <paste token from mvmt show>"
+        "Authorization": "Bearer <paste token from mvmt token>"
       }
     }
   }
@@ -106,7 +106,7 @@ MVMT_TOKEN="$(mvmt show)" codex
 Direct `curl` is useful for debugging, but MCP Streamable HTTP is session-based. Initialize first, capture the `mcp-session-id` response header, then make later requests with that session ID.
 
 ```bash
-TOKEN="$(mvmt show)"
+TOKEN="$(mvmt token show)"
 
 curl -i http://127.0.0.1:4141/mcp \
   -H "Authorization: Bearer $TOKEN" \

@@ -1,9 +1,12 @@
 export { doctor, collectDoctorReport } from './cli/doctor.js';
 export type { DoctorOptions, DoctorReport, DoctorStatus } from './cli/doctor.js';
+export { printConfigSummary, runConfigSetup, showConfig } from './cli/config.js';
+export type { ConfigCommandOptions, ConfigSummaryRuntime } from './cli/config.js';
 export { addConnector, getConnectorSetupStatuses, listConnectors, upsertProxyConfig } from './cli/connectors.js';
 export type { ConnectorCommandOptions, ConnectorSetupStatus } from './cli/connectors.js';
 export {
   init,
+  setupConfig,
   buildConfig,
   createMemPalaceProxyConfig,
   countNotes,
@@ -16,7 +19,20 @@ export {
 export type { DetectedMemPalace, MemPalaceConfigInput } from './cli/init.js';
 export { start } from './cli/start.js';
 export type { StartOptions } from './cli/start.js';
-export { rotateToken, showToken } from './cli/token.js';
+export {
+  configureTunnel,
+  printMissingTunnelDependencyWarning,
+  promptForTunnelConfig,
+  refreshTunnelCommand,
+  showTunnel,
+  showTunnelLogs,
+  startTunnelCommand,
+  stopTunnelCommand,
+  streamTunnelLogs,
+} from './cli/tunnel.js';
+export type { TunnelCommandOptions, TunnelRuntimeStatus } from './cli/tunnel.js';
+export { printTokenSummary, readTokenSummary, rotateToken, showToken, showTokenSummary } from './cli/token.js';
+export type { TokenSummary } from './cli/token.js';
 export { ConfigSchema, ObsidianSchema, ProxySchema, TunnelSchema } from './config/schema.js';
 export {
   DEFAULT_PATTERN_REDACTOR_PATTERNS,
@@ -33,7 +49,7 @@ export type {
   ProxyConfig,
   TunnelConfig,
 } from './config/schema.js';
-export { expandHome, getConfigPath, loadConfig, parseConfig } from './config/loader.js';
+export { configExists, expandHome, getConfigPath, loadConfig, parseConfig, readConfig, resolveConfigPath } from './config/loader.js';
 export { ObsidianConnector, extractTags } from './connectors/obsidian.js';
 export { createProxyConnector } from './connectors/factory.js';
 export type { CallToolResult, Connector, ToolDefinition } from './connectors/types.js';
@@ -50,3 +66,4 @@ export type {
   ToolResultPluginContext,
   ToolResultPluginOutput,
 } from './plugins/types.js';
+export { getControlSocketPath, sendJsonControlRequest, startJsonControlServer, streamJsonControl } from './utils/control.js';

@@ -29,7 +29,7 @@ describe('verifyPkce', () => {
 
 describe('OAuthStore', () => {
   it('issues an auth code and exchanges it for a bearer token', () => {
-    const store = new OAuthStore();
+    const store = new OAuthStore({ accessTokenSecret: 'test-secret' });
     const { verifier, challenge } = pkcePair();
 
     const code = store.issueCode({
@@ -52,7 +52,7 @@ describe('OAuthStore', () => {
   });
 
   it('rejects code reuse', () => {
-    const store = new OAuthStore();
+    const store = new OAuthStore({ accessTokenSecret: 'test-secret' });
     const { verifier, challenge } = pkcePair();
     const code = store.issueCode({
       clientId: 'claude',
@@ -79,7 +79,7 @@ describe('OAuthStore', () => {
   });
 
   it('rejects a PKCE mismatch', () => {
-    const store = new OAuthStore();
+    const store = new OAuthStore({ accessTokenSecret: 'test-secret' });
     const { challenge } = pkcePair();
     const code = store.issueCode({
       clientId: 'claude',
@@ -99,7 +99,7 @@ describe('OAuthStore', () => {
   });
 
   it('rejects a redirect_uri mismatch', () => {
-    const store = new OAuthStore();
+    const store = new OAuthStore({ accessTokenSecret: 'test-secret' });
     const { verifier, challenge } = pkcePair();
     const code = store.issueCode({
       clientId: 'claude',
@@ -119,7 +119,7 @@ describe('OAuthStore', () => {
   });
 
   it('binds authorization codes to the requested resource', () => {
-    const store = new OAuthStore();
+    const store = new OAuthStore({ accessTokenSecret: 'test-secret' });
     const { verifier, challenge } = pkcePair();
     const code = store.issueCode({
       clientId: 'chatgpt',
@@ -142,7 +142,7 @@ describe('OAuthStore', () => {
 
   it('expires access tokens', () => {
     let now = 1_000_000;
-    const store = new OAuthStore({ tokenTtlMs: 1000, now: () => now });
+    const store = new OAuthStore({ tokenTtlMs: 1000, accessTokenSecret: 'test-secret', now: () => now });
     const token = store.issueAccessToken({ clientId: 'claude' });
 
     expect(store.validateAccessToken(`Bearer ${token.token}`)).toBeDefined();
@@ -152,7 +152,7 @@ describe('OAuthStore', () => {
 
   it('expires authorization codes', () => {
     let now = 1_000_000;
-    const store = new OAuthStore({ codeTtlMs: 1000, now: () => now });
+    const store = new OAuthStore({ codeTtlMs: 1000, accessTokenSecret: 'test-secret', now: () => now });
     const { verifier, challenge } = pkcePair();
     const code = store.issueCode({
       clientId: 'claude',
@@ -173,9 +173,28 @@ describe('OAuthStore', () => {
   });
 
   it('validateAccessToken ignores malformed or missing headers', () => {
-    const store = new OAuthStore();
+    const store = new OAuthStore({ accessTokenSecret: 'test-secret' });
     expect(store.validateAccessToken(undefined)).toBeUndefined();
     expect(store.validateAccessToken('Basic xxx')).toBeUndefined();
     expect(store.validateAccessToken('Bearer nope')).toBeUndefined();
+  });
+
+  it('validates access tokens across store instances that share the same secret', () => {
+    const tokenIssuer = new OAuthStore({ accessTokenSecret: 'shared-secret' });
+    const tokenValidator = new OAuthStore({ accessTokenSecret: 'shared-secret' });
+    const token = tokenIssuer.issueAccessToken({ clientId: 'codex' });
+
+    const validated = tokenValidator.validateAccessToken(`Bearer ${token.token}`);
+
+    expect(validated?.token).toBe(token.token);
+    expect(validated?.clientId).toBe('codex');
+  });
+
+  it('rejects access tokens signed with a different secret', () => {
+    const tokenIssuer = new OAuthStore({ accessTokenSecret: 'issuer-secret' });
+    const tokenValidator = new OAuthStore({ accessTokenSecret: 'validator-secret' });
+    const token = tokenIssuer.issueAccessToken({ clientId: 'codex' });
+
+    expect(tokenValidator.validateAccessToken(`Bearer ${token.token}`)).toBeUndefined();
   });
 });

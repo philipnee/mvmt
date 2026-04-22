@@ -100,7 +100,7 @@ export async function collectDoctorReport(options: DoctorOptions = {}): Promise<
   };
 
   if (!fs.existsSync(configPath)) {
-    report.config.errors.push('Config file does not exist. Run `mvmt init`.');
+    report.config.errors.push('Config file does not exist. Run `mvmt config setup` or `mvmt serve`.');
     report.ok = false;
     summarize(report);
     return report;

@@ -12,6 +12,7 @@ import {
 } from '../src/server/index.js';
 import { ToolRouter } from '../src/server/router.js';
 import { Connector } from '../src/connectors/types.js';
+import { generateSessionToken } from '../src/utils/token.js';
 
 function req(origin?: string): Request {
   return { headers: origin === undefined ? {} : { origin } } as unknown as Request;
@@ -240,6 +241,64 @@ describe('startHttpServer lifecycle', () => {
     await expect(canListenOn(port)).resolves.toBe(true);
     await expect(server.close()).resolves.toBeUndefined();
   });
+
+  it('reuses an existing session token across server restarts', async () => {
+    const router = new ToolRouter([new EmptyConnector()]);
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const originalToken = generateSessionToken(tokenPath);
+    const originalStat = fs.statSync(tokenPath);
+    const server = await startHttpServer(router, { port: 0, tokenPath });
+
+    try {
+      const tokenAfterStart = fs.readFileSync(tokenPath, 'utf-8').trim();
+      const statAfterStart = fs.statSync(tokenPath);
+      expect(tokenAfterStart).toBe(originalToken);
+      expect(statAfterStart.mtimeMs).toBe(originalStat.mtimeMs);
+
+      const response = await fetch(`http://127.0.0.1:${server.port}/health`, {
+        headers: { Authorization: `Bearer ${originalToken}` },
+      });
+      expect(response.status).toBe(200);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps OAuth access tokens valid across server restarts when the session token is unchanged', async () => {
+    const router = new ToolRouter([new EmptyConnector()]);
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const firstServer = await startHttpServer(router, { port: 0, tokenPath });
+    const port = firstServer.port;
+
+    try {
+      const sessionToken = fs.readFileSync(tokenPath, 'utf-8').trim();
+      const accessToken = await exchangeAccessToken(port, sessionToken);
+
+      const beforeRestart = await fetch(`http://127.0.0.1:${port}/health`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      expect(beforeRestart.status).toBe(200);
+
+      await firstServer.close();
+
+      const secondServer = await startHttpServer(router, { port: 0, tokenPath });
+      try {
+        const afterRestart = await fetch(`http://127.0.0.1:${secondServer.port}/health`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        expect(afterRestart.status).toBe(200);
+      } finally {
+        await secondServer.close();
+      }
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
 });
 
 class EmptyConnector implements Connector {
@@ -267,4 +326,45 @@ function canListenOn(port: number): Promise<boolean> {
       server.close(() => resolve(true));
     });
   });
+}
+
+async function exchangeAccessToken(port: number, sessionToken: string): Promise<string> {
+  const redirectUri = 'https://codex.example/callback';
+  const verifier = 'test-verifier';
+  const resource = `http://127.0.0.1:${port}/mcp`;
+  const authorize = await fetch(`http://127.0.0.1:${port}/authorize`, {
+    method: 'POST',
+    redirect: 'manual',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      response_type: 'code',
+      client_id: 'codex',
+      redirect_uri: redirectUri,
+      resource,
+      code_challenge: verifier,
+      code_challenge_method: 'plain',
+      session_token: sessionToken,
+    }),
+  });
+  const location = authorize.headers.get('location');
+  const code = location ? new URL(location).searchParams.get('code') : undefined;
+  expect(authorize.status).toBe(302);
+  expect(code).toBeTruthy();
+
+  const token = await fetch(`http://127.0.0.1:${port}/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'authorization_code',
+      code: code!,
+      client_id: 'codex',
+      redirect_uri: redirectUri,
+      resource,
+      code_verifier: verifier,
+    }),
+  });
+  const body = await token.json();
+  expect(token.status).toBe(200);
+  expect(body.access_token).toBeTypeOf('string');
+  return body.access_token as string;
 }

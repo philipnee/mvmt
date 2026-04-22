@@ -7,7 +7,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { ToolRouter } from './router.js';
 import { log } from '../utils/logger.js';
-import { generateSessionToken, validateSessionToken } from '../utils/token.js';
+import { ensureSessionToken, validateSessionToken } from '../utils/token.js';
 import {
   CodeChallengeMethod,
   OAuthError,
@@ -97,8 +97,8 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   app.use(express.json({ limit: '10mb' }));
   app.use(express.urlencoded({ extended: false, limit: '64kb' }));
 
-  generateSessionToken(tokenPath);
-  const oauth = new OAuthStore();
+  const sessionToken = ensureSessionToken(tokenPath);
+  const oauth = new OAuthStore({ accessTokenSecret: sessionToken });
   const oauthCleanup = setInterval(() => oauth.cleanup(), 60 * 1000);
   oauthCleanup.unref();
 

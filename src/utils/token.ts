@@ -12,6 +12,12 @@ export function generateSessionToken(tokenPath = TOKEN_PATH): string {
   return token;
 }
 
+export function ensureSessionToken(tokenPath = TOKEN_PATH): string {
+  const existingToken = readSessionToken(tokenPath);
+  if (existingToken) return existingToken;
+  return generateSessionToken(tokenPath);
+}
+
 export function readSessionToken(tokenPath = TOKEN_PATH): string | undefined {
   try {
     const token = fs.readFileSync(tokenPath, 'utf-8').trim();

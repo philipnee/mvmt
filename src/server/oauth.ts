@@ -42,22 +42,25 @@ export interface ConsumeCodeInput {
 export interface OAuthStoreOptions {
   codeTtlMs?: number;
   tokenTtlMs?: number;
+  accessTokenSecret?: string;
   now?: () => number;
 }
 
 const DEFAULT_CODE_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+const ACCESS_TOKEN_PREFIX = 'mvmtv1';
 
 export class OAuthStore {
   private readonly codes = new Map<string, AuthorizationCode>();
-  private readonly tokens = new Map<string, AccessToken>();
   private readonly codeTtlMs: number;
   private readonly tokenTtlMs: number;
+  private readonly accessTokenSecret: string;
   private readonly now: () => number;
 
   constructor(options: OAuthStoreOptions = {}) {
     this.codeTtlMs = options.codeTtlMs ?? DEFAULT_CODE_TTL_MS;
     this.tokenTtlMs = options.tokenTtlMs ?? DEFAULT_TOKEN_TTL_MS;
+    this.accessTokenSecret = options.accessTokenSecret ?? crypto.randomBytes(32).toString('base64url');
     this.now = options.now ?? Date.now;
   }
 
@@ -114,15 +117,24 @@ export class OAuthStore {
   }
 
   issueAccessToken(input: { clientId: string; scope?: string }): AccessToken {
-    const token = crypto.randomBytes(32).toString('base64url');
-    const entry: AccessToken = {
+    const expiresAt = this.now() + this.tokenTtlMs;
+    const payload = Buffer.from(
+      JSON.stringify({
+        clientId: input.clientId,
+        scope: input.scope,
+        expiresAt,
+      }),
+      'utf-8',
+    ).toString('base64url');
+    const signature = crypto.createHmac('sha256', this.accessTokenSecret).update(payload).digest('base64url');
+    const token = `${ACCESS_TOKEN_PREFIX}.${payload}.${signature}`;
+
+    return {
       token,
       clientId: input.clientId,
       scope: input.scope,
-      expiresAt: this.now() + this.tokenTtlMs,
+      expiresAt,
     };
-    this.tokens.set(token, entry);
-    return entry;
   }
 
   validateAccessToken(authHeader: string | undefined): AccessToken | undefined {
@@ -130,12 +142,7 @@ export class OAuthStore {
     const parts = authHeader.split(' ');
     if (parts.length !== 2 || parts[0] !== 'Bearer') return undefined;
     const provided = parts[1];
-
-    for (const entry of this.tokens.values()) {
-      if (entry.expiresAt < this.now()) continue;
-      if (timingSafeStringEquals(provided, entry.token)) return entry;
-    }
-    return undefined;
+    return this.parseAccessToken(provided);
   }
 
   cleanup(): void {
@@ -143,8 +150,36 @@ export class OAuthStore {
     for (const [code, entry] of this.codes) {
       if (entry.expiresAt < now || entry.consumed) this.codes.delete(code);
     }
-    for (const [token, entry] of this.tokens) {
-      if (entry.expiresAt < now) this.tokens.delete(token);
+  }
+
+  private parseAccessToken(token: string): AccessToken | undefined {
+    const parts = token.split('.');
+    if (parts.length !== 3 || parts[0] !== ACCESS_TOKEN_PREFIX) return undefined;
+
+    const payload = parts[1];
+    const signature = parts[2];
+    const expectedSignature = crypto.createHmac('sha256', this.accessTokenSecret).update(payload).digest('base64url');
+    if (!timingSafeStringEquals(signature, expectedSignature)) return undefined;
+
+    try {
+      const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8')) as {
+        clientId?: unknown;
+        scope?: unknown;
+        expiresAt?: unknown;
+      };
+      if (typeof decoded.clientId !== 'string') return undefined;
+      if (decoded.scope !== undefined && typeof decoded.scope !== 'string') return undefined;
+      if (typeof decoded.expiresAt !== 'number' || !Number.isFinite(decoded.expiresAt)) return undefined;
+      if (decoded.expiresAt < this.now()) return undefined;
+
+      return {
+        token,
+        clientId: decoded.clientId,
+        scope: decoded.scope,
+        expiresAt: decoded.expiresAt,
+      };
+    } catch {
+      return undefined;
     }
   }
 }
@@ -244,7 +279,7 @@ export function renderAuthorizePage(params: AuthorizePageParams): string {
   <h1>Authorize connector</h1>
   <p>
     A client (<code>${escapeHtml(params.clientId)}</code>) is requesting access to your local mvmt instance.
-    Paste your mvmt session token to approve. Run <code>mvmt show</code> on the host machine to retrieve it.
+    Paste your mvmt session token to approve. Run <code>mvmt token</code> on the host machine to retrieve it.
   </p>
   ${error}
   <form method="POST" action="/authorize">

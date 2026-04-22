@@ -19,18 +19,30 @@ export function parseConfig(rawConfig: unknown): MvmtConfig {
   return result.data;
 }
 
+export function resolveConfigPath(overridePath?: string): string {
+  return overridePath ? expandHome(overridePath) : getConfigPath();
+}
+
+export function configExists(overridePath?: string): boolean {
+  return fs.existsSync(resolveConfigPath(overridePath));
+}
+
+export function readConfig(configPath: string): MvmtConfig {
+  const raw = fs.readFileSync(configPath, 'utf-8');
+  return parseConfig(yaml.parse(raw));
+}
+
 export function loadConfig(overridePath?: string): MvmtConfig {
-  const configPath = overridePath ? expandHome(overridePath) : getConfigPath();
+  const configPath = resolveConfigPath(overridePath);
 
   if (!fs.existsSync(configPath)) {
     console.error(`Config not found at ${configPath}`);
-    console.error('Run `mvmt init` to set up mvmt.');
+    console.error('Run `mvmt config setup` to create a config, or `mvmt serve` to set up and start mvmt.');
     process.exit(1);
   }
 
   try {
-    const raw = fs.readFileSync(configPath, 'utf-8');
-    return parseConfig(yaml.parse(raw));
+    return readConfig(configPath);
   } catch (err) {
     if (err instanceof Error) {
       console.error(err.message);
