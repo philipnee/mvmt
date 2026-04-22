@@ -393,9 +393,6 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   } catch (err) {
     clearInterval(oauthCleanup);
     clearInterval(cleanupInterval);
-    authLimiter.dispose();
-    mcpLimiter.dispose();
-    healthLimiter.dispose();
     throw err;
   }
 
@@ -411,9 +408,6 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
 
       clearInterval(oauthCleanup);
       clearInterval(cleanupInterval);
-      authLimiter.dispose();
-      mcpLimiter.dispose();
-      healthLimiter.dispose();
 
       const activeSessions = [...sessions.values()];
       sessions.clear();
