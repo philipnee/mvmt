@@ -211,6 +211,11 @@ export class OAuthStore {
       }),
       'utf-8',
     ).toString('base64url');
+    // HMAC-SHA256 MACs the access-token payload with a 256-bit random
+    // signing key. This is JWT-style token signing, not password hashing —
+    // CodeQL's js/insufficient-password-hash (which recommends bcrypt et al.)
+    // is a false positive because bcrypt is for low-entropy human secrets,
+    // not deterministic MACs over structured payloads.
     const signature = crypto.createHmac('sha256', this.resolveSigningKey()).update(payload).digest('base64url');
     const token = `${ACCESS_TOKEN_PREFIX}.${payload}.${signature}`;
 
