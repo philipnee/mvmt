@@ -55,7 +55,7 @@ export function renderTunnelCommand(commandTemplate: string, port: number): stri
 }
 
 export function formatMcpPublicUrl(publicUrl: string): string {
-  return `${publicUrl.replace(/\/+$/, '')}/mcp`;
+  return `${trimTrailingSlashes(publicUrl)}/mcp`;
 }
 
 export function normalizeTunnelBaseUrl(value: string): string {
@@ -65,7 +65,7 @@ export function normalizeTunnelBaseUrl(value: string): string {
   if (parsed.pathname === '/mcp' || parsed.pathname === '/') {
     parsed.pathname = '';
   }
-  return parsed.toString().replace(/\/+$/, '');
+  return trimTrailingSlashes(parsed.toString());
 }
 
 export function cloudflareNamedTunnelCommand(configPath: string): string {
@@ -212,7 +212,20 @@ function stopTunnel(child: TunnelChild): Promise<void> {
 }
 
 function trimTrailingPunctuation(value: string): string {
-  return value.replace(/[.,;:]+$/, '');
+  let end = value.length;
+  while (end > 0) {
+    const ch = value.charCodeAt(end - 1);
+    // '.' ',' ';' ':'
+    if (ch === 46 || ch === 44 || ch === 59 || ch === 58) end -= 1;
+    else break;
+  }
+  return end === value.length ? value : value.slice(0, end);
+}
+
+function trimTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47 /* '/' */) end -= 1;
+  return end === value.length ? value : value.slice(0, end);
 }
 
 function isKnownTunnelUrl(value: string): boolean {

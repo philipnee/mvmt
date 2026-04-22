@@ -15,12 +15,29 @@ import {
   getBaseUrl,
   renderAuthorizePage,
 } from './oauth.js';
+import { rateLimit } from './rate-limit.js';
+
+// Rate limits are defense-in-depth against brute-force and DoS,
+// primarily meaningful when mvmt is exposed via a tunnel. Auth-gated
+// data-plane routes (/mcp) get a generous cap that comfortably covers
+// MCP polling. Auth surface routes (/authorize, /token, /register) get
+// a tight cap to slow session-token guessing. /health is polled
+// frequently and only checks the bearer.
+const DEFAULT_AUTH_RATE_LIMIT = { windowMs: 60_000, max: 30 };
+const DEFAULT_MCP_RATE_LIMIT = { windowMs: 60_000, max: 600 };
+const DEFAULT_HEALTH_RATE_LIMIT = { windowMs: 60_000, max: 120 };
 
 type McpSession = {
   transport: StreamableHTTPServerTransport;
   server: Server;
   lastActivity: number;
 };
+
+export interface RateLimitOverrides {
+  auth?: { windowMs: number; max: number };
+  mcp?: { windowMs: number; max: number };
+  health?: { windowMs: number; max: number };
+}
 
 export interface HttpServerOptions {
   port: number;
@@ -32,6 +49,9 @@ export interface HttpServerOptions {
   // overrides the request Host header. This is how the tunnel URL gets
   // propagated into OAuth responses without trusting X-Forwarded-* headers.
   resolvePublicBaseUrl?: () => string | undefined;
+  // Override rate-limit buckets; used by tests to exercise the 429 path
+  // without blasting thousands of requests.
+  rateLimits?: RateLimitOverrides;
   requestLog?: (entry: HttpRequestLogEntry) => void;
 }
 
@@ -134,6 +154,10 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   }, 5 * 60 * 1000);
   cleanupInterval.unref();
 
+  const authLimiter = rateLimit(options.rateLimits?.auth ?? DEFAULT_AUTH_RATE_LIMIT);
+  const mcpLimiter = rateLimit(options.rateLimits?.mcp ?? DEFAULT_MCP_RATE_LIMIT);
+  const healthLimiter = rateLimit(options.rateLimits?.health ?? DEFAULT_HEALTH_RATE_LIMIT);
+
   const originCheck = buildOriginCheck(options.allowedOrigins ?? []);
 
   const authMiddleware: express.RequestHandler = (req, res, next) => {
@@ -191,7 +215,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   app.get('/.well-known/oauth-protected-resource', protectedResourceMetadata);
   app.get('/.well-known/oauth-protected-resource/mcp', protectedResourceMetadata);
 
-  app.post('/register', (req, res) => {
+  app.post('/register', authLimiter, (req, res) => {
     const requested = (req.body ?? {}) as Record<string, unknown>;
     const clientId =
       typeof requested.client_id === 'string' && requested.client_id.length > 0
@@ -225,7 +249,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     });
   });
 
-  app.get('/authorize', (req, res) => {
+  app.get('/authorize', authLimiter, (req, res) => {
     const params = parseAuthorizeParams(req.query);
     if ('error' in params) {
       logHttpRequest(requestLog, req, 400, 'oauth.authorize', params.error);
@@ -241,7 +265,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     res.type('text/html').send(renderAuthorizePage(params));
   });
 
-  app.post('/authorize', (req, res) => {
+  app.post('/authorize', authLimiter, (req, res) => {
     const params = parseAuthorizeParams(req.body ?? {});
     if ('error' in params) {
       logHttpRequest(requestLog, req, 400, 'oauth.authorize', params.error);
@@ -281,7 +305,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     res.redirect(302, redirect.toString());
   });
 
-  app.post('/token', (req, res) => {
+  app.post('/token', authLimiter, (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const grantType = typeof body.grant_type === 'string' ? body.grant_type : undefined;
     if (grantType !== 'authorization_code') {
@@ -323,17 +347,17 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     }
   });
 
-  app.post('/mcp', authMiddleware, async (req, res) => {
+  app.post('/mcp', mcpLimiter, authMiddleware, async (req, res) => {
     await handleMcpRequest(req, res, router, sessions);
     logHttpRequest(requestLog, req, res.statusCode, 'mcp.request');
   });
 
-  app.get('/mcp', authMiddleware, async (req, res) => {
+  app.get('/mcp', mcpLimiter, authMiddleware, async (req, res) => {
     await handleMcpRequest(req, res, router, sessions);
     logHttpRequest(requestLog, req, res.statusCode, 'mcp.request');
   });
 
-  app.delete('/mcp', authMiddleware, async (req, res) => {
+  app.delete('/mcp', mcpLimiter, authMiddleware, async (req, res) => {
     const sessionId = getSessionId(req);
     if (!sessionId || !sessions.has(sessionId)) {
       logHttpRequest(requestLog, req, 404, 'mcp.request', 'session_not_found');
@@ -348,7 +372,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     res.status(200).json({ ok: true });
   });
 
-  app.get('/health', authMiddleware, (_req, res) => {
+  app.get('/health', healthLimiter, authMiddleware, (_req, res) => {
     logHttpRequest(requestLog, _req, 200, 'health.request');
     res.json({
       status: 'ok',
@@ -369,6 +393,9 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   } catch (err) {
     clearInterval(oauthCleanup);
     clearInterval(cleanupInterval);
+    authLimiter.dispose();
+    mcpLimiter.dispose();
+    healthLimiter.dispose();
     throw err;
   }
 
@@ -384,6 +411,9 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
 
       clearInterval(oauthCleanup);
       clearInterval(cleanupInterval);
+      authLimiter.dispose();
+      mcpLimiter.dispose();
+      healthLimiter.dispose();
 
       const activeSessions = [...sessions.values()];
       sessions.clear();

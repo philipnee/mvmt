@@ -410,6 +410,39 @@ describe('startHttpServer lifecycle', () => {
     }
   });
 
+  it('rate-limits auth-surface routes and returns 429 once the bucket is exhausted', async () => {
+    const router = new ToolRouter([new EmptyConnector()]);
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const server = await startHttpServer(router, {
+      port: 0,
+      tokenPath,
+      rateLimits: { auth: { windowMs: 60_000, max: 2 } },
+    });
+
+    try {
+      const hit = () =>
+        fetch(`http://127.0.0.1:${server.port}/register`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ client_id: 'rl-client', redirect_uris: ['https://rl.example/cb'] }),
+        });
+
+      const first = await hit();
+      const second = await hit();
+      const third = await hit();
+
+      expect(first.status).toBe(201);
+      expect(second.status).toBe(201);
+      expect(third.status).toBe(429);
+      expect(third.headers.get('retry-after')).toBeTruthy();
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('persists OAuth client registrations across server restarts', async () => {
     const router = new ToolRouter([new EmptyConnector()]);
     await router.initialize();
