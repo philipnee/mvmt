@@ -13,11 +13,13 @@ import {
   normalizeTunnelBaseUrl,
 } from '../utils/tunnel.js';
 import {
+  ControlAuthError,
   ControlUnavailableError,
   getControlSocketPath,
   sendJsonControlRequest,
   streamJsonControl,
 } from '../utils/control.js';
+import { readSessionToken } from '../utils/token.js';
 
 export interface TunnelCommandOptions {
   config?: string;
@@ -39,6 +41,16 @@ export async function showTunnel(options: TunnelCommandOptions = {}): Promise<vo
   printTunnelSummary(loaded.config, runtime);
 }
 
+function requireControlToken(): string {
+  const token = readSessionToken();
+  if (!token) {
+    console.error('No session token found. Run `mvmt serve` once before using tunnel commands.');
+    process.exitCode = 1;
+    throw new Error('missing session token');
+  }
+  return token;
+}
+
 export async function configureTunnel(options: TunnelCommandOptions = {}): Promise<void> {
   const loaded = loadConfigSummary(options.config);
   if (!loaded) return;
@@ -51,10 +63,12 @@ export async function configureTunnel(options: TunnelCommandOptions = {}): Promi
   console.log(chalk.green(`Tunnel config saved to ${loaded.configPath}`));
 
   try {
-    const runtime = await sendJsonControlRequest<TunnelRuntimeStatus>(getControlSocketPath(loaded.configPath), {
-      type: 'tunnel.config',
-      tunnel,
-    });
+    const token = requireControlToken();
+    const runtime = await sendJsonControlRequest<TunnelRuntimeStatus>(
+      getControlSocketPath(loaded.configPath),
+      { type: 'tunnel.config', tunnel },
+      token,
+    );
     if (runtime.publicUrl) {
       console.log(`public URL  ${chalk.yellow(formatMcpPublicUrl(runtime.publicUrl))}`);
     } else {
@@ -63,6 +77,11 @@ export async function configureTunnel(options: TunnelCommandOptions = {}): Promi
   } catch (err) {
     if (err instanceof ControlUnavailableError) {
       console.log(chalk.dim('Config saved. Start mvmt with `mvmt serve` to launch the tunnel.'));
+      return;
+    }
+    if (err instanceof ControlAuthError) {
+      console.error('Control socket rejected the session token. Run `mvmt serve` after `mvmt token rotate`.');
+      process.exitCode = 1;
       return;
     }
     throw err;
@@ -105,6 +124,7 @@ export async function showTunnelLogs(options: TunnelCommandOptions = {}): Promis
 export async function streamTunnelLogs(options: TunnelCommandOptions = {}): Promise<void> {
   const configPath = resolveConfigPath(options.config);
   const socketPath = getControlSocketPath(configPath);
+  const token = requireControlToken();
   const stop = await streamJsonControl(socketPath, { type: 'tunnel.logs.stream' }, (message) => {
     if (message?.kind === 'ready') {
       console.log(chalk.dim('Streaming tunnel logs. Press Ctrl+C to stop.'));
@@ -120,7 +140,7 @@ export async function streamTunnelLogs(options: TunnelCommandOptions = {}): Prom
     if (message?.kind === 'error') {
       console.error(message.error ?? 'Tunnel log stream failed.');
     }
-  });
+  }, token);
 
   await new Promise<void>((resolve) => {
     const handleSigint = () => {
@@ -260,10 +280,17 @@ function loadConfigSummary(configOverride?: string): { configPath: string; confi
 }
 
 async function readRuntimeStatus(configPath: string): Promise<TunnelRuntimeStatus | undefined> {
+  const token = readSessionToken();
+  if (!token) return undefined;
   try {
-    return await sendJsonControlRequest<TunnelRuntimeStatus>(getControlSocketPath(configPath), { type: 'tunnel.status' });
+    return await sendJsonControlRequest<TunnelRuntimeStatus>(
+      getControlSocketPath(configPath),
+      { type: 'tunnel.status' },
+      token,
+    );
   } catch (err) {
     if (err instanceof ControlUnavailableError) return undefined;
+    if (err instanceof ControlAuthError) return undefined;
     throw err;
   }
 }
@@ -271,15 +298,22 @@ async function readRuntimeStatus(configPath: string): Promise<TunnelRuntimeStatu
 async function sendTunnelRequest(configOverride: string | undefined, type: string): Promise<TunnelRuntimeStatus> {
   const configPath = resolveConfigPath(configOverride);
   try {
-    return await sendJsonControlRequest<TunnelRuntimeStatus>(getControlSocketPath(configPath), { type });
+    const token = requireControlToken();
+    return await sendJsonControlRequest<TunnelRuntimeStatus>(
+      getControlSocketPath(configPath),
+      { type },
+      token,
+    );
   } catch (err) {
     if (err instanceof ControlUnavailableError) {
       console.error('mvmt is not running. Start it first with `mvmt serve`.');
       process.exitCode = 1;
-      return {
-        configured: false,
-        running: false,
-      };
+      return { configured: false, running: false };
+    }
+    if (err instanceof ControlAuthError) {
+      console.error('Control socket rejected the session token. Restart `mvmt serve` after `mvmt token rotate`.');
+      process.exitCode = 1;
+      return { configured: false, running: false };
     }
     throw err;
   }

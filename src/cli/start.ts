@@ -17,7 +17,7 @@ import { ToolRouter } from '../server/router.js';
 import { AUDIT_LOG_PATH, AuditEntry, AuditLogger, createAuditLogger } from '../utils/audit.js';
 import { getControlSocketPath, startJsonControlServer } from '../utils/control.js';
 import { createLogger, Logger } from '../utils/logger.js';
-import { generateSessionToken, TOKEN_PATH } from '../utils/token.js';
+import { defaultSigningKeyPath, generateSessionToken, rotateSigningKey, TOKEN_PATH, verifySessionTokenValue } from '../utils/token.js';
 import {
   formatMcpPublicUrl,
   missingTunnelDependency,
@@ -124,9 +124,11 @@ export async function start(options: StartOptions = {}): Promise<void> {
   }
 
   try {
+    const tunnelController = new TunnelController(config.server, port, logger);
     const httpServer = await startHttpServer(router, {
       port,
       allowedOrigins: config.server.allowedOrigins,
+      resolvePublicBaseUrl: () => tunnelController.publicUrl,
       requestLog: interactiveMode
         ? (entry) => (audit as InteractiveAuditLogger).recordHttp(entry)
         : options.verbose
@@ -134,7 +136,6 @@ export async function start(options: StartOptions = {}): Promise<void> {
           : undefined,
     });
     cleanupTasks.push(() => httpServer.close());
-    const tunnelController = new TunnelController(config.server, port, logger);
     cleanupTasks.push(() => tunnelController.stop());
     const tunnel = await tunnelController.start();
     const controlServer = await startJsonControlServer(getControlSocketPath(configPath), async (message, connection) => {
@@ -191,6 +192,8 @@ export async function start(options: StartOptions = {}): Promise<void> {
           connection.send({ ok: false, error: `Unknown control request: ${String(message?.type ?? '(missing)')}` });
           connection.close();
       }
+    }, {
+      verifyToken: (token) => verifySessionTokenValue(token),
     });
     cleanupTasks.push(() => controlServer.close());
     printStartupBanner(port, loaded, plugins, router.getAllTools().length, tunnel?.url, interactiveMode);
@@ -741,8 +744,9 @@ function printCurrentTokenValue(): void {
 
 function printRotatedToken(): void {
   const token = generateSessionToken();
+  rotateSigningKey(defaultSigningKeyPath(TOKEN_PATH));
   console.log(token);
-  console.log(chalk.yellow('Token rotated. Restart or update any clients using the old token.'));
+  console.log(chalk.yellow('Token rotated. Restart mvmt so OAuth clients re-authorize with the new signing key.'));
 }
 
 function printInteractiveStatus(state: InteractivePromptState): void {

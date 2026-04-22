@@ -7,7 +7,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { ToolRouter } from './router.js';
 import { log } from '../utils/logger.js';
-import { ensureSessionToken, validateSessionToken } from '../utils/token.js';
+import { defaultClientsPath, defaultSigningKeyPath, ensureSessionToken, ensureSigningKey, readSigningKey, TOKEN_PATH, validateSessionToken } from '../utils/token.js';
 import {
   CodeChallengeMethod,
   OAuthError,
@@ -26,6 +26,12 @@ export interface HttpServerOptions {
   port: number;
   allowedOrigins?: string[];
   tokenPath?: string;
+  signingKeyPath?: string;
+  // Called at request time to resolve the public-facing base URL for
+  // OAuth metadata and redirect issuer values. When set, its result
+  // overrides the request Host header. This is how the tunnel URL gets
+  // propagated into OAuth responses without trusting X-Forwarded-* headers.
+  resolvePublicBaseUrl?: () => string | undefined;
   requestLog?: (entry: HttpRequestLogEntry) => void;
 }
 
@@ -93,12 +99,24 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   const { port } = options;
   const tokenPath = options.tokenPath;
   const requestLog = options.requestLog;
+  const resolvePublicBaseUrl = options.resolvePublicBaseUrl;
+  const baseUrlFor = (req: Request): string => getBaseUrl(req, resolvePublicBaseUrl?.());
   const app = express();
   app.use(express.json({ limit: '10mb' }));
   app.use(express.urlencoded({ extended: false, limit: '64kb' }));
 
-  const sessionToken = ensureSessionToken(tokenPath);
-  const oauth = new OAuthStore({ accessTokenSecret: sessionToken });
+  ensureSessionToken(tokenPath);
+  const signingKeyPath = options.signingKeyPath ?? defaultSigningKeyPath(tokenPath ?? TOKEN_PATH);
+  // Create the signing key file on first boot, then re-read it on every
+  // HMAC op. This way `mvmt token rotate` (which rewrites the file)
+  // invalidates outstanding OAuth access tokens immediately, without
+  // requiring a server restart.
+  ensureSigningKey(signingKeyPath);
+  const clientsPath = defaultClientsPath(tokenPath ?? TOKEN_PATH);
+  const oauth = new OAuthStore({
+    signingKey: () => readSigningKey(signingKeyPath) ?? ensureSigningKey(signingKeyPath),
+    clientsPath,
+  });
   const oauthCleanup = setInterval(() => oauth.cleanup(), 60 * 1000);
   oauthCleanup.unref();
 
@@ -132,7 +150,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       return;
     }
 
-    const baseUrl = getBaseUrl(req);
+    const baseUrl = baseUrlFor(req);
     res.setHeader(
       'WWW-Authenticate',
       `Bearer realm="mvmt", resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`,
@@ -142,7 +160,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   };
 
   const authorizationServerMetadata = (req: Request, res: Response) => {
-    const baseUrl = getBaseUrl(req);
+    const baseUrl = baseUrlFor(req);
     logHttpRequest(requestLog, req, 200, 'oauth.discovery');
     res.json({
       issuer: baseUrl,
@@ -151,9 +169,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       registration_endpoint: `${baseUrl}/register`,
       response_types_supported: ['code'],
       grant_types_supported: ['authorization_code'],
-      // S256 is strongly preferred. plain is kept for compatibility with
-      // simple MCP/OAuth clients during the v0 tunnel flow.
-      code_challenge_methods_supported: ['S256', 'plain'],
+      code_challenge_methods_supported: ['S256'],
       authorization_response_iss_parameter_supported: true,
       token_endpoint_auth_methods_supported: ['none'],
       scopes_supported: ['mcp'],
@@ -163,7 +179,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   app.get('/.well-known/oauth-authorization-server/mcp', authorizationServerMetadata);
 
   const protectedResourceMetadata = (req: Request, res: Response) => {
-    const baseUrl = getBaseUrl(req);
+    const baseUrl = baseUrlFor(req);
     logHttpRequest(requestLog, req, 200, 'oauth.resource');
     res.json({
       resource: `${baseUrl}/mcp`,
@@ -181,13 +197,31 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       typeof requested.client_id === 'string' && requested.client_id.length > 0
         ? (requested.client_id as string)
         : `mvmt-${Date.now().toString(36)}`;
+    const redirectUris = Array.isArray(requested.redirect_uris)
+      ? requested.redirect_uris.filter((uri): uri is string => typeof uri === 'string' && uri.length > 0)
+      : [];
+    if (redirectUris.length === 0) {
+      logHttpRequest(requestLog, req, 400, 'oauth.register', 'missing_redirect_uris', clientId);
+      res.status(400).json({ error: 'invalid_redirect_uri', error_description: 'redirect_uris is required' });
+      return;
+    }
+    for (const uri of redirectUris) {
+      try {
+        new URL(uri);
+      } catch {
+        logHttpRequest(requestLog, req, 400, 'oauth.register', 'invalid_redirect_uri', clientId);
+        res.status(400).json({ error: 'invalid_redirect_uri' });
+        return;
+      }
+    }
+    const registered = oauth.registerClient({ clientId, redirectUris });
     logHttpRequest(requestLog, req, 201, 'oauth.register', undefined, clientId);
     res.status(201).json({
-      client_id: clientId,
+      client_id: registered.clientId,
       token_endpoint_auth_method: 'none',
       grant_types: ['authorization_code'],
       response_types: ['code'],
-      redirect_uris: Array.isArray(requested.redirect_uris) ? requested.redirect_uris : [],
+      redirect_uris: registered.redirectUris,
     });
   });
 
@@ -196,6 +230,11 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     if ('error' in params) {
       logHttpRequest(requestLog, req, 400, 'oauth.authorize', params.error);
       res.status(400).type('text/plain').send(params.error);
+      return;
+    }
+    if (!oauth.isRedirectUriAllowed(params.clientId, params.redirectUri)) {
+      logHttpRequest(requestLog, req, 400, 'oauth.authorize', 'unregistered_redirect_uri', params.clientId);
+      res.status(400).type('text/plain').send('redirect_uri is not registered for this client');
       return;
     }
     logHttpRequest(requestLog, req, 200, 'oauth.authorize', undefined, params.clientId);
@@ -207,6 +246,11 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     if ('error' in params) {
       logHttpRequest(requestLog, req, 400, 'oauth.authorize', params.error);
       res.status(400).type('text/plain').send(params.error);
+      return;
+    }
+    if (!oauth.isRedirectUriAllowed(params.clientId, params.redirectUri)) {
+      logHttpRequest(requestLog, req, 400, 'oauth.authorize', 'unregistered_redirect_uri', params.clientId);
+      res.status(400).type('text/plain').send('redirect_uri is not registered for this client');
       return;
     }
 
@@ -231,7 +275,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
 
     const redirect = new URL(params.redirectUri);
     redirect.searchParams.set('code', authCode.code);
-    redirect.searchParams.set('iss', getBaseUrl(req));
+    redirect.searchParams.set('iss', baseUrlFor(req));
     if (params.state) redirect.searchParams.set('state', params.state);
     logHttpRequest(requestLog, req, 302, 'oauth.authorize', undefined, params.clientId);
     res.redirect(302, redirect.toString());
@@ -475,9 +519,7 @@ function parseAuthorizeParams(source: Record<string, unknown>): AuthorizeParams 
   const redirectUri = stringField(source.redirect_uri);
   const resource = stringField(source.resource);
   const codeChallenge = stringField(source.code_challenge);
-  // S256 is strongly preferred. Defaulting to plain is compatibility behavior
-  // for simple clients that omit code_challenge_method.
-  const codeChallengeMethodRaw = stringField(source.code_challenge_method) ?? 'plain';
+  const codeChallengeMethodRaw = stringField(source.code_challenge_method) ?? 'S256';
 
   if (!responseType) return { error: 'Missing response_type' };
   if (responseType !== 'code') return { error: 'Only response_type=code is supported' };
@@ -498,8 +540,8 @@ function parseAuthorizeParams(source: Record<string, unknown>): AuthorizeParams 
     }
   }
 
-  if (codeChallengeMethodRaw !== 'S256' && codeChallengeMethodRaw !== 'plain') {
-    return { error: 'Unsupported code_challenge_method' };
+  if (codeChallengeMethodRaw !== 'S256') {
+    return { error: 'Unsupported code_challenge_method (S256 required)' };
   }
 
   return {
@@ -510,7 +552,7 @@ function parseAuthorizeParams(source: Record<string, unknown>): AuthorizeParams 
     state: stringField(source.state),
     scope: stringField(source.scope),
     codeChallenge,
-    codeChallengeMethod: codeChallengeMethodRaw,
+    codeChallengeMethod: 'S256',
   };
 }
 

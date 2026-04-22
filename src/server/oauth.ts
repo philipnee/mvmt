@@ -1,7 +1,9 @@
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 import type { Request } from 'express';
 
-export type CodeChallengeMethod = 'S256' | 'plain';
+export type CodeChallengeMethod = 'S256';
 
 export interface AuthorizationCode {
   code: string;
@@ -42,7 +44,12 @@ export interface ConsumeCodeInput {
 export interface OAuthStoreOptions {
   codeTtlMs?: number;
   tokenTtlMs?: number;
-  accessTokenSecret?: string;
+  // Key material used to sign and validate self-contained access tokens.
+  // Pass a function when the key can change at runtime (e.g. backed by a
+  // file that `mvmt token rotate` rewrites) so rotation invalidates
+  // outstanding tokens without requiring a server restart.
+  signingKey?: string | (() => string);
+  clientsPath?: string;
   now?: () => number;
 }
 
@@ -50,22 +57,100 @@ const DEFAULT_CODE_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 const ACCESS_TOKEN_PREFIX = 'mvmtv1';
 
+export interface RegisteredClient {
+  clientId: string;
+  redirectUris: string[];
+}
+
 export class OAuthStore {
   private readonly codes = new Map<string, AuthorizationCode>();
+  private readonly clients = new Map<string, RegisteredClient>();
   private readonly codeTtlMs: number;
   private readonly tokenTtlMs: number;
-  private readonly accessTokenSecret: string;
+  private readonly resolveSigningKey: () => string;
+  private readonly clientsPath?: string;
   private readonly now: () => number;
 
   constructor(options: OAuthStoreOptions = {}) {
     this.codeTtlMs = options.codeTtlMs ?? DEFAULT_CODE_TTL_MS;
     this.tokenTtlMs = options.tokenTtlMs ?? DEFAULT_TOKEN_TTL_MS;
-    this.accessTokenSecret = options.accessTokenSecret ?? crypto.randomBytes(32).toString('base64url');
+    const keyOption = options.signingKey;
+    if (typeof keyOption === 'function') {
+      this.resolveSigningKey = keyOption;
+    } else if (typeof keyOption === 'string') {
+      const staticKey = keyOption;
+      this.resolveSigningKey = () => staticKey;
+    } else {
+      const ephemeral = crypto.randomBytes(32).toString('base64url');
+      this.resolveSigningKey = () => ephemeral;
+    }
+    this.clientsPath = options.clientsPath;
     this.now = options.now ?? Date.now;
+    this.loadClientsFromDisk();
   }
 
   get tokenTtlSeconds(): number {
     return Math.floor(this.tokenTtlMs / 1000);
+  }
+
+  registerClient(client: RegisteredClient): RegisteredClient {
+    const normalized: RegisteredClient = {
+      clientId: client.clientId,
+      redirectUris: [...new Set(client.redirectUris.filter((uri) => typeof uri === 'string' && uri.length > 0))],
+    };
+    this.clients.set(normalized.clientId, normalized);
+    this.persistClients();
+    return normalized;
+  }
+
+  getClient(clientId: string): RegisteredClient | undefined {
+    return this.clients.get(clientId);
+  }
+
+  isRedirectUriAllowed(clientId: string, redirectUri: string): boolean {
+    const client = this.clients.get(clientId);
+    if (!client) return false;
+    return client.redirectUris.includes(redirectUri);
+  }
+
+  private loadClientsFromDisk(): void {
+    if (!this.clientsPath) return;
+    let raw: string;
+    try {
+      raw = fs.readFileSync(this.clientsPath, 'utf-8');
+    } catch {
+      return;
+    }
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) return;
+      for (const entry of parsed) {
+        if (!entry || typeof entry !== 'object') continue;
+        const clientId = (entry as RegisteredClient).clientId;
+        const redirectUris = (entry as RegisteredClient).redirectUris;
+        if (typeof clientId !== 'string' || !Array.isArray(redirectUris)) continue;
+        const cleaned = redirectUris.filter((uri) => typeof uri === 'string' && uri.length > 0);
+        if (cleaned.length === 0) continue;
+        this.clients.set(clientId, { clientId, redirectUris: [...new Set(cleaned)] });
+      }
+    } catch {
+      // Ignore corrupt registry; next registration rewrites the file.
+    }
+  }
+
+  private persistClients(): void {
+    if (!this.clientsPath) return;
+    const data = JSON.stringify([...this.clients.values()]);
+    try {
+      fs.mkdirSync(path.dirname(this.clientsPath), { recursive: true });
+      fs.writeFileSync(this.clientsPath, data, { mode: 0o600 });
+      if (process.platform !== 'win32') {
+        fs.chmodSync(this.clientsPath, 0o600);
+      }
+    } catch {
+      // Persisting is best-effort. The in-memory registry still works
+      // for the current server lifetime.
+    }
   }
 
   issueCode(input: IssueCodeInput): AuthorizationCode {
@@ -126,7 +211,7 @@ export class OAuthStore {
       }),
       'utf-8',
     ).toString('base64url');
-    const signature = crypto.createHmac('sha256', this.accessTokenSecret).update(payload).digest('base64url');
+    const signature = crypto.createHmac('sha256', this.resolveSigningKey()).update(payload).digest('base64url');
     const token = `${ACCESS_TOKEN_PREFIX}.${payload}.${signature}`;
 
     return {
@@ -158,7 +243,7 @@ export class OAuthStore {
 
     const payload = parts[1];
     const signature = parts[2];
-    const expectedSignature = crypto.createHmac('sha256', this.accessTokenSecret).update(payload).digest('base64url');
+    const expectedSignature = crypto.createHmac('sha256', this.resolveSigningKey()).update(payload).digest('base64url');
     if (!timingSafeStringEquals(signature, expectedSignature)) return undefined;
 
     try {
@@ -206,24 +291,44 @@ export function verifyPkce(
   verifier: string,
 ): boolean {
   if (!verifier) return false;
-  if (method === 'plain') return timingSafeStringEquals(challenge, verifier);
+  if (method !== 'S256') return false;
   const hashed = crypto.createHash('sha256').update(verifier).digest();
   const expected = hashed.toString('base64url');
   return timingSafeStringEquals(expected, challenge);
 }
 
+// Per-process random key used to equalize input lengths before compare.
+// HMACing both sides produces fixed-size 32-byte digests, so the
+// subsequent timing-safe compare never short-circuits on length and
+// cannot leak the length of the expected value through timing.
+const COMPARE_KEY = crypto.randomBytes(32);
+
 function timingSafeStringEquals(a: string, b: string): boolean {
-  const ab = Buffer.from(a);
-  const bb = Buffer.from(b);
-  if (ab.length !== bb.length) return false;
-  return crypto.timingSafeEqual(ab, bb);
+  const hashA = crypto.createHmac('sha256', COMPARE_KEY).update(a, 'utf8').digest();
+  const hashB = crypto.createHmac('sha256', COMPARE_KEY).update(b, 'utf8').digest();
+  return crypto.timingSafeEqual(hashA, hashB);
 }
 
-export function getBaseUrl(req: Request): string {
-  const forwardedProto = pickHeader(req.headers['x-forwarded-proto']);
-  const forwardedHost = pickHeader(req.headers['x-forwarded-host']);
-  const host = forwardedHost ?? pickHeader(req.headers.host) ?? 'localhost';
-  const proto = forwardedProto ?? (isLocalHost(host) ? 'http' : 'https');
+// Resolves the public-facing base URL for metadata and redirect responses.
+//
+// If publicBaseUrl is provided (set by the operator to the configured
+// tunnel URL at startup), it is used verbatim. Otherwise the server falls
+// back to the request's Host header. X-Forwarded-* headers are never
+// trusted, because the server binds to 127.0.0.1 and those headers can
+// be spoofed by any remote client behind a tunnel proxy — honoring them
+// would let a remote attacker redirect OAuth issuer metadata to a host
+// they control.
+export function getBaseUrl(req: Request, publicBaseUrl?: string): string {
+  if (publicBaseUrl) {
+    try {
+      const parsed = new URL(publicBaseUrl);
+      return `${parsed.protocol}//${parsed.host}`;
+    } catch {
+      // fall through to host-header fallback
+    }
+  }
+  const host = pickHeader(req.headers.host) ?? 'localhost';
+  const proto = isLocalHost(host) ? 'http' : 'https';
   return `${proto}://${host}`;
 }
 

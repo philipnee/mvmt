@@ -1,6 +1,6 @@
 import chalk from 'chalk';
 import fs from 'fs';
-import { generateSessionToken, readSessionToken, TOKEN_PATH } from '../utils/token.js';
+import { defaultSigningKeyPath, generateSessionToken, readSessionToken, rotateSigningKey, TOKEN_PATH } from '../utils/token.js';
 
 export interface TokenSummary {
   token?: string;
@@ -28,6 +28,10 @@ export async function showTokenSummary(tokenPath = TOKEN_PATH): Promise<void> {
 
 export async function rotateToken(tokenPath = TOKEN_PATH): Promise<void> {
   const token = generateSessionToken(tokenPath);
+  // Rotate the OAuth signing key too so outstanding access tokens are
+  // invalidated. Keeping them valid across a token rotation would
+  // defeat the purpose of rotation.
+  rotateSigningKey(defaultSigningKeyPath(tokenPath));
   console.log(token);
   console.error(`Rotated session token at ${tokenPath}. Update any HTTP MCP clients that store the old token.`);
 }
