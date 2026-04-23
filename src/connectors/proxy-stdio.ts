@@ -1,6 +1,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { CallToolResult, Connector, ToolDefinition } from './types.js';
+import { createProxyToolPolicy, writeAccessDisabledResult } from './write-policy.js';
 
 export interface StdioProxyConfig {
   name: string;
@@ -16,18 +17,12 @@ export class StdioProxyConnector implements Connector {
   private client?: Client;
   private transport?: StdioClientTransport;
   private tools: ToolDefinition[] = [];
-  private readonly readOnlyFilesystem: boolean;
-  private readonly readOnlyMemPalace: boolean;
-  private readonly readOnlyGeneric: boolean;
+  private readonly toolAllowed: (name: string) => boolean;
 
   constructor(private readonly config: StdioProxyConfig) {
     this.id = `proxy_${sanitizeName(config.name)}`;
     this.displayName = config.name;
-    const isFs = isFilesystemProxy(config);
-    const isMemPalace = isMemPalaceProxy(config);
-    this.readOnlyFilesystem = isFs && config.writeAccess !== true;
-    this.readOnlyMemPalace = isMemPalace && config.writeAccess !== true;
-    this.readOnlyGeneric = !isFs && !isMemPalace && config.writeAccess === false;
+    this.toolAllowed = createProxyToolPolicy(config);
   }
 
   async initialize(): Promise<void> {
@@ -51,7 +46,7 @@ export class StdioProxyConnector implements Connector {
         description: tool.description || '',
         inputSchema: tool.inputSchema,
       }))
-      .filter((tool) => this.isToolAllowed(tool.name));
+      .filter((tool) => this.toolAllowed(tool.name));
   }
 
   async listTools(): Promise<ToolDefinition[]> {
@@ -60,16 +55,8 @@ export class StdioProxyConnector implements Connector {
 
   async callTool(name: string, args: Record<string, unknown>): Promise<CallToolResult> {
     if (!this.client) throw new Error(`Connector not initialized: ${this.displayName}`);
-    if (!this.isToolAllowed(name)) {
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `Error: write access is disabled for tool "${name}". Set writeAccess: true for proxy "${this.displayName}" in ~/.mvmt/config.yaml or re-run mvmt config setup to enable writes.`,
-          },
-        ],
-        isError: true,
-      };
+    if (!this.toolAllowed(name)) {
+      return writeAccessDisabledResult(name, this.displayName);
     }
     const result = await this.client.callTool({ name, arguments: args });
     return result as CallToolResult;
@@ -83,83 +70,11 @@ export class StdioProxyConnector implements Connector {
     }
   }
 
-  private isToolAllowed(name: string): boolean {
-    if (this.readOnlyFilesystem && !isReadOnlyFilesystemTool(name)) return false;
-    if (this.readOnlyMemPalace && isMemPalaceWriteTool(name)) return false;
-    if (this.readOnlyGeneric && isLikelyWriteTool(name)) return false;
-    return true;
-  }
 }
 
 export function sanitizeName(name: string): string {
   const sanitized = name.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
   return sanitized || 'server';
-}
-
-function isFilesystemProxy(config: StdioProxyConfig): boolean {
-  const fingerprint = [config.name, config.command, ...config.args].join(' ').toLowerCase();
-  return fingerprint.includes('filesystem');
-}
-
-function isMemPalaceProxy(config: StdioProxyConfig): boolean {
-  const fingerprint = [config.name, config.command, ...config.args].join(' ').toLowerCase();
-  return fingerprint.includes('mempalace');
-}
-
-function isReadOnlyFilesystemTool(name: string): boolean {
-  return READ_ONLY_FILESYSTEM_TOOLS.has(name);
-}
-
-const READ_ONLY_FILESYSTEM_TOOLS = new Set([
-  'directory_tree',
-  'get_file_info',
-  'list_allowed_directories',
-  'list_directory',
-  'read_file',
-  'read_media_file',
-  'read_multiple_files',
-  'read_text_file',
-  'search_files',
-]);
-
-const MEMPALACE_WRITE_TOOLS = new Set([
-  'mempalace_kg_add',
-  'mempalace_kg_invalidate',
-  'mempalace_create_tunnel',
-  'mempalace_delete_tunnel',
-  'mempalace_add_drawer',
-  'mempalace_delete_drawer',
-  'mempalace_update_drawer',
-  'mempalace_diary_write',
-  'mempalace_hook_settings',
-]);
-
-export function isMemPalaceWriteTool(name: string): boolean {
-  return MEMPALACE_WRITE_TOOLS.has(name.toLowerCase());
-}
-
-const WRITE_TOOL_PREFIXES = [
-  'write_',
-  'edit_',
-  'create_',
-  'delete_',
-  'remove_',
-  'move_',
-  'rename_',
-  'append_',
-  'update_',
-  'patch_',
-  'put_',
-  'upsert_',
-  'insert_',
-  'drop_',
-  'set_',
-  'mkdir',
-];
-
-export function isLikelyWriteTool(name: string): boolean {
-  const lower = name.toLowerCase();
-  return WRITE_TOOL_PREFIXES.some((prefix) => lower.startsWith(prefix));
 }
 
 const SAFE_ENV_KEYS = new Set([
