@@ -4,8 +4,7 @@ import { constants as fsConstants } from 'fs';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
-import yaml from 'yaml';
-import { getConfigPath } from '../config/loader.js';
+import { getConfigPath, saveConfig } from '../config/loader.js';
 import {
   DEFAULT_PATTERN_REDACTOR_PATTERNS,
   MvmtConfig,
@@ -114,11 +113,7 @@ export async function setupConfig(
     memPalaceConfig,
   );
 
-  await fs.mkdir(path.dirname(configPath), { recursive: true });
-  await fs.writeFile(configPath, yaml.stringify(config), 'utf-8');
-  if (process.platform !== 'win32') {
-    await fs.chmod(configPath, 0o600);
-  }
+  await saveConfig(configPath, config);
 
   console.log(chalk.green(`\nConfig saved to ${configPath}`));
   if (options.printNextStep !== false) {
