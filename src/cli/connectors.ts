@@ -3,11 +3,7 @@ import chalk from 'chalk';
 import path from 'path';
 import { expandHome, getConfigPath, loadConfig, saveConfig } from '../config/loader.js';
 import { MvmtConfig, ProxyConfig } from '../config/schema.js';
-import {
-  createMemPalaceProxyConfig,
-  detectMemPalace,
-  promptForMemPalace,
-} from '../connectors/mempalace-setup.js';
+import { getConnectorSetupDefinition, getSetupRegistry } from '../connectors/setup-registry.js';
 
 export interface ConnectorCommandOptions {
   config?: string;
@@ -22,29 +18,15 @@ export interface ConnectorSetupStatus {
 }
 
 export function getConnectorSetupStatuses(config: MvmtConfig): ConnectorSetupStatus[] {
-  return [
-    {
-      name: 'filesystem',
-      displayName: 'Filesystem',
-      configured: hasEnabledProxy(config, 'filesystem'),
-      addable: false,
-      note: 'configured by mvmt config setup',
-    },
-    {
-      name: 'obsidian',
-      displayName: 'Obsidian',
-      configured: config.obsidian?.enabled === true,
-      addable: false,
-      note: 'configured by mvmt config setup',
-    },
-    {
-      name: 'mempalace',
-      displayName: 'MemPalace',
-      configured: hasEnabledProxy(config, 'mempalace'),
-      addable: true,
-      note: 'can be added with mvmt connectors add mempalace',
-    },
-  ];
+  return getSetupRegistry().map((definition) => ({
+    name: definition.id,
+    displayName: definition.displayName,
+    configured: definition.isConfigured(config),
+    addable: definition.isAddable,
+    note: definition.isAddable
+      ? `can be added with mvmt connectors add ${definition.id}`
+      : 'configured by mvmt config setup',
+  }));
 }
 
 export async function listConnectors(options: ConnectorCommandOptions = {}): Promise<void> {
@@ -62,30 +44,41 @@ export async function addConnector(name?: string, options: ConnectorCommandOptio
   const configPath = options.config ? path.resolve(expandHome(options.config)) : getConfigPath();
   const config = loadConfig(options.config);
   const connectorName = name || (await promptForConnectorToAdd(config));
+  const definition = getConnectorSetupDefinition(connectorName);
 
-  if (connectorName !== 'mempalace') {
+  if (!definition) {
+    console.log(chalk.red(`Unknown connector setup: ${connectorName}`));
+    return;
+  }
+
+  if (!definition.isAddable) {
     console.log(chalk.yellow(`Connector setup is not supported by this command yet: ${connectorName}`));
     console.log(chalk.dim('Run mvmt config setup to configure filesystem folders or Obsidian.'));
     return;
   }
 
-  if (hasEnabledProxy(config, 'mempalace')) {
+  if (definition.isConfigured(config)) {
     const overwrite = await confirm({
-      message: 'MemPalace is already configured. Replace its config?',
+      message: `${definition.displayName} is already configured. Replace its config?`,
       default: false,
     });
     if (!overwrite) {
-      console.log(chalk.yellow('MemPalace config unchanged.'));
+      console.log(chalk.yellow(`${definition.displayName} config unchanged.`));
       return;
     }
   }
 
-  const detected = await detectMemPalace();
-  const memPalace = await promptForMemPalace(detected);
-  const nextConfig = upsertProxyConfig(config, createMemPalaceProxyConfig(memPalace));
+  const detected = await definition.detect();
+  const input = await definition.prompt(detected);
+  if (input === undefined) {
+    console.log(chalk.yellow(`${definition.displayName} config unchanged.`));
+    return;
+  }
+
+  const nextConfig = definition.apply(config, input);
 
   await saveConfig(configPath, nextConfig);
-  console.log(chalk.green(`MemPalace connector saved to ${configPath}`));
+  console.log(chalk.green(`${definition.displayName} connector saved to ${configPath}`));
   console.log(chalk.dim('Restart mvmt for the new connector to load.'));
 }
 
@@ -110,10 +103,6 @@ async function promptForConnectorToAdd(config: MvmtConfig): Promise<string> {
       value: status.name,
     })),
   });
-}
-
-function hasEnabledProxy(config: MvmtConfig, name: string): boolean {
-  return config.proxy.some((proxy) => sameProxyName(proxy.name, name) && proxy.enabled !== false);
 }
 
 function sameProxyName(left: string, right: string): boolean {
