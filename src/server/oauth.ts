@@ -90,6 +90,7 @@ export interface RegisteredClient {
   redirectUris: string[];
 }
 
+export class OAuthClientAlreadyRegisteredError extends Error {}
 export class OAuthClientPersistenceError extends Error {}
 
 export class OAuthStore {
@@ -134,16 +135,15 @@ export class OAuthStore {
       clientId: client.clientId,
       redirectUris: [...new Set(client.redirectUris.filter((uri) => typeof uri === 'string' && uri.length > 0))],
     };
-    const previous = this.clients.get(normalized.clientId);
+    const existing = this.clients.get(normalized.clientId);
+    if (existing) {
+      throw new OAuthClientAlreadyRegisteredError('OAuth client_id is already registered');
+    }
     this.clients.set(normalized.clientId, normalized);
     try {
       this.persistClients();
     } catch (err) {
-      if (previous) {
-        this.clients.set(previous.clientId, previous);
-      } else {
-        this.clients.delete(normalized.clientId);
-      }
+      this.clients.delete(normalized.clientId);
       throw err;
     }
     return normalized;
