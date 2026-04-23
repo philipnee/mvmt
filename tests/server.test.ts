@@ -672,6 +672,65 @@ describe('startHttpServer lifecycle', () => {
     }
   });
 
+  it('recovers stale MCP session IDs after a server restart', async () => {
+    const router = new ToolRouter([new EmptyConnector()]);
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const firstServer = await startHttpServer(router, { port: 0, tokenPath });
+    const sessionToken = fs.readFileSync(tokenPath, 'utf-8').trim();
+
+    try {
+      const initialize = await fetch(`http://127.0.0.1:${firstServer.port}/mcp`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${sessionToken}`,
+          Accept: 'application/json, text/event-stream',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: {
+            protocolVersion: '2025-03-26',
+            capabilities: {},
+            clientInfo: { name: 'mvmt-test', version: '0.0.0' },
+          },
+        }),
+      });
+      expect(initialize.status).toBe(200);
+      const staleSessionId = initialize.headers.get('mcp-session-id');
+      expect(staleSessionId).toBeTruthy();
+      await initialize.text();
+
+      await firstServer.close();
+
+      const secondServer = await startHttpServer(router, { port: 0, tokenPath });
+      try {
+        const listTools = await fetch(`http://127.0.0.1:${secondServer.port}/mcp`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${sessionToken}`,
+            Accept: 'application/json, text/event-stream',
+            'Content-Type': 'application/json',
+            'Mcp-Protocol-Version': '2025-03-26',
+            'Mcp-Session-Id': staleSessionId!,
+          },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }),
+        });
+
+        expect(listTools.status).toBe(200);
+        await expect(listTools.text()).resolves.toContain('"tools"');
+      } finally {
+        await secondServer.close();
+      }
+    } finally {
+      await firstServer.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('rejects OAuth access tokens when the advertised resource changes across restart', async () => {
     const router = new ToolRouter([new EmptyConnector()]);
     await router.initialize();

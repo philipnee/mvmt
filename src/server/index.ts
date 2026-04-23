@@ -550,6 +550,11 @@ async function handleMcpRequest(
     return;
   }
 
+  if (sessionId) {
+    await handleStatelessMcpRequest(req, res, router);
+    return;
+  }
+
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: () => randomUUID(),
   });
@@ -574,6 +579,24 @@ async function handleMcpRequest(
   if (transport.sessionId) {
     sessions.set(transport.sessionId, { transport, server, lastActivity: Date.now() });
   }
+}
+
+async function handleStatelessMcpRequest(req: Request, res: Response, router: ToolRouter): Promise<void> {
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+  });
+  const server = createMcpServer(router);
+
+  transport.onerror = (error) => {
+    if (isBenignDuplicateSseConflict(error)) {
+      log.debug(`MCP transport notice: ${error.message}`);
+      return;
+    }
+    log.warn(`MCP transport error: ${error.message}`);
+  };
+
+  await server.connect(transport);
+  await transport.handleRequest(req, res, req.body);
 }
 
 function authLogKind(req: Request): string {
