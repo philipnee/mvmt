@@ -7,14 +7,26 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { ToolRouter } from './router.js';
 import { log } from '../utils/logger.js';
-import { generateSessionToken, validateSessionToken } from '../utils/token.js';
+import { defaultClientsPath, defaultSigningKeyPath, ensureSessionToken, ensureSigningKey, readSigningKey, TOKEN_PATH, validateSessionToken } from '../utils/token.js';
 import {
   CodeChallengeMethod,
+  OAuthClientPersistenceError,
   OAuthError,
   OAuthStore,
   getBaseUrl,
   renderAuthorizePage,
 } from './oauth.js';
+import { rateLimit } from './rate-limit.js';
+
+// Rate limits are defense-in-depth against brute-force and DoS,
+// primarily meaningful when mvmt is exposed via a tunnel. Auth-gated
+// data-plane routes (/mcp) get a generous cap that comfortably covers
+// MCP polling. Auth surface routes (/authorize, /token, /register) get
+// a tight cap to slow session-token guessing. /health is polled
+// frequently and only checks the bearer.
+const DEFAULT_AUTH_RATE_LIMIT = { windowMs: 60_000, max: 30 };
+const DEFAULT_MCP_RATE_LIMIT = { windowMs: 60_000, max: 600 };
+const DEFAULT_HEALTH_RATE_LIMIT = { windowMs: 60_000, max: 120 };
 
 type McpSession = {
   transport: StreamableHTTPServerTransport;
@@ -22,15 +34,41 @@ type McpSession = {
   lastActivity: number;
 };
 
+export interface RateLimitOverrides {
+  auth?: { windowMs: number; max: number };
+  mcp?: { windowMs: number; max: number };
+  health?: { windowMs: number; max: number };
+}
+
 export interface HttpServerOptions {
   port: number;
   allowedOrigins?: string[];
   tokenPath?: string;
+  signingKeyPath?: string;
+  // Called at request time to resolve the public-facing base URL for
+  // OAuth metadata and redirect issuer values. When set, its result
+  // overrides the request Host header. This is how the tunnel URL gets
+  // propagated into OAuth responses without trusting X-Forwarded-* headers.
+  resolvePublicBaseUrl?: () => string | undefined;
+  // Override rate-limit buckets; used by tests to exercise the 429 path
+  // without blasting thousands of requests.
+  rateLimits?: RateLimitOverrides;
+  requestLog?: (entry: HttpRequestLogEntry) => void;
 }
 
 export interface StartedHttpServer {
   port: number;
   close(): Promise<void>;
+}
+
+export interface HttpRequestLogEntry {
+  ts: string;
+  kind: string;
+  method: string;
+  path: string;
+  status: number;
+  detail?: string;
+  clientId?: string;
 }
 
 export function createMcpServer(router: ToolRouter): Server {
@@ -81,12 +119,25 @@ export async function startStdioServer(router: ToolRouter): Promise<{ close(): P
 export async function startHttpServer(router: ToolRouter, options: HttpServerOptions): Promise<StartedHttpServer> {
   const { port } = options;
   const tokenPath = options.tokenPath;
+  const requestLog = options.requestLog;
+  const resolvePublicBaseUrl = options.resolvePublicBaseUrl;
+  const baseUrlFor = (req: Request): string => getBaseUrl(req, resolvePublicBaseUrl?.());
   const app = express();
   app.use(express.json({ limit: '10mb' }));
   app.use(express.urlencoded({ extended: false, limit: '64kb' }));
 
-  generateSessionToken(tokenPath);
-  const oauth = new OAuthStore();
+  ensureSessionToken(tokenPath);
+  const signingKeyPath = options.signingKeyPath ?? defaultSigningKeyPath(tokenPath ?? TOKEN_PATH);
+  // Create the signing key file on first boot, then re-read it on every
+  // HMAC op. This way `mvmt token rotate` (which rewrites the file)
+  // invalidates outstanding OAuth access tokens immediately, without
+  // requiring a server restart.
+  ensureSigningKey(signingKeyPath);
+  const clientsPath = defaultClientsPath(tokenPath ?? TOKEN_PATH);
+  const oauth = new OAuthStore({
+    signingKey: () => readSigningKey(signingKeyPath) ?? ensureSigningKey(signingKeyPath),
+    clientsPath,
+  });
   const oauthCleanup = setInterval(() => oauth.cleanup(), 60 * 1000);
   oauthCleanup.unref();
 
@@ -104,10 +155,15 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   }, 5 * 60 * 1000);
   cleanupInterval.unref();
 
+  const authLimiter = rateLimit(options.rateLimits?.auth ?? DEFAULT_AUTH_RATE_LIMIT);
+  const mcpLimiter = rateLimit(options.rateLimits?.mcp ?? DEFAULT_MCP_RATE_LIMIT);
+  const healthLimiter = rateLimit(options.rateLimits?.health ?? DEFAULT_HEALTH_RATE_LIMIT);
+
   const originCheck = buildOriginCheck(options.allowedOrigins ?? []);
 
   const authMiddleware: express.RequestHandler = (req, res, next) => {
     if (!originCheck(req)) {
+      logHttpRequest(requestLog, req, 403, authLogKind(req), 'origin_not_allowed');
       res.status(403).json({ error: 'Origin not allowed' });
       return;
     }
@@ -119,16 +175,18 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       return;
     }
 
-    const baseUrl = getBaseUrl(req);
+    const baseUrl = baseUrlFor(req);
     res.setHeader(
       'WWW-Authenticate',
       `Bearer realm="mvmt", resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`,
     );
+    logHttpRequest(requestLog, req, 401, authLogKind(req), 'missing_or_invalid_bearer');
     res.status(401).json({ error: 'Invalid or missing bearer token' });
   };
 
   const authorizationServerMetadata = (req: Request, res: Response) => {
-    const baseUrl = getBaseUrl(req);
+    const baseUrl = baseUrlFor(req);
+    logHttpRequest(requestLog, req, 200, 'oauth.discovery');
     res.json({
       issuer: baseUrl,
       authorization_endpoint: `${baseUrl}/authorize`,
@@ -136,9 +194,8 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       registration_endpoint: `${baseUrl}/register`,
       response_types_supported: ['code'],
       grant_types_supported: ['authorization_code'],
-      // S256 is strongly preferred. plain is kept for compatibility with
-      // simple MCP/OAuth clients during the v0 tunnel flow.
-      code_challenge_methods_supported: ['S256', 'plain'],
+      code_challenge_methods_supported: ['S256'],
+      authorization_response_iss_parameter_supported: true,
       token_endpoint_auth_methods_supported: ['none'],
       scopes_supported: ['mcp'],
     });
@@ -147,7 +204,8 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   app.get('/.well-known/oauth-authorization-server/mcp', authorizationServerMetadata);
 
   const protectedResourceMetadata = (req: Request, res: Response) => {
-    const baseUrl = getBaseUrl(req);
+    const baseUrl = baseUrlFor(req);
+    logHttpRequest(requestLog, req, 200, 'oauth.resource');
     res.json({
       resource: `${baseUrl}/mcp`,
       authorization_servers: [baseUrl],
@@ -158,39 +216,85 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   app.get('/.well-known/oauth-protected-resource', protectedResourceMetadata);
   app.get('/.well-known/oauth-protected-resource/mcp', protectedResourceMetadata);
 
-  app.post('/register', (req, res) => {
+  app.post('/register', authLimiter, (req, res) => {
     const requested = (req.body ?? {}) as Record<string, unknown>;
     const clientId =
       typeof requested.client_id === 'string' && requested.client_id.length > 0
         ? (requested.client_id as string)
         : `mvmt-${Date.now().toString(36)}`;
+    const redirectUris = Array.isArray(requested.redirect_uris)
+      ? requested.redirect_uris.filter((uri): uri is string => typeof uri === 'string' && uri.length > 0)
+      : [];
+    if (redirectUris.length === 0) {
+      logHttpRequest(requestLog, req, 400, 'oauth.register', 'missing_redirect_uris', clientId);
+      res.status(400).json({ error: 'invalid_redirect_uri', error_description: 'redirect_uris is required' });
+      return;
+    }
+    for (const uri of redirectUris) {
+      try {
+        new URL(uri);
+      } catch {
+        logHttpRequest(requestLog, req, 400, 'oauth.register', 'invalid_redirect_uri', clientId);
+        res.status(400).json({ error: 'invalid_redirect_uri' });
+        return;
+      }
+    }
+    let registered;
+    try {
+      registered = oauth.registerClient({ clientId, redirectUris });
+    } catch (err) {
+      if (err instanceof OAuthClientPersistenceError) {
+        logHttpRequest(requestLog, req, 500, 'oauth.register', 'persist_failed', clientId);
+        res.status(500).json({
+          error: 'server_error',
+          error_description: 'Failed to persist OAuth client registration',
+        });
+        return;
+      }
+      throw err;
+    }
+    logHttpRequest(requestLog, req, 201, 'oauth.register', undefined, clientId);
     res.status(201).json({
-      client_id: clientId,
+      client_id: registered.clientId,
       token_endpoint_auth_method: 'none',
       grant_types: ['authorization_code'],
       response_types: ['code'],
-      redirect_uris: Array.isArray(requested.redirect_uris) ? requested.redirect_uris : [],
+      redirect_uris: registered.redirectUris,
     });
   });
 
-  app.get('/authorize', (req, res) => {
+  app.get('/authorize', authLimiter, (req, res) => {
     const params = parseAuthorizeParams(req.query);
     if ('error' in params) {
+      logHttpRequest(requestLog, req, 400, 'oauth.authorize', params.error);
       res.status(400).type('text/plain').send(params.error);
       return;
     }
+    if (!oauth.isRedirectUriAllowed(params.clientId, params.redirectUri)) {
+      logHttpRequest(requestLog, req, 400, 'oauth.authorize', 'unregistered_redirect_uri', params.clientId);
+      res.status(400).type('text/plain').send('redirect_uri is not registered for this client');
+      return;
+    }
+    logHttpRequest(requestLog, req, 200, 'oauth.authorize', undefined, params.clientId);
     res.type('text/html').send(renderAuthorizePage(params));
   });
 
-  app.post('/authorize', (req, res) => {
+  app.post('/authorize', authLimiter, (req, res) => {
     const params = parseAuthorizeParams(req.body ?? {});
     if ('error' in params) {
+      logHttpRequest(requestLog, req, 400, 'oauth.authorize', params.error);
       res.status(400).type('text/plain').send(params.error);
+      return;
+    }
+    if (!oauth.isRedirectUriAllowed(params.clientId, params.redirectUri)) {
+      logHttpRequest(requestLog, req, 400, 'oauth.authorize', 'unregistered_redirect_uri', params.clientId);
+      res.status(400).type('text/plain').send('redirect_uri is not registered for this client');
       return;
     }
 
     const sessionTokenRaw = typeof req.body?.session_token === 'string' ? req.body.session_token : '';
     if (!validateSessionToken(`Bearer ${sessionTokenRaw}`, tokenPath)) {
+      logHttpRequest(requestLog, req, 401, 'oauth.authorize', 'invalid_session_token', params.clientId);
       res
         .status(401)
         .type('text/html')
@@ -201,6 +305,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     const authCode = oauth.issueCode({
       clientId: params.clientId,
       redirectUri: params.redirectUri,
+      resource: params.resource,
       codeChallenge: params.codeChallenge,
       codeChallengeMethod: params.codeChallengeMethod,
       scope: params.scope,
@@ -208,14 +313,17 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
 
     const redirect = new URL(params.redirectUri);
     redirect.searchParams.set('code', authCode.code);
+    redirect.searchParams.set('iss', baseUrlFor(req));
     if (params.state) redirect.searchParams.set('state', params.state);
+    logHttpRequest(requestLog, req, 302, 'oauth.authorize', undefined, params.clientId);
     res.redirect(302, redirect.toString());
   });
 
-  app.post('/token', (req, res) => {
+  app.post('/token', authLimiter, (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const grantType = typeof body.grant_type === 'string' ? body.grant_type : undefined;
     if (grantType !== 'authorization_code') {
+      logHttpRequest(requestLog, req, 400, 'oauth.token', 'unsupported_grant_type');
       res.status(400).json({ error: 'unsupported_grant_type' });
       return;
     }
@@ -223,15 +331,18 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     const code = typeof body.code === 'string' ? body.code : undefined;
     const clientId = typeof body.client_id === 'string' ? body.client_id : undefined;
     const redirectUri = typeof body.redirect_uri === 'string' ? body.redirect_uri : undefined;
+    const resource = typeof body.resource === 'string' ? body.resource : undefined;
     const codeVerifier = typeof body.code_verifier === 'string' ? body.code_verifier : undefined;
 
     if (!code || !clientId || !redirectUri || !codeVerifier) {
+      logHttpRequest(requestLog, req, 400, 'oauth.token', 'invalid_request', clientId);
       res.status(400).json({ error: 'invalid_request' });
       return;
     }
 
     try {
-      const accessToken = oauth.consumeCode({ code, clientId, redirectUri, codeVerifier });
+      const accessToken = oauth.consumeCode({ code, clientId, redirectUri, resource, codeVerifier });
+      logHttpRequest(requestLog, req, 200, 'oauth.token', undefined, clientId);
       res.json({
         access_token: accessToken.token,
         token_type: 'Bearer',
@@ -240,25 +351,30 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       });
     } catch (err) {
       if (err instanceof OAuthError) {
+        logHttpRequest(requestLog, req, 400, 'oauth.token', err.code, clientId);
         res.status(400).json({ error: err.code, error_description: err.message });
         return;
       }
       log.warn(`Token exchange failed: ${err instanceof Error ? err.message : 'unknown'}`);
+      logHttpRequest(requestLog, req, 500, 'oauth.token', 'server_error', clientId);
       res.status(500).json({ error: 'server_error' });
     }
   });
 
-  app.post('/mcp', authMiddleware, async (req, res) => {
+  app.post('/mcp', mcpLimiter, authMiddleware, async (req, res) => {
     await handleMcpRequest(req, res, router, sessions);
+    logHttpRequest(requestLog, req, res.statusCode, 'mcp.request');
   });
 
-  app.get('/mcp', authMiddleware, async (req, res) => {
+  app.get('/mcp', mcpLimiter, authMiddleware, async (req, res) => {
     await handleMcpRequest(req, res, router, sessions);
+    logHttpRequest(requestLog, req, res.statusCode, 'mcp.request');
   });
 
-  app.delete('/mcp', authMiddleware, async (req, res) => {
+  app.delete('/mcp', mcpLimiter, authMiddleware, async (req, res) => {
     const sessionId = getSessionId(req);
     if (!sessionId || !sessions.has(sessionId)) {
+      logHttpRequest(requestLog, req, 404, 'mcp.request', 'session_not_found');
       res.status(404).json({ error: 'Session not found' });
       return;
     }
@@ -266,10 +382,12 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     const session = sessions.get(sessionId)!;
     await session.transport.close();
     sessions.delete(sessionId);
+    logHttpRequest(requestLog, req, 200, 'mcp.request');
     res.status(200).json({ ok: true });
   });
 
-  app.get('/health', authMiddleware, (_req, res) => {
+  app.get('/health', healthLimiter, authMiddleware, (_req, res) => {
+    logHttpRequest(requestLog, _req, 200, 'health.request');
     res.json({
       status: 'ok',
       uptime: Math.floor(process.uptime()),
@@ -357,6 +475,32 @@ async function handleMcpRequest(
   }
 }
 
+function authLogKind(req: Request): string {
+  if (req.path === '/mcp') return 'mcp.auth';
+  if (req.path === '/health') return 'health.auth';
+  return 'http.auth';
+}
+
+function logHttpRequest(
+  requestLog: ((entry: HttpRequestLogEntry) => void) | undefined,
+  req: Request,
+  status: number,
+  kind: string,
+  detail?: string,
+  clientId?: string,
+): void {
+  if (!requestLog) return;
+  requestLog({
+    ts: new Date().toISOString(),
+    kind,
+    method: req.method,
+    path: req.path,
+    status,
+    ...(detail ? { detail } : {}),
+    ...(clientId ? { clientId } : {}),
+  });
+}
+
 function getSessionId(req: Request): string | undefined {
   const header = req.headers['mcp-session-id'];
   return Array.isArray(header) ? header[0] : header;
@@ -400,6 +544,7 @@ type AuthorizeParams = {
   responseType: string;
   clientId: string;
   redirectUri: string;
+  resource?: string;
   state?: string;
   scope?: string;
   codeChallenge: string;
@@ -410,10 +555,9 @@ function parseAuthorizeParams(source: Record<string, unknown>): AuthorizeParams 
   const responseType = stringField(source.response_type);
   const clientId = stringField(source.client_id);
   const redirectUri = stringField(source.redirect_uri);
+  const resource = stringField(source.resource);
   const codeChallenge = stringField(source.code_challenge);
-  // S256 is strongly preferred. Defaulting to plain is compatibility behavior
-  // for simple clients that omit code_challenge_method.
-  const codeChallengeMethodRaw = stringField(source.code_challenge_method) ?? 'plain';
+  const codeChallengeMethodRaw = stringField(source.code_challenge_method) ?? 'S256';
 
   if (!responseType) return { error: 'Missing response_type' };
   if (responseType !== 'code') return { error: 'Only response_type=code is supported' };
@@ -426,19 +570,27 @@ function parseAuthorizeParams(source: Record<string, unknown>): AuthorizeParams 
   } catch {
     return { error: 'Invalid redirect_uri' };
   }
+  if (resource) {
+    try {
+      new URL(resource);
+    } catch {
+      return { error: 'Invalid resource' };
+    }
+  }
 
-  if (codeChallengeMethodRaw !== 'S256' && codeChallengeMethodRaw !== 'plain') {
-    return { error: 'Unsupported code_challenge_method' };
+  if (codeChallengeMethodRaw !== 'S256') {
+    return { error: 'Unsupported code_challenge_method (S256 required)' };
   }
 
   return {
     responseType,
     clientId,
     redirectUri,
+    resource,
     state: stringField(source.state),
     scope: stringField(source.scope),
     codeChallenge,
-    codeChallengeMethod: codeChallengeMethodRaw,
+    codeChallengeMethod: 'S256',
   };
 }
 

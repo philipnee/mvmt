@@ -2,14 +2,24 @@
 
 import { Command } from 'commander';
 import { addConnector, listConnectors } from '../src/cli/connectors.js';
+import { runConfigSetup, showConfig } from '../src/cli/config.js';
 import { doctor } from '../src/cli/doctor.js';
 import { init } from '../src/cli/init.js';
 import { start } from '../src/cli/start.js';
-import { rotateToken, showToken } from '../src/cli/token.js';
+import {
+  configureTunnel,
+  refreshTunnelCommand,
+  showTunnel,
+  showTunnelLogs,
+  startTunnelCommand,
+  stopTunnelCommand,
+  streamTunnelLogs,
+} from '../src/cli/tunnel.js';
+import { rotateToken, showToken, showTokenSummary } from '../src/cli/token.js';
 import { maybePrintUpdateNotice, readPackageInfo } from '../src/utils/version.js';
 
 const packageInfo = readPackageInfo();
-const argv = process.argv.slice(2);
+const argv = normalizeHelpArgs(process.argv.slice(2));
 
 if (argv.includes('--version') || argv.includes('-V')) {
   console.log(`mvmt ${packageInfo.version}`);
@@ -26,6 +36,7 @@ program
   .description('Expose personal local data through one MCP endpoint')
   .option('-V, --version', 'Print mvmt version and check for updates')
   .option('--no-update-check', 'Skip automatic npm update checks');
+program.showHelpAfterError();
 
 program.hook('preAction', async (thisCommand, actionCommand) => {
   const globalOptions = thisCommand.opts<{ updateCheck?: boolean }>();
@@ -34,27 +45,21 @@ program.hook('preAction', async (thisCommand, actionCommand) => {
   if (isTokenCommand(actionCommand) || isTokenShortcutCommand(actionCommand)) return;
 
   const actionOptions = actionCommand.opts<{ stdio?: boolean }>();
-  if (actionCommand.name() === 'start' && actionOptions.stdio) return;
+  if ((actionCommand.name() === 'serve' || actionCommand.name() === 'start') && actionOptions.stdio) return;
 
   await maybePrintUpdateNotice({ packageInfo });
 });
 
 program
-  .command('init')
-  .description('Interactive setup wizard: choose local folders and native connectors')
-  .action(async () => {
-    await init();
-  });
-
-program
-  .command('start')
-  .description('Start the unified MCP server')
+  .command('serve')
+  .description('Configure mvmt if needed, then start the MCP server')
   .option('-p, --port <number>', 'Override port')
   .option('-c, --config <path>', 'Config file path')
+  .option('--path <dir>', 'Temporarily expose a filesystem folder as read-only for this run only (repeatable)', collectValues)
   .option('--stdio', 'Use stdio transport')
   .option('-i, --interactive', 'Start an interactive control prompt')
   .option('-v, --verbose', 'Verbose logging')
-  .action(async (options: { port?: string; config?: string; stdio?: boolean; interactive?: boolean; verbose?: boolean }) => {
+  .action(async (options: { port?: string; config?: string; path?: string[]; stdio?: boolean; interactive?: boolean; verbose?: boolean }) => {
     await start(options);
   });
 
@@ -69,9 +74,102 @@ program
     await doctor({ ...options, updateCheck: globalOptions.updateCheck !== false });
   });
 
+const configCommand = program
+  .command('config')
+  .description('Show the saved mvmt config')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (options: { config?: string }) => {
+    await showConfig(options);
+  });
+
+configCommand
+  .command('setup')
+  .description('Run guided setup and save mvmt config')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (options: { config?: string }) => {
+    await runConfigSetup({ config: options.config });
+  });
+
+const tokenCommand = program
+  .command('token')
+  .description('Show the current bearer token and age')
+  .action(async () => {
+    await showTokenSummary();
+  });
+
+tokenCommand
+  .command('show', { hidden: true })
+  .description('Compatibility alias for raw token output')
+  .action(async () => {
+    await showToken();
+  });
+
+tokenCommand
+  .command('rotate')
+  .description('Regenerate and print the current bearer token')
+  .action(async () => {
+    await rotateToken();
+  });
+
+const tunnelCommand = program
+  .command('tunnel')
+  .description('Show tunnel status or manage the active tunnel')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (options: { config?: string }) => {
+    await showTunnel(options);
+  });
+
+tunnelCommand
+  .command('config')
+  .description('Choose a different tunnel and save it to config')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (options: { config?: string }) => {
+    await configureTunnel(options);
+  });
+
+tunnelCommand
+  .command('start')
+  .description('Start the configured tunnel for the running mvmt process')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (options: { config?: string }) => {
+    await startTunnelCommand(options);
+  });
+
+tunnelCommand
+  .command('refresh')
+  .description('Restart the configured tunnel and print the new URL')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (options: { config?: string }) => {
+    await refreshTunnelCommand(options);
+  });
+
+tunnelCommand
+  .command('stop')
+  .description('Stop public tunnel exposure without stopping mvmt')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (options: { config?: string }) => {
+    await stopTunnelCommand(options);
+  });
+
+const tunnelLogsCommand = tunnelCommand
+  .command('logs')
+  .description('Show recent tunnel output')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (options: { config?: string }) => {
+    await showTunnelLogs(options);
+  });
+
+tunnelLogsCommand
+  .command('stream')
+  .description('Stream live tunnel output from the running mvmt process')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (options: { config?: string }) => {
+    await streamTunnelLogs(options);
+  });
+
 const connectorsCommand = program
-  .command('connectors')
-  .description('List or add supported local connector setups');
+  .command('connectors', { hidden: true })
+  .description('Compatibility connector helpers');
 
 connectorsCommand
   .command('list')
@@ -90,38 +188,40 @@ connectorsCommand
   });
 
 program
-  .command('show')
-  .description('Print the current HTTP bearer token without regenerating it')
+  .command('init', { hidden: true })
+  .description('Compatibility alias for `mvmt config setup`')
+  .action(async () => {
+    await init();
+  });
+
+program
+  .command('start', { hidden: true })
+  .description('Compatibility alias for `mvmt serve`')
+  .option('-p, --port <number>', 'Override port')
+  .option('-c, --config <path>', 'Config file path')
+  .option('--path <dir>', 'Temporarily expose a filesystem folder as read-only for this run only (repeatable)', collectValues)
+  .option('--stdio', 'Use stdio transport')
+  .option('-i, --interactive', 'Start an interactive control prompt')
+  .option('-v, --verbose', 'Verbose logging')
+  .action(async (options: { port?: string; config?: string; path?: string[]; stdio?: boolean; interactive?: boolean; verbose?: boolean }) => {
+    await start(options);
+  });
+
+program
+  .command('show', { hidden: true })
+  .description('Compatibility alias for raw token output')
   .action(async () => {
     await showToken();
   });
 
 program
-  .command('rotate')
-  .description('Regenerate and print the HTTP bearer token')
+  .command('rotate', { hidden: true })
+  .description('Compatibility alias for `mvmt token rotate`')
   .action(async () => {
     await rotateToken();
   });
 
-const tokenCommand = program
-  .command('token', { hidden: true })
-  .description('Manage the HTTP bearer token');
-
-tokenCommand
-  .command('show')
-  .description('Alias for `mvmt show`')
-  .action(async () => {
-    await showToken();
-  });
-
-tokenCommand
-  .command('rotate')
-  .description('Alias for `mvmt rotate`')
-  .action(async () => {
-    await rotateToken();
-  });
-
-await program.parseAsync();
+await program.parseAsync(['node', process.argv[1] ?? 'mvmt', ...argv]);
 
 function isTokenCommand(command: Command): boolean {
   let current: Command | null = command;
@@ -134,4 +234,15 @@ function isTokenCommand(command: Command): boolean {
 
 function isTokenShortcutCommand(command: Command): boolean {
   return command.name() === 'show' || command.name() === 'rotate';
+}
+
+function normalizeHelpArgs(args: string[]): string[] {
+  if (args.length > 1 && args.at(-1) === 'help' && args[0] !== 'help' && !args.includes('--help') && !args.includes('-h')) {
+    return [...args.slice(0, -1), '--help'];
+  }
+  return args;
+}
+
+function collectValues(value: string, previous?: string[]): string[] {
+  return [...(previous ?? []), value];
 }

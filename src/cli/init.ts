@@ -32,11 +32,19 @@ export interface MemPalaceConfigInput {
   writeAccess: boolean;
 }
 
-export async function init(): Promise<void> {
+export interface SetupConfigOptions {
+  config?: string;
+  promptOnOverwrite?: boolean;
+  printNextStep?: boolean;
+}
+
+export async function setupConfig(
+  options: SetupConfigOptions = {},
+): Promise<{ config: MvmtConfig; configPath: string } | undefined> {
   printBanner();
 
-  const configPath = getConfigPath();
-  if (await pathExists(configPath)) {
+  const configPath = options.config ? expandHome(options.config) : getConfigPath();
+  if (options.promptOnOverwrite !== false && await pathExists(configPath)) {
     const overwrite = await confirm({
       message: `Config already exists at ${configPath}. Overwrite?`,
       default: false,
@@ -113,7 +121,17 @@ export async function init(): Promise<void> {
   }
 
   console.log(chalk.green(`\nConfig saved to ${configPath}`));
-  console.log(`\nNext: run ${chalk.cyan('mvmt start')}\n`);
+  if (options.printNextStep !== false) {
+    console.log(`\nNext: run ${chalk.cyan('mvmt serve')}\n`);
+  } else {
+    console.log('');
+  }
+
+  return { config, configPath };
+}
+
+export async function init(options: SetupConfigOptions = {}): Promise<void> {
+  await setupConfig(options);
 }
 
 export function buildConfig(

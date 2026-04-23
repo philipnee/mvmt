@@ -30,14 +30,14 @@ export function getConnectorSetupStatuses(config: MvmtConfig): ConnectorSetupSta
       displayName: 'Filesystem',
       configured: hasEnabledProxy(config, 'filesystem'),
       addable: false,
-      note: 'configured by mvmt init',
+      note: 'configured by mvmt config setup',
     },
     {
       name: 'obsidian',
       displayName: 'Obsidian',
       configured: config.obsidian?.enabled === true,
       addable: false,
-      note: 'configured by mvmt init',
+      note: 'configured by mvmt config setup',
     },
     {
       name: 'mempalace',
@@ -67,7 +67,7 @@ export async function addConnector(name?: string, options: ConnectorCommandOptio
 
   if (connectorName !== 'mempalace') {
     console.log(chalk.yellow(`Connector setup is not supported by this command yet: ${connectorName}`));
-    console.log(chalk.dim('Run mvmt init to configure filesystem folders or Obsidian.'));
+    console.log(chalk.dim('Run mvmt config setup to configure filesystem folders or Obsidian.'));
     return;
   }
 

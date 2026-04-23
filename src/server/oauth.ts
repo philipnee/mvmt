@@ -1,12 +1,15 @@
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 import type { Request } from 'express';
 
-export type CodeChallengeMethod = 'S256' | 'plain';
+export type CodeChallengeMethod = 'S256';
 
 export interface AuthorizationCode {
   code: string;
   clientId: string;
   redirectUri: string;
+  resource?: string;
   codeChallenge: string;
   codeChallengeMethod: CodeChallengeMethod;
   scope?: string;
@@ -24,6 +27,7 @@ export interface AccessToken {
 export interface IssueCodeInput {
   clientId: string;
   redirectUri: string;
+  resource?: string;
   codeChallenge: string;
   codeChallengeMethod: CodeChallengeMethod;
   scope?: string;
@@ -33,33 +37,133 @@ export interface ConsumeCodeInput {
   code: string;
   clientId: string;
   redirectUri: string;
+  resource?: string;
   codeVerifier: string;
 }
 
 export interface OAuthStoreOptions {
   codeTtlMs?: number;
   tokenTtlMs?: number;
+  // Key material used to sign and validate self-contained access tokens.
+  // Pass a function when the key can change at runtime (e.g. backed by a
+  // file that `mvmt token rotate` rewrites) so rotation invalidates
+  // outstanding tokens without requiring a server restart.
+  signingKey?: string | (() => string);
+  clientsPath?: string;
   now?: () => number;
 }
 
 const DEFAULT_CODE_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+const ACCESS_TOKEN_PREFIX = 'mvmtv1';
+
+export interface RegisteredClient {
+  clientId: string;
+  redirectUris: string[];
+}
+
+export class OAuthClientPersistenceError extends Error {}
 
 export class OAuthStore {
   private readonly codes = new Map<string, AuthorizationCode>();
-  private readonly tokens = new Map<string, AccessToken>();
+  private readonly clients = new Map<string, RegisteredClient>();
   private readonly codeTtlMs: number;
   private readonly tokenTtlMs: number;
+  private readonly resolveSigningKey: () => string;
+  private readonly clientsPath?: string;
   private readonly now: () => number;
 
   constructor(options: OAuthStoreOptions = {}) {
     this.codeTtlMs = options.codeTtlMs ?? DEFAULT_CODE_TTL_MS;
     this.tokenTtlMs = options.tokenTtlMs ?? DEFAULT_TOKEN_TTL_MS;
+    const keyOption = options.signingKey;
+    if (typeof keyOption === 'function') {
+      this.resolveSigningKey = keyOption;
+    } else if (typeof keyOption === 'string') {
+      const staticKey = keyOption;
+      this.resolveSigningKey = () => staticKey;
+    } else {
+      const ephemeral = crypto.randomBytes(32).toString('base64url');
+      this.resolveSigningKey = () => ephemeral;
+    }
+    this.clientsPath = options.clientsPath;
     this.now = options.now ?? Date.now;
+    this.loadClientsFromDisk();
   }
 
   get tokenTtlSeconds(): number {
     return Math.floor(this.tokenTtlMs / 1000);
+  }
+
+  registerClient(client: RegisteredClient): RegisteredClient {
+    const normalized: RegisteredClient = {
+      clientId: client.clientId,
+      redirectUris: [...new Set(client.redirectUris.filter((uri) => typeof uri === 'string' && uri.length > 0))],
+    };
+    const previous = this.clients.get(normalized.clientId);
+    this.clients.set(normalized.clientId, normalized);
+    try {
+      this.persistClients();
+    } catch (err) {
+      if (previous) {
+        this.clients.set(previous.clientId, previous);
+      } else {
+        this.clients.delete(normalized.clientId);
+      }
+      throw err;
+    }
+    return normalized;
+  }
+
+  getClient(clientId: string): RegisteredClient | undefined {
+    return this.clients.get(clientId);
+  }
+
+  isRedirectUriAllowed(clientId: string, redirectUri: string): boolean {
+    const client = this.clients.get(clientId);
+    if (!client) return false;
+    return client.redirectUris.includes(redirectUri);
+  }
+
+  private loadClientsFromDisk(): void {
+    if (!this.clientsPath) return;
+    let raw: string;
+    try {
+      raw = fs.readFileSync(this.clientsPath, 'utf-8');
+    } catch {
+      return;
+    }
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) return;
+      for (const entry of parsed) {
+        if (!entry || typeof entry !== 'object') continue;
+        const clientId = (entry as RegisteredClient).clientId;
+        const redirectUris = (entry as RegisteredClient).redirectUris;
+        if (typeof clientId !== 'string' || !Array.isArray(redirectUris)) continue;
+        const cleaned = redirectUris.filter((uri) => typeof uri === 'string' && uri.length > 0);
+        if (cleaned.length === 0) continue;
+        this.clients.set(clientId, { clientId, redirectUris: [...new Set(cleaned)] });
+      }
+    } catch {
+      // Ignore corrupt registry; next registration rewrites the file.
+    }
+  }
+
+  private persistClients(): void {
+    if (!this.clientsPath) return;
+    const data = JSON.stringify([...this.clients.values()]);
+    try {
+      fs.mkdirSync(path.dirname(this.clientsPath), { recursive: true });
+      fs.writeFileSync(this.clientsPath, data, { mode: 0o600 });
+      if (process.platform !== 'win32') {
+        fs.chmodSync(this.clientsPath, 0o600);
+      }
+    } catch (err) {
+      throw new OAuthClientPersistenceError(
+        err instanceof Error ? err.message : 'Failed to persist OAuth client registry',
+      );
+    }
   }
 
   issueCode(input: IssueCodeInput): AuthorizationCode {
@@ -68,6 +172,7 @@ export class OAuthStore {
       code,
       clientId: input.clientId,
       redirectUri: input.redirectUri,
+      resource: input.resource,
       codeChallenge: input.codeChallenge,
       codeChallengeMethod: input.codeChallengeMethod,
       scope: input.scope,
@@ -96,6 +201,9 @@ export class OAuthStore {
     if (entry.redirectUri !== input.redirectUri) {
       throw new OAuthError('invalid_grant', 'Redirect URI mismatch for authorization code');
     }
+    if (entry.resource && entry.resource !== input.resource) {
+      throw new OAuthError('invalid_grant', 'Resource mismatch for authorization code');
+    }
     if (!verifyPkce(entry.codeChallenge, entry.codeChallengeMethod, input.codeVerifier)) {
       throw new OAuthError('invalid_grant', 'PKCE verification failed');
     }
@@ -107,15 +215,29 @@ export class OAuthStore {
   }
 
   issueAccessToken(input: { clientId: string; scope?: string }): AccessToken {
-    const token = crypto.randomBytes(32).toString('base64url');
-    const entry: AccessToken = {
+    const expiresAt = this.now() + this.tokenTtlMs;
+    const payload = Buffer.from(
+      JSON.stringify({
+        clientId: input.clientId,
+        scope: input.scope,
+        expiresAt,
+      }),
+      'utf-8',
+    ).toString('base64url');
+    // HMAC-SHA256 MACs the access-token payload with a 256-bit random
+    // signing key. This is JWT-style token signing, not password hashing —
+    // CodeQL's js/insufficient-password-hash (which recommends bcrypt et al.)
+    // is a false positive because bcrypt is for low-entropy human secrets,
+    // not deterministic MACs over structured payloads.
+    const signature = crypto.createHmac('sha256', this.resolveSigningKey()).update(payload).digest('base64url');
+    const token = `${ACCESS_TOKEN_PREFIX}.${payload}.${signature}`;
+
+    return {
       token,
       clientId: input.clientId,
       scope: input.scope,
-      expiresAt: this.now() + this.tokenTtlMs,
+      expiresAt,
     };
-    this.tokens.set(token, entry);
-    return entry;
   }
 
   validateAccessToken(authHeader: string | undefined): AccessToken | undefined {
@@ -123,12 +245,7 @@ export class OAuthStore {
     const parts = authHeader.split(' ');
     if (parts.length !== 2 || parts[0] !== 'Bearer') return undefined;
     const provided = parts[1];
-
-    for (const entry of this.tokens.values()) {
-      if (entry.expiresAt < this.now()) continue;
-      if (timingSafeStringEquals(provided, entry.token)) return entry;
-    }
-    return undefined;
+    return this.parseAccessToken(provided);
   }
 
   cleanup(): void {
@@ -136,8 +253,36 @@ export class OAuthStore {
     for (const [code, entry] of this.codes) {
       if (entry.expiresAt < now || entry.consumed) this.codes.delete(code);
     }
-    for (const [token, entry] of this.tokens) {
-      if (entry.expiresAt < now) this.tokens.delete(token);
+  }
+
+  private parseAccessToken(token: string): AccessToken | undefined {
+    const parts = token.split('.');
+    if (parts.length !== 3 || parts[0] !== ACCESS_TOKEN_PREFIX) return undefined;
+
+    const payload = parts[1];
+    const signature = parts[2];
+    const expectedSignature = crypto.createHmac('sha256', this.resolveSigningKey()).update(payload).digest('base64url');
+    if (!timingSafeStringEquals(signature, expectedSignature)) return undefined;
+
+    try {
+      const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8')) as {
+        clientId?: unknown;
+        scope?: unknown;
+        expiresAt?: unknown;
+      };
+      if (typeof decoded.clientId !== 'string') return undefined;
+      if (decoded.scope !== undefined && typeof decoded.scope !== 'string') return undefined;
+      if (typeof decoded.expiresAt !== 'number' || !Number.isFinite(decoded.expiresAt)) return undefined;
+      if (decoded.expiresAt < this.now()) return undefined;
+
+      return {
+        token,
+        clientId: decoded.clientId,
+        scope: decoded.scope,
+        expiresAt: decoded.expiresAt,
+      };
+    } catch {
+      return undefined;
     }
   }
 }
@@ -164,24 +309,44 @@ export function verifyPkce(
   verifier: string,
 ): boolean {
   if (!verifier) return false;
-  if (method === 'plain') return timingSafeStringEquals(challenge, verifier);
+  if (method !== 'S256') return false;
   const hashed = crypto.createHash('sha256').update(verifier).digest();
   const expected = hashed.toString('base64url');
   return timingSafeStringEquals(expected, challenge);
 }
 
+// Per-process random key used to equalize input lengths before compare.
+// HMACing both sides produces fixed-size 32-byte digests, so the
+// subsequent timing-safe compare never short-circuits on length and
+// cannot leak the length of the expected value through timing.
+const COMPARE_KEY = crypto.randomBytes(32);
+
 function timingSafeStringEquals(a: string, b: string): boolean {
-  const ab = Buffer.from(a);
-  const bb = Buffer.from(b);
-  if (ab.length !== bb.length) return false;
-  return crypto.timingSafeEqual(ab, bb);
+  const hashA = crypto.createHmac('sha256', COMPARE_KEY).update(a, 'utf8').digest();
+  const hashB = crypto.createHmac('sha256', COMPARE_KEY).update(b, 'utf8').digest();
+  return crypto.timingSafeEqual(hashA, hashB);
 }
 
-export function getBaseUrl(req: Request): string {
-  const forwardedProto = pickHeader(req.headers['x-forwarded-proto']);
-  const forwardedHost = pickHeader(req.headers['x-forwarded-host']);
-  const host = forwardedHost ?? pickHeader(req.headers.host) ?? 'localhost';
-  const proto = forwardedProto ?? (isLocalHost(host) ? 'http' : 'https');
+// Resolves the public-facing base URL for metadata and redirect responses.
+//
+// If publicBaseUrl is provided (set by the operator to the configured
+// tunnel URL at startup), it is used verbatim. Otherwise the server falls
+// back to the request's Host header. X-Forwarded-* headers are never
+// trusted, because the server binds to 127.0.0.1 and those headers can
+// be spoofed by any remote client behind a tunnel proxy — honoring them
+// would let a remote attacker redirect OAuth issuer metadata to a host
+// they control.
+export function getBaseUrl(req: Request, publicBaseUrl?: string): string {
+  if (publicBaseUrl) {
+    try {
+      const parsed = new URL(publicBaseUrl);
+      return `${parsed.protocol}//${parsed.host}`;
+    } catch {
+      // fall through to host-header fallback
+    }
+  }
+  const host = pickHeader(req.headers.host) ?? 'localhost';
+  const proto = isLocalHost(host) ? 'http' : 'https';
   return `${proto}://${host}`;
 }
 
@@ -199,6 +364,7 @@ function isLocalHost(host: string): boolean {
 export interface AuthorizePageParams {
   clientId: string;
   redirectUri: string;
+  resource?: string;
   state?: string;
   scope?: string;
   codeChallenge: string;
@@ -236,13 +402,14 @@ export function renderAuthorizePage(params: AuthorizePageParams): string {
   <h1>Authorize connector</h1>
   <p>
     A client (<code>${escapeHtml(params.clientId)}</code>) is requesting access to your local mvmt instance.
-    Paste your mvmt session token to approve. Run <code>mvmt show</code> on the host machine to retrieve it.
+    Paste your mvmt session token to approve. Run <code>mvmt token</code> on the host machine to retrieve it.
   </p>
   ${error}
   <form method="POST" action="/authorize">
     ${hidden('response_type', params.responseType)}
     ${hidden('client_id', params.clientId)}
     ${hidden('redirect_uri', params.redirectUri)}
+    ${hidden('resource', params.resource)}
     ${hidden('state', params.state)}
     ${hidden('scope', params.scope)}
     ${hidden('code_challenge', params.codeChallenge)}

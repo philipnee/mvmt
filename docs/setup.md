@@ -46,7 +46,7 @@ mvmt --version
 Run:
 
 ```bash
-mvmt init
+mvmt config setup
 ```
 
 The wizard asks what local data mvmt is allowed to expose:
@@ -69,20 +69,13 @@ On macOS/Linux it is written with mode `600`.
 
 mvmt does not install MemPalace or manage Python versions. It assumes MemPalace is already installed locally.
 
-During `mvmt init`, mvmt tries to detect:
+During guided setup, mvmt tries to detect:
 
 - the `mempalace` executable on `PATH`,
 - the Python executable from that script's shebang,
 - the palace path from `~/.mempalace/config.json`.
 
-You can add MemPalace later without regenerating the whole config:
-
-```bash
-mvmt connectors list
-mvmt connectors add mempalace
-```
-
-Then restart mvmt.
+To update MemPalace later, rerun `mvmt config setup` and restart mvmt.
 
 With MemPalace write access disabled, mvmt hides known write tools such as drawer writes, knowledge graph mutation, tunnel mutation, diary writes, and hook settings. With write access enabled, those tools are visible to clients.
 
@@ -91,7 +84,7 @@ With MemPalace write access disabled, mvmt hides known write tools such as drawe
 Interactive mode is easiest while testing:
 
 ```bash
-mvmt start -i
+mvmt serve -i
 ```
 
 HTTP mode listens on:
@@ -100,16 +93,16 @@ HTTP mode listens on:
 http://127.0.0.1:4141/mcp
 ```
 
-The bearer token changes on every `mvmt start`. Show the current token with:
+The bearer token is reused across restarts. Show the current token with:
 
 ```bash
-mvmt show
+mvmt token
 ```
 
 Rotate it without restarting:
 
 ```bash
-mvmt rotate
+mvmt token rotate
 ```
 
 ## Connect Codex CLI
@@ -127,14 +120,14 @@ codex mcp add mvmt \
 Before starting Codex, export the current token:
 
 ```bash
-export MVMT_TOKEN="$(mvmt show)"
+export MVMT_TOKEN="$(mvmt token show)"
 codex
 ```
 
-If you restart mvmt, export the token again and restart Codex:
+If you rotate the mvmt token, export the new token and restart Codex:
 
 ```bash
-export MVMT_TOKEN="$(mvmt show)"
+export MVMT_TOKEN="$(mvmt token show)"
 codex resume
 ```
 
@@ -165,7 +158,7 @@ bearer_token_env_var: MVMT_TOKEN
 Most HTTP clients need:
 
 - URL: `http://127.0.0.1:4141/mcp`
-- Header: `Authorization: Bearer <token from mvmt show>`
+- Header: `Authorization: Bearer <token from mvmt token>`
 
 Claude Desktop is different: use stdio mode so Claude launches mvmt directly:
 
@@ -174,7 +167,7 @@ Claude Desktop is different: use stdio mode so Claude launches mvmt directly:
   "mcpServers": {
     "mvmt": {
       "command": "mvmt",
-      "args": ["start", "--stdio"]
+      "args": ["serve", "--stdio"]
     }
   }
 }
@@ -187,7 +180,7 @@ See [Client Setup](client-setup.md) for Claude Desktop, Claude Code, Codex CLI, 
 Check server health:
 
 ```bash
-TOKEN="$(mvmt show)"
+TOKEN="$(mvmt token show)"
 curl -i http://127.0.0.1:4141/health \
   -H "Authorization: Bearer $TOKEN"
 ```
@@ -223,7 +216,7 @@ Fix:
 
 ```bash
 mvmt doctor
-export MVMT_TOKEN="$(mvmt show)"
+export MVMT_TOKEN="$(mvmt token show)"
 ```
 
 Then restart the MCP client.
@@ -239,7 +232,7 @@ lsof -nP -iTCP:4141
 Stop the old mvmt process or start on another port:
 
 ```bash
-mvmt start -i --port 4142
+mvmt serve -i --port 4142
 ```
 
 ### Token works in curl but not Codex
@@ -247,7 +240,7 @@ mvmt start -i --port 4142
 Codex only sees environment variables from the shell that launched it. Re-export and restart Codex:
 
 ```bash
-export MVMT_TOKEN="$(mvmt show)"
+export MVMT_TOKEN="$(mvmt token show)"
 codex
 ```
 
@@ -256,15 +249,15 @@ codex
 Check config:
 
 ```bash
-mvmt connectors list
+mvmt config
 mvmt doctor
 ```
 
 If MemPalace is missing:
 
 ```bash
-mvmt connectors add mempalace
-mvmt start -i
+mvmt config setup
+mvmt serve -i
 ```
 
 If it fails to start, verify the configured Python can import MemPalace:

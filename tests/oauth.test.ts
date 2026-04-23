@@ -1,4 +1,7 @@
 import crypto from 'crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { OAuthError, OAuthStore, verifyPkce } from '../src/server/oauth.js';
 
@@ -21,15 +24,81 @@ describe('verifyPkce', () => {
     expect(verifyPkce(challenge, 'S256', 'not-the-verifier')).toBe(false);
   });
 
-  it('accepts a matching plain verifier', () => {
-    expect(verifyPkce('abc', 'plain', 'abc')).toBe(true);
-    expect(verifyPkce('abc', 'plain', 'abd')).toBe(false);
+  it('rejects non-S256 methods (plain is no longer supported)', () => {
+    expect(verifyPkce('abc', 'plain' as unknown as 'S256', 'abc')).toBe(false);
+  });
+});
+
+describe('OAuthStore client registration', () => {
+  it('tracks registered redirect_uris and rejects unregistered ones', () => {
+    const store = new OAuthStore({ signingKey: 'test-secret' });
+    store.registerClient({
+      clientId: 'claude',
+      redirectUris: ['https://claude.ai/cb', 'https://claude.ai/cb2'],
+    });
+
+    expect(store.isRedirectUriAllowed('claude', 'https://claude.ai/cb')).toBe(true);
+    expect(store.isRedirectUriAllowed('claude', 'https://claude.ai/cb2')).toBe(true);
+    expect(store.isRedirectUriAllowed('claude', 'https://attacker.example/cb')).toBe(false);
+    expect(store.isRedirectUriAllowed('unknown-client', 'https://claude.ai/cb')).toBe(false);
+  });
+
+  it('persists registered clients to disk and reloads them on reconstruction', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-oauth-clients-'));
+    const clientsPath = path.join(tmp, '.clients.json');
+    try {
+      const first = new OAuthStore({ signingKey: 'k', clientsPath });
+      first.registerClient({
+        clientId: 'claude',
+        redirectUris: ['https://claude.ai/cb'],
+      });
+
+      const second = new OAuthStore({ signingKey: 'k', clientsPath });
+      expect(second.isRedirectUriAllowed('claude', 'https://claude.ai/cb')).toBe(true);
+      expect(second.isRedirectUriAllowed('claude', 'https://attacker.example/cb')).toBe(false);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when client registrations cannot be persisted', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-oauth-clients-'));
+    const lockedDir = path.join(tmp, 'locked');
+    const clientsPath = path.join(lockedDir, '.clients.json');
+    fs.mkdirSync(lockedDir, { recursive: true });
+    fs.chmodSync(lockedDir, 0o500);
+    try {
+      const store = new OAuthStore({ signingKey: 'k', clientsPath });
+      expect(() =>
+        store.registerClient({
+          clientId: 'claude',
+          redirectUris: ['https://claude.ai/cb'],
+        }),
+      ).toThrow();
+      expect(store.isRedirectUriAllowed('claude', 'https://claude.ai/cb')).toBe(false);
+    } finally {
+      fs.chmodSync(lockedDir, 0o700);
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('OAuthStore signing key rotation', () => {
+  it('invalidates outstanding access tokens when the signing key callback returns a new value', () => {
+    let currentKey = 'key-one';
+    const store = new OAuthStore({ signingKey: () => currentKey });
+    const token = store.issueAccessToken({ clientId: 'claude' });
+
+    expect(store.validateAccessToken(`Bearer ${token.token}`)?.token).toBe(token.token);
+
+    currentKey = 'key-two';
+    expect(store.validateAccessToken(`Bearer ${token.token}`)).toBeUndefined();
   });
 });
 
 describe('OAuthStore', () => {
   it('issues an auth code and exchanges it for a bearer token', () => {
-    const store = new OAuthStore();
+    const store = new OAuthStore({ signingKey: 'test-secret' });
     const { verifier, challenge } = pkcePair();
 
     const code = store.issueCode({
@@ -52,7 +121,7 @@ describe('OAuthStore', () => {
   });
 
   it('rejects code reuse', () => {
-    const store = new OAuthStore();
+    const store = new OAuthStore({ signingKey: 'test-secret' });
     const { verifier, challenge } = pkcePair();
     const code = store.issueCode({
       clientId: 'claude',
@@ -79,7 +148,7 @@ describe('OAuthStore', () => {
   });
 
   it('rejects a PKCE mismatch', () => {
-    const store = new OAuthStore();
+    const store = new OAuthStore({ signingKey: 'test-secret' });
     const { challenge } = pkcePair();
     const code = store.issueCode({
       clientId: 'claude',
@@ -99,7 +168,7 @@ describe('OAuthStore', () => {
   });
 
   it('rejects a redirect_uri mismatch', () => {
-    const store = new OAuthStore();
+    const store = new OAuthStore({ signingKey: 'test-secret' });
     const { verifier, challenge } = pkcePair();
     const code = store.issueCode({
       clientId: 'claude',
@@ -118,9 +187,31 @@ describe('OAuthStore', () => {
     ).toThrow(/Redirect URI/);
   });
 
+  it('binds authorization codes to the requested resource', () => {
+    const store = new OAuthStore({ signingKey: 'test-secret' });
+    const { verifier, challenge } = pkcePair();
+    const code = store.issueCode({
+      clientId: 'chatgpt',
+      redirectUri: 'https://chatgpt.com/connector/oauth/callback',
+      resource: 'https://mcp.example.com/mcp',
+      codeChallenge: challenge,
+      codeChallengeMethod: 'S256',
+    });
+
+    expect(() =>
+      store.consumeCode({
+        code: code.code,
+        clientId: 'chatgpt',
+        redirectUri: 'https://chatgpt.com/connector/oauth/callback',
+        resource: 'https://other.example.com/mcp',
+        codeVerifier: verifier,
+      }),
+    ).toThrow(/Resource mismatch/);
+  });
+
   it('expires access tokens', () => {
     let now = 1_000_000;
-    const store = new OAuthStore({ tokenTtlMs: 1000, now: () => now });
+    const store = new OAuthStore({ tokenTtlMs: 1000, signingKey: 'test-secret', now: () => now });
     const token = store.issueAccessToken({ clientId: 'claude' });
 
     expect(store.validateAccessToken(`Bearer ${token.token}`)).toBeDefined();
@@ -130,7 +221,7 @@ describe('OAuthStore', () => {
 
   it('expires authorization codes', () => {
     let now = 1_000_000;
-    const store = new OAuthStore({ codeTtlMs: 1000, now: () => now });
+    const store = new OAuthStore({ codeTtlMs: 1000, signingKey: 'test-secret', now: () => now });
     const { verifier, challenge } = pkcePair();
     const code = store.issueCode({
       clientId: 'claude',
@@ -151,9 +242,28 @@ describe('OAuthStore', () => {
   });
 
   it('validateAccessToken ignores malformed or missing headers', () => {
-    const store = new OAuthStore();
+    const store = new OAuthStore({ signingKey: 'test-secret' });
     expect(store.validateAccessToken(undefined)).toBeUndefined();
     expect(store.validateAccessToken('Basic xxx')).toBeUndefined();
     expect(store.validateAccessToken('Bearer nope')).toBeUndefined();
+  });
+
+  it('validates access tokens across store instances that share the same secret', () => {
+    const tokenIssuer = new OAuthStore({ signingKey: 'shared-secret' });
+    const tokenValidator = new OAuthStore({ signingKey: 'shared-secret' });
+    const token = tokenIssuer.issueAccessToken({ clientId: 'codex' });
+
+    const validated = tokenValidator.validateAccessToken(`Bearer ${token.token}`);
+
+    expect(validated?.token).toBe(token.token);
+    expect(validated?.clientId).toBe('codex');
+  });
+
+  it('rejects access tokens signed with a different secret', () => {
+    const tokenIssuer = new OAuthStore({ signingKey: 'issuer-secret' });
+    const tokenValidator = new OAuthStore({ signingKey: 'validator-secret' });
+    const token = tokenIssuer.issueAccessToken({ clientId: 'codex' });
+
+    expect(tokenValidator.validateAccessToken(`Bearer ${token.token}`)).toBeUndefined();
   });
 });
