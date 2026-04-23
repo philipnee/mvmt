@@ -1,8 +1,5 @@
-import fs from 'fs/promises';
-import path from 'path';
 import chalk from 'chalk';
-import yaml from 'yaml';
-import { configExists, loadConfig, resolveConfigPath } from '../config/loader.js';
+import { configExists, loadConfig, resolveConfigPath, saveConfig } from '../config/loader.js';
 import { MvmtConfig, TunnelSchema } from '../config/schema.js';
 import { createTemporaryFilesystemConfig, readFilesystemPaths } from './config.js';
 import { setupConfig } from './init.js';
@@ -165,7 +162,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
           const tunnelConfig = parsedTunnel.data;
           config.server.access = 'tunnel';
           config.server.tunnel = tunnelConfig;
-          await saveRuntimeConfig(configPath, config);
+          await saveConfig(configPath, config);
           await tunnelController.stop();
           tunnelController.configure(tunnelConfig);
           await tunnelController.start();
@@ -201,7 +198,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
         totalTools: router.getAllTools().length,
         audit: audit as InteractiveAuditLogger,
         shutdown,
-        persistConfig: () => saveRuntimeConfig(configPath, config),
+        persistConfig: () => saveConfig(configPath, config),
       });
     }
   } catch (err) {
@@ -316,14 +313,6 @@ function emit(
   if (level === 'warn') logger.warn(message);
   else if (level === 'error') logger.error(message);
   else logger.info(message);
-}
-
-async function saveRuntimeConfig(configPath: string, config: MvmtConfig): Promise<void> {
-  await fs.mkdir(path.dirname(configPath), { recursive: true });
-  await fs.writeFile(configPath, yaml.stringify(config), 'utf-8');
-  if (process.platform !== 'win32') {
-    await fs.chmod(configPath, 0o600);
-  }
 }
 
 const MVMT_LOGO = String.raw`

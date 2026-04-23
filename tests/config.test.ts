@@ -1,8 +1,67 @@
 import { describe, expect, it } from 'vitest';
+import fssync from 'fs';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
-import { expandHome, loadConfig, parseConfig } from '../src/config/loader.js';
+import { expandHome, loadConfig, parseConfig, readConfig, saveConfig } from '../src/config/loader.js';
+import { MvmtConfig } from '../src/config/schema.js';
+
+describe('saveConfig', () => {
+  it('writes a config file that loadConfig can read back', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-save-config-'));
+    const configPath = path.join(dir, 'config.yaml');
+    const config = parseConfig({ version: 1, server: { port: 4242 } });
+
+    await saveConfig(configPath, config);
+    const loaded = loadConfig(configPath);
+    expect(loaded.server.port).toBe(4242);
+
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('creates the parent directory if it does not exist', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-save-dir-'));
+    const nestedPath = path.join(dir, 'nested', 'config.yaml');
+    const config = parseConfig({ version: 1 });
+
+    await saveConfig(nestedPath, config);
+    expect(fssync.existsSync(nestedPath)).toBe(true);
+
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('preserves valid config structure (round-trip test)', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-round-trip-'));
+    const configPath = path.join(dir, 'config.yaml');
+    const config: MvmtConfig = parseConfig({
+      version: 1,
+      server: { port: 5000 },
+      proxy: [{ name: 'test-proxy', transport: 'http', url: 'http://localhost:8080' }]
+    });
+
+    await saveConfig(configPath, config);
+    const raw = readConfig(configPath);
+    const loaded = parseConfig(raw);
+
+    expect(loaded).toEqual(config);
+
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('on non-Windows, writes with mode 0o600', async () => {
+    if (process.platform === 'win32') return;
+
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-chmod-test-'));
+    const configPath = path.join(dir, 'config.yaml');
+    const config = parseConfig({ version: 1 });
+
+    await saveConfig(configPath, config);
+    const stat = await fs.stat(configPath);
+    expect(stat.mode & 0o777).toBe(0o600);
+
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+});
 
 describe('parseConfig', () => {
   it('applies schema defaults', () => {
