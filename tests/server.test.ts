@@ -227,6 +227,80 @@ describe('startHttpServer lifecycle', () => {
     }
   });
 
+  it('blocks cross-origin browser requests to OAuth endpoints', async () => {
+    const router = new ToolRouter([new EmptyConnector()]);
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const requestLogs: Array<{ kind: string; path: string; status: number; detail?: string }> = [];
+    const server = await startHttpServer(router, {
+      port: 0,
+      tokenPath,
+      requestLog: (entry) => requestLogs.push(entry),
+    });
+
+    try {
+      const origin = 'https://evil.example.com';
+      const responses = await Promise.all([
+        fetch(`http://127.0.0.1:${server.port}/register`, {
+          method: 'POST',
+          headers: { Origin: origin, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ redirect_uris: ['https://client.example/callback'] }),
+        }),
+        fetch(`http://127.0.0.1:${server.port}/authorize`, {
+          headers: { Origin: origin },
+        }),
+        fetch(`http://127.0.0.1:${server.port}/authorize`, {
+          method: 'POST',
+          headers: { Origin: origin, 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({}),
+        }),
+        fetch(`http://127.0.0.1:${server.port}/token`, {
+          method: 'POST',
+          headers: { Origin: origin, 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ grant_type: 'authorization_code' }),
+        }),
+      ]);
+
+      expect(responses.map((response) => response.status)).toEqual([403, 403, 403, 403]);
+      expect(requestLogs.filter((entry) => entry.kind === 'oauth.origin')).toHaveLength(4);
+      expect(requestLogs).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ path: '/register', status: 403, detail: 'origin_not_allowed' }),
+          expect.objectContaining({ path: '/authorize', status: 403, detail: 'origin_not_allowed' }),
+          expect.objectContaining({ path: '/token', status: 403, detail: 'origin_not_allowed' }),
+        ]),
+      );
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('allows OAuth browser requests from the public tunnel origin', async () => {
+    const router = new ToolRouter([new EmptyConnector()]);
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const server = await startHttpServer(router, {
+      port: 0,
+      tokenPath,
+      resolvePublicBaseUrl: () => 'https://mvmt.example.com',
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${server.port}/register`, {
+        method: 'POST',
+        headers: { Origin: 'https://mvmt.example.com', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ redirect_uris: ['https://client.example/callback'] }),
+      });
+      expect(response.status).toBe(201);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('exchanges an authorization code when the OAuth resource parameter is echoed', async () => {
     const router = new ToolRouter([new EmptyConnector()]);
     await router.initialize();

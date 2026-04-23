@@ -161,6 +161,15 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
 
   const originCheck = buildOriginCheck(options.allowedOrigins ?? []);
 
+  const oauthOriginMiddleware: express.RequestHandler = (req, res, next) => {
+    if (originCheck(req) || originMatchesBaseUrl(req, baseUrlFor(req))) {
+      next();
+      return;
+    }
+    logHttpRequest(requestLog, req, 403, 'oauth.origin', 'origin_not_allowed');
+    res.status(403).json({ error: 'Origin not allowed' });
+  };
+
   const authMiddleware: express.RequestHandler = (req, res, next) => {
     if (!originCheck(req)) {
       logHttpRequest(requestLog, req, 403, authLogKind(req), 'origin_not_allowed');
@@ -245,7 +254,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   app.get('/.well-known/oauth-protected-resource', protectedResourceMetadata);
   app.get('/.well-known/oauth-protected-resource/mcp', protectedResourceMetadata);
 
-  app.post('/register', authLimiter, (req, res) => {
+  app.post('/register', authLimiter, oauthOriginMiddleware, (req, res) => {
     const requested = (req.body ?? {}) as Record<string, unknown>;
     const clientId =
       typeof requested.client_id === 'string' && requested.client_id.length > 0
@@ -308,7 +317,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     });
   });
 
-  app.get('/authorize', authLimiter, (req, res) => {
+  app.get('/authorize', authLimiter, oauthOriginMiddleware, (req, res) => {
     const params = parseAuthorizeParams(req.query);
     if ('error' in params) {
       logHttpRequest(requestLog, req, 400, 'oauth.authorize', params.error);
@@ -336,7 +345,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     res.type('text/html').send(renderAuthorizePage({ ...params, requestId }));
   });
 
-  app.post('/authorize', authLimiter, (req, res) => {
+  app.post('/authorize', authLimiter, oauthOriginMiddleware, (req, res) => {
     const params = parseAuthorizeParams(req.body ?? {});
     if ('error' in params) {
       logHttpRequest(requestLog, req, 400, 'oauth.authorize', params.error);
@@ -394,7 +403,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     res.redirect(302, redirect.toString());
   });
 
-  app.post('/token', authLimiter, (req, res) => {
+  app.post('/token', authLimiter, oauthOriginMiddleware, (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const grantType = typeof body.grant_type === 'string' ? body.grant_type : undefined;
     const requestClientId = typeof body.client_id === 'string' ? body.client_id : undefined;
@@ -779,4 +788,21 @@ export function buildOriginCheck(extraAllowed: string[]): (req: Request) => bool
     }
     return false;
   };
+}
+
+function originMatchesBaseUrl(req: Request, baseUrl: string): boolean {
+  const origin = firstHeaderValue(req.headers.origin);
+  if (!origin) return true;
+  const requestOrigin = normalizedOrigin(origin);
+  const baseOrigin = normalizedOrigin(baseUrl);
+  return requestOrigin !== undefined && requestOrigin === baseOrigin;
+}
+
+function normalizedOrigin(value: string): string | undefined {
+  try {
+    const parsed = new URL(value);
+    return `${parsed.protocol}//${parsed.host}`.toLowerCase();
+  } catch {
+    return undefined;
+  }
 }
