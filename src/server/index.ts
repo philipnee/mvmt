@@ -167,9 +167,39 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       res.status(403).json({ error: 'Origin not allowed' });
       return;
     }
+    const authHeader = firstHeaderValue(req.headers.authorization);
+    if (!authHeader) {
+      const baseUrl = baseUrlFor(req);
+      res.setHeader(
+        'WWW-Authenticate',
+        `Bearer realm="mvmt", resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`,
+      );
+      logHttpRequest(requestLog, req, 401, authLogKind(req), 'missing_bearer');
+      res.status(401).json({ error: 'Invalid or missing bearer token' });
+      return;
+    }
+    if (!authHeader.startsWith('Bearer ')) {
+      const baseUrl = baseUrlFor(req);
+      res.setHeader(
+        'WWW-Authenticate',
+        `Bearer realm="mvmt", resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`,
+      );
+      logHttpRequest(requestLog, req, 401, authLogKind(req), 'non_bearer_auth');
+      res.status(401).json({ error: 'Invalid or missing bearer token' });
+      return;
+    }
+    // Expected audience is the canonical resource identifier we
+    // advertise in protected-resource-metadata. The authorize flow
+    // copies the client-supplied `resource` into the token's `aud`;
+    // we validate it here so a token minted for a different resource
+    // cannot be replayed at this server.
+    const expectedAudience = `${baseUrlFor(req)}/mcp`;
     if (
-      oauth.validateAccessToken(req.headers.authorization) ||
-      validateSessionToken(req.headers.authorization, tokenPath)
+      oauth.validateAccessToken(authHeader, {
+        expectedAudience,
+        allowLegacyNoAudience: true,
+      }) ||
+      validateSessionToken(authHeader, tokenPath)
     ) {
       next();
       return;
@@ -180,7 +210,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       'WWW-Authenticate',
       `Bearer realm="mvmt", resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`,
     );
-    logHttpRequest(requestLog, req, 401, authLogKind(req), 'missing_or_invalid_bearer');
+    logHttpRequest(requestLog, req, 401, authLogKind(req), 'invalid_bearer');
     res.status(401).json({ error: 'Invalid or missing bearer token' });
   };
 
@@ -195,7 +225,6 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       response_types_supported: ['code'],
       grant_types_supported: ['authorization_code'],
       code_challenge_methods_supported: ['S256'],
-      authorization_response_iss_parameter_supported: true,
       token_endpoint_auth_methods_supported: ['none'],
       scopes_supported: ['mcp'],
     });
@@ -222,17 +251,24 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       typeof requested.client_id === 'string' && requested.client_id.length > 0
         ? (requested.client_id as string)
         : `mvmt-${Date.now().toString(36)}`;
+    const clientName = typeof requested.client_name === 'string' ? requested.client_name : undefined;
+    const scope = typeof requested.scope === 'string' ? requested.scope : undefined;
     const redirectUris = Array.isArray(requested.redirect_uris)
       ? requested.redirect_uris.filter((uri): uri is string => typeof uri === 'string' && uri.length > 0)
       : [];
     if (redirectUris.length === 0) {
-      logHttpRequest(requestLog, req, 400, 'oauth.register', 'missing_redirect_uris', clientId);
+      logHttpRequest(
+        requestLog, req, 400, 'oauth.register',
+        'missing_redirect_uris', clientId,
+      );
       res.status(400).json({ error: 'invalid_redirect_uri', error_description: 'redirect_uris is required' });
       return;
     }
+    const redirectHosts: string[] = [];
     for (const uri of redirectUris) {
       try {
-        new URL(uri);
+        const parsed = new URL(uri);
+        redirectHosts.push(parsed.host);
       } catch {
         logHttpRequest(requestLog, req, 400, 'oauth.register', 'invalid_redirect_uri', clientId);
         res.status(400).json({ error: 'invalid_redirect_uri' });
@@ -253,13 +289,22 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       }
       throw err;
     }
-    logHttpRequest(requestLog, req, 201, 'oauth.register', undefined, clientId);
+    const detail = `redirect_uris=${registered.redirectUris.length} hosts=${[...new Set(redirectHosts)].join(',')}${clientName ? ` name="${clientName}"` : ''}`;
+    logHttpRequest(requestLog, req, 201, 'oauth.register', detail, clientId);
+    // Response shape follows RFC 7591 §3.2.1 (Client Information Response).
+    // We are a public client (no client_secret), so token_endpoint_auth_method
+    // is "none". client_id_issued_at helps clients audit when they were
+    // provisioned. client_name and scope are echoed only when the client
+    // supplied them.
     res.status(201).json({
       client_id: registered.clientId,
+      client_id_issued_at: Math.floor(Date.now() / 1000),
       token_endpoint_auth_method: 'none',
       grant_types: ['authorization_code'],
       response_types: ['code'],
       redirect_uris: registered.redirectUris,
+      ...(clientName ? { client_name: clientName } : {}),
+      ...(scope ? { scope } : {}),
     });
   });
 
@@ -271,11 +316,16 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       return;
     }
     if (!oauth.isRedirectUriAllowed(params.clientId, params.redirectUri)) {
-      logHttpRequest(requestLog, req, 400, 'oauth.authorize', 'unregistered_redirect_uri', params.clientId);
+      const rejectedHost = safeHost(params.redirectUri);
+      logHttpRequest(
+        requestLog, req, 400, 'oauth.authorize',
+        `unregistered_redirect_uri host=${rejectedHost}`, params.clientId,
+      );
       res.status(400).type('text/plain').send('redirect_uri is not registered for this client');
       return;
     }
-    logHttpRequest(requestLog, req, 200, 'oauth.authorize', undefined, params.clientId);
+    const resourceDetail = params.resource ? `resource=${safeHost(params.resource)}` : undefined;
+    logHttpRequest(requestLog, req, 200, 'oauth.authorize', resourceDetail, params.clientId);
     res.type('text/html').send(renderAuthorizePage(params));
   });
 
@@ -287,7 +337,11 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       return;
     }
     if (!oauth.isRedirectUriAllowed(params.clientId, params.redirectUri)) {
-      logHttpRequest(requestLog, req, 400, 'oauth.authorize', 'unregistered_redirect_uri', params.clientId);
+      const rejectedHost = safeHost(params.redirectUri);
+      logHttpRequest(
+        requestLog, req, 400, 'oauth.authorize',
+        `unregistered_redirect_uri host=${rejectedHost}`, params.clientId,
+      );
       res.status(400).type('text/plain').send('redirect_uri is not registered for this client');
       return;
     }
@@ -313,9 +367,9 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
 
     const redirect = new URL(params.redirectUri);
     redirect.searchParams.set('code', authCode.code);
-    redirect.searchParams.set('iss', baseUrlFor(req));
     if (params.state) redirect.searchParams.set('state', params.state);
-    logHttpRequest(requestLog, req, 302, 'oauth.authorize', undefined, params.clientId);
+    const approveDetail = `approved resource=${params.resource ? safeHost(params.resource) : '(none)'}`;
+    logHttpRequest(requestLog, req, 302, 'oauth.authorize', approveDetail, params.clientId);
     res.redirect(302, redirect.toString());
   });
 
@@ -342,7 +396,8 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
 
     try {
       const accessToken = oauth.consumeCode({ code, clientId, redirectUri, resource, codeVerifier });
-      logHttpRequest(requestLog, req, 200, 'oauth.token', undefined, clientId);
+      const tokenDetail = `issued aud=${accessToken.audience ? safeHost(accessToken.audience) : '(none)'}`;
+      logHttpRequest(requestLog, req, 200, 'oauth.token', tokenDetail, clientId);
       res.json({
         access_token: accessToken.token,
         token_type: 'Bearer',
@@ -598,6 +653,23 @@ function stringField(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function firstHeaderValue(value: string | string[] | undefined): string | undefined {
+  if (Array.isArray(value)) return value[0];
+  return value;
+}
+
+// Used in request logs for redirect/resource URIs. We log the host only
+// (not the full path) because full redirect URLs can include
+// client-supplied identifiers that belong in an audit trail but not in
+// a general request log.
+function safeHost(uri: string): string {
+  try {
+    return new URL(uri).host || '(unknown)';
+  } catch {
+    return '(invalid)';
+  }
 }
 
 export function buildOriginCheck(extraAllowed: string[]): (req: Request) => boolean {

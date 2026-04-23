@@ -209,6 +209,48 @@ describe('OAuthStore', () => {
     ).toThrow(/Resource mismatch/);
   });
 
+  it('allows the token exchange to omit resource when the code is already resource-bound', () => {
+    const store = new OAuthStore({ signingKey: 'test-secret' });
+    const { verifier, challenge } = pkcePair();
+    const code = store.issueCode({
+      clientId: 'claude',
+      redirectUri: 'https://claude.ai/api/mcp/auth_callback',
+      resource: 'https://mcp.example.com/mcp',
+      codeChallenge: challenge,
+      codeChallengeMethod: 'S256',
+    });
+
+    const token = store.consumeCode({
+      code: code.code,
+      clientId: 'claude',
+      redirectUri: 'https://claude.ai/api/mcp/auth_callback',
+      codeVerifier: verifier,
+    });
+
+    expect(token.audience).toBe('https://mcp.example.com/mcp');
+  });
+
+  it('rejects introducing a resource at token time when the authorization code had none', () => {
+    const store = new OAuthStore({ signingKey: 'test-secret' });
+    const { verifier, challenge } = pkcePair();
+    const code = store.issueCode({
+      clientId: 'claude',
+      redirectUri: 'https://claude.ai/api/mcp/auth_callback',
+      codeChallenge: challenge,
+      codeChallengeMethod: 'S256',
+    });
+
+    expect(() =>
+      store.consumeCode({
+        code: code.code,
+        clientId: 'claude',
+        redirectUri: 'https://claude.ai/api/mcp/auth_callback',
+        resource: 'https://mcp.example.com/mcp',
+        codeVerifier: verifier,
+      }),
+    ).toThrow(/Resource mismatch/);
+  });
+
   it('expires access tokens', () => {
     let now = 1_000_000;
     const store = new OAuthStore({ tokenTtlMs: 1000, signingKey: 'test-secret', now: () => now });
@@ -257,6 +299,42 @@ describe('OAuthStore', () => {
 
     expect(validated?.token).toBe(token.token);
     expect(validated?.clientId).toBe('codex');
+  });
+
+  it('rejects access tokens whose audience does not match the expected resource', () => {
+    const store = new OAuthStore({ signingKey: 'shared-secret' });
+    const token = store.issueAccessToken({
+      clientId: 'codex',
+      audience: 'https://mvmt.example.com/mcp',
+    });
+
+    expect(
+      store.validateAccessToken(`Bearer ${token.token}`, {
+        expectedAudience: 'https://mvmt.example.com/mcp',
+      })?.token,
+    ).toBe(token.token);
+    expect(
+      store.validateAccessToken(`Bearer ${token.token}`, {
+        expectedAudience: 'https://other.example.com/mcp',
+      }),
+    ).toBeUndefined();
+  });
+
+  it('allows legacy audience-less tokens only when explicitly requested', () => {
+    const store = new OAuthStore({ signingKey: 'shared-secret' });
+    const token = store.issueAccessToken({ clientId: 'codex' });
+
+    expect(
+      store.validateAccessToken(`Bearer ${token.token}`, {
+        expectedAudience: 'https://mvmt.example.com/mcp',
+      }),
+    ).toBeUndefined();
+    expect(
+      store.validateAccessToken(`Bearer ${token.token}`, {
+        expectedAudience: 'https://mvmt.example.com/mcp',
+        allowLegacyNoAudience: true,
+      })?.token,
+    ).toBe(token.token);
   });
 
   it('rejects access tokens signed with a different secret', () => {

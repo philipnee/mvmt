@@ -21,6 +21,12 @@ export interface AccessToken {
   token: string;
   clientId: string;
   scope?: string;
+  // RFC 8707 audience — the resource this token was minted for. Set
+  // to the `resource` parameter the client sent during the authorize
+  // flow (copied from the auth code to the access token). Validated
+  // on every incoming request; a token minted for resource A cannot
+  // be replayed against resource B even if both share the signing key.
+  audience?: string;
   expiresAt: number;
 }
 
@@ -201,7 +207,12 @@ export class OAuthStore {
     if (entry.redirectUri !== input.redirectUri) {
       throw new OAuthError('invalid_grant', 'Redirect URI mismatch for authorization code');
     }
-    if (entry.resource && entry.resource !== input.resource) {
+    // The authorization code is already bound to the resource chosen at
+    // /authorize time. Clients may repeat that same resource at /token,
+    // but they do not need to. We only reject when the token request
+    // tries to introduce a different resource than the one already bound
+    // into the code.
+    if (input.resource !== undefined && entry.resource !== input.resource) {
       throw new OAuthError('invalid_grant', 'Resource mismatch for authorization code');
     }
     if (!verifyPkce(entry.codeChallenge, entry.codeChallengeMethod, input.codeVerifier)) {
@@ -211,15 +222,20 @@ export class OAuthStore {
     entry.consumed = true;
     this.codes.delete(input.code);
 
-    return this.issueAccessToken({ clientId: entry.clientId, scope: entry.scope });
+    return this.issueAccessToken({
+      clientId: entry.clientId,
+      scope: entry.scope,
+      audience: entry.resource,
+    });
   }
 
-  issueAccessToken(input: { clientId: string; scope?: string }): AccessToken {
+  issueAccessToken(input: { clientId: string; scope?: string; audience?: string }): AccessToken {
     const expiresAt = this.now() + this.tokenTtlMs;
     const payload = Buffer.from(
       JSON.stringify({
         clientId: input.clientId,
         scope: input.scope,
+        aud: input.audience,
         expiresAt,
       }),
       'utf-8',
@@ -236,16 +252,38 @@ export class OAuthStore {
       token,
       clientId: input.clientId,
       scope: input.scope,
+      audience: input.audience,
       expiresAt,
     };
   }
 
-  validateAccessToken(authHeader: string | undefined): AccessToken | undefined {
+  validateAccessToken(
+    authHeader: string | undefined,
+    options: { expectedAudience?: string; allowLegacyNoAudience?: boolean } = {},
+  ): AccessToken | undefined {
     if (!authHeader) return undefined;
     const parts = authHeader.split(' ');
     if (parts.length !== 2 || parts[0] !== 'Bearer') return undefined;
     const provided = parts[1];
-    return this.parseAccessToken(provided);
+    const parsed = this.parseAccessToken(provided);
+    if (!parsed) return undefined;
+    if (options.expectedAudience !== undefined) {
+      // Reject tokens whose audience does not match the resource this
+      // request is for. Per RFC 8707 / OpenAI Apps SDK, the resource
+      // parameter supplied at /authorize time is bound to the token
+      // via its `aud` claim.
+      //
+      // For compatibility, callers can explicitly allow legacy tokens
+      // minted before `aud` binding existed. That keeps existing OAuth
+      // sessions working across upgrades while still enforcing audience
+      // checks for all newly issued tokens.
+      if (parsed.audience === undefined) {
+        if (!options.allowLegacyNoAudience) return undefined;
+      } else if (parsed.audience !== options.expectedAudience) {
+        return undefined;
+      }
+    }
+    return parsed;
   }
 
   cleanup(): void {
@@ -268,10 +306,12 @@ export class OAuthStore {
       const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8')) as {
         clientId?: unknown;
         scope?: unknown;
+        aud?: unknown;
         expiresAt?: unknown;
       };
       if (typeof decoded.clientId !== 'string') return undefined;
       if (decoded.scope !== undefined && typeof decoded.scope !== 'string') return undefined;
+      if (decoded.aud !== undefined && typeof decoded.aud !== 'string') return undefined;
       if (typeof decoded.expiresAt !== 'number' || !Number.isFinite(decoded.expiresAt)) return undefined;
       if (decoded.expiresAt < this.now()) return undefined;
 
@@ -279,6 +319,7 @@ export class OAuthStore {
         token,
         clientId: decoded.clientId,
         scope: decoded.scope,
+        audience: decoded.aud,
         expiresAt: decoded.expiresAt,
       };
     } catch {
