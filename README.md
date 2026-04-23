@@ -1,5 +1,6 @@
 # mvmt
 
+[![SafeSkill 77/100](https://img.shields.io/badge/SafeSkill-77%2F100_Passes%20with%20Notes-yellow)](https://safeskill.dev/scan/philipnee-mvmt)
 **A local-first MCP layer for scoped access to files, vaults, and tools.**
 
 mvmt runs as a local MCP server between your data sources and your clients. You choose which folders, vaults, memory palaces, and tools are exposed, with read/write access controlled per source.
