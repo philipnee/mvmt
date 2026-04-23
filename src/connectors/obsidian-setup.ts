@@ -3,7 +3,8 @@ import chalk from 'chalk';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
-import { ObsidianConfig } from '../config/schema.js';
+import { MvmtConfig, ObsidianConfig } from '../config/schema.js';
+import type { ConnectorSetupDefinition } from './setup-registry.js';
 import { resolveSetupPath } from './setup-paths.js';
 
 export interface ObsidianConfigInput {
@@ -141,3 +142,17 @@ export async function promptForObsidianVault(vaults: string[]): Promise<string |
     return undefined;
   }
 }
+
+export const obsidianSetupDefinition = {
+  id: 'obsidian',
+  displayName: 'Obsidian',
+  isAddable: false,
+  detect: detectObsidianVaults,
+  prompt: promptForObsidianSetup,
+  isConfigured(config: MvmtConfig): boolean {
+    return config.obsidian?.enabled === true;
+  },
+  apply(config: MvmtConfig, input: ObsidianConfigInput): MvmtConfig {
+    return { ...config, obsidian: createObsidianConfig(input) };
+  },
+} satisfies ConnectorSetupDefinition<string[], ObsidianConfigInput, 'obsidian'>;

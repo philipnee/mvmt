@@ -14,6 +14,16 @@ const baseConfig: MvmtConfig = {
 };
 
 describe('connector setup helpers', () => {
+  it('reports unconfigured local connector setups', () => {
+    const statuses = getConnectorSetupStatuses(baseConfig);
+
+    expect(statuses.map((status) => [status.name, status.configured, status.addable])).toEqual([
+      ['filesystem', false, false],
+      ['obsidian', false, false],
+      ['mempalace', false, true],
+    ]);
+  });
+
   it('reports configured local connector setups', () => {
     const statuses = getConnectorSetupStatuses({
       ...baseConfig,
