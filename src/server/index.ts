@@ -10,6 +10,7 @@ import { log } from '../utils/logger.js';
 import { defaultClientsPath, defaultSigningKeyPath, ensureSessionToken, ensureSigningKey, readSigningKey, TOKEN_PATH, validateSessionToken } from '../utils/token.js';
 import {
   CodeChallengeMethod,
+  OAuthClientAlreadyRegisteredError,
   OAuthClientPersistenceError,
   OAuthError,
   OAuthStore,
@@ -121,6 +122,8 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   const tokenPath = options.tokenPath;
   const requestLog = options.requestLog;
   const resolvePublicBaseUrl = options.resolvePublicBaseUrl;
+  // Proxied/tunneled deployments should set resolvePublicBaseUrl so OAuth
+  // resource audience checks do not depend on the request Host header.
   const baseUrlFor = (req: Request): string => getBaseUrl(req, resolvePublicBaseUrl?.());
   const app = express();
   app.use(express.json({ limit: '10mb' }));
@@ -247,10 +250,16 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
 
   app.post('/register', authLimiter, (req, res) => {
     const requested = (req.body ?? {}) as Record<string, unknown>;
-    const clientId =
-      typeof requested.client_id === 'string' && requested.client_id.length > 0
-        ? (requested.client_id as string)
-        : `mvmt-${Date.now().toString(36)}`;
+    const requestedClientId = stringField(requested.client_id);
+    if (requestedClientId && !validateSessionToken(firstHeaderValue(req.headers.authorization), tokenPath)) {
+      logHttpRequest(requestLog, req, 401, 'oauth.register', 'client_id_requires_session_token', requestedClientId);
+      res.status(401).json({
+        error: 'invalid_client',
+        error_description: 'Supplying client_id requires the mvmt session token',
+      });
+      return;
+    }
+    const clientId = requestedClientId ?? `mvmt-${randomUUID()}`;
     const clientName = typeof requested.client_name === 'string' ? requested.client_name : undefined;
     const scope = typeof requested.scope === 'string' ? requested.scope : undefined;
     const redirectUris = Array.isArray(requested.redirect_uris)
@@ -279,6 +288,14 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     try {
       registered = oauth.registerClient({ clientId, redirectUris });
     } catch (err) {
+      if (err instanceof OAuthClientAlreadyRegisteredError) {
+        logHttpRequest(requestLog, req, 409, 'oauth.register', 'client_id_already_registered', clientId);
+        res.status(409).json({
+          error: 'invalid_client_metadata',
+          error_description: 'client_id is already registered',
+        });
+        return;
+      }
       if (err instanceof OAuthClientPersistenceError) {
         logHttpRequest(requestLog, req, 500, 'oauth.register', 'persist_failed', clientId);
         res.status(500).json({
@@ -324,6 +341,13 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       res.status(400).type('text/plain').send('redirect_uri is not registered for this client');
       return;
     }
+    const resourceError = validateAuthorizeResource(params.resource, `${baseUrlFor(req)}/mcp`);
+    if (resourceError) {
+      const redirect = authorizeErrorRedirect(params, 'invalid_target', resourceError.description);
+      logHttpRequest(requestLog, req, 302, 'oauth.authorize', resourceError.code, params.clientId);
+      res.redirect(302, redirect);
+      return;
+    }
     const requestId = params.requestId ?? randomUUID();
     const promptDetail = formatAuthorizeLogDetail({
       phase: 'prompt',
@@ -350,6 +374,13 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
         `unregistered_redirect_uri host=${rejectedHost}`, params.clientId,
       );
       res.status(400).type('text/plain').send('redirect_uri is not registered for this client');
+      return;
+    }
+    const resourceError = validateAuthorizeResource(params.resource, `${baseUrlFor(req)}/mcp`);
+    if (resourceError) {
+      const redirect = authorizeErrorRedirect(params, 'invalid_target', resourceError.description);
+      logHttpRequest(requestLog, req, 302, 'oauth.authorize', resourceError.code, params.clientId);
+      res.redirect(302, redirect);
       return;
     }
 
@@ -695,14 +726,6 @@ function parseAuthorizeParams(source: Record<string, unknown>): AuthorizeParams 
   } catch {
     return { error: 'Invalid redirect_uri' };
   }
-  if (resource) {
-    try {
-      new URL(resource);
-    } catch {
-      return { error: 'Invalid resource' };
-    }
-  }
-
   if (codeChallengeMethodRaw !== 'S256') {
     return { error: 'Unsupported code_challenge_method (S256 required)' };
   }
@@ -724,6 +747,44 @@ function stringField(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+type ResourceValidationError = {
+  code: 'missing_resource' | 'invalid_resource';
+  description: string;
+};
+
+function validateAuthorizeResource(resource: string | undefined, expectedResource: string): ResourceValidationError | undefined {
+  if (!resource) return { code: 'missing_resource', description: 'Missing resource' };
+  const normalized = normalizeResourceUrl(resource);
+  const expected = normalizeResourceUrl(expectedResource);
+  if (!normalized || !expected || normalized !== expected) {
+    return { code: 'invalid_resource', description: 'Invalid resource' };
+  }
+  return undefined;
+}
+
+function normalizeResourceUrl(value: string): string | undefined {
+  try {
+    const parsed = new URL(value);
+    if (parsed.username || parsed.password || parsed.hash) return undefined;
+    const pathname = parsed.pathname.replace(/\/+$/, '') || '/';
+    return `${parsed.protocol.toLowerCase()}//${parsed.host.toLowerCase()}${pathname}${parsed.search}`;
+  } catch {
+    return undefined;
+  }
+}
+
+function authorizeErrorRedirect(
+  params: Pick<AuthorizeParams, 'redirectUri' | 'state'>,
+  error: string,
+  description: string,
+): string {
+  const redirect = new URL(params.redirectUri);
+  redirect.searchParams.set('error', error);
+  redirect.searchParams.set('error_description', description);
+  if (params.state) redirect.searchParams.set('state', params.state);
+  return redirect.toString();
 }
 
 function firstHeaderValue(value: string | string[] | undefined): string | undefined {
