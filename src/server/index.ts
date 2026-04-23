@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { Server as HttpServer } from 'node:http';
 import express, { Request, Response } from 'express';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -167,9 +167,39 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       res.status(403).json({ error: 'Origin not allowed' });
       return;
     }
+    const authHeader = firstHeaderValue(req.headers.authorization);
+    if (!authHeader) {
+      const baseUrl = baseUrlFor(req);
+      res.setHeader(
+        'WWW-Authenticate',
+        `Bearer realm="mvmt", resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`,
+      );
+      logHttpRequest(requestLog, req, 401, authLogKind(req), 'missing_bearer');
+      res.status(401).json({ error: 'Invalid or missing bearer token' });
+      return;
+    }
+    if (!authHeader.startsWith('Bearer ')) {
+      const baseUrl = baseUrlFor(req);
+      res.setHeader(
+        'WWW-Authenticate',
+        `Bearer realm="mvmt", resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`,
+      );
+      logHttpRequest(requestLog, req, 401, authLogKind(req), 'non_bearer_auth');
+      res.status(401).json({ error: 'Invalid or missing bearer token' });
+      return;
+    }
+    // Expected audience is the canonical resource identifier we
+    // advertise in protected-resource-metadata. The authorize flow
+    // copies the client-supplied `resource` into the token's `aud`;
+    // we validate it here so a token minted for a different resource
+    // cannot be replayed at this server.
+    const expectedAudience = `${baseUrlFor(req)}/mcp`;
     if (
-      oauth.validateAccessToken(req.headers.authorization) ||
-      validateSessionToken(req.headers.authorization, tokenPath)
+      oauth.validateAccessToken(authHeader, {
+        expectedAudience,
+        allowLegacyNoAudience: true,
+      }) ||
+      validateSessionToken(authHeader, tokenPath)
     ) {
       next();
       return;
@@ -180,7 +210,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       'WWW-Authenticate',
       `Bearer realm="mvmt", resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`,
     );
-    logHttpRequest(requestLog, req, 401, authLogKind(req), 'missing_or_invalid_bearer');
+    logHttpRequest(requestLog, req, 401, authLogKind(req), 'invalid_bearer');
     res.status(401).json({ error: 'Invalid or missing bearer token' });
   };
 
@@ -193,11 +223,10 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       token_endpoint: `${baseUrl}/token`,
       registration_endpoint: `${baseUrl}/register`,
       response_types_supported: ['code'],
-      grant_types_supported: ['authorization_code'],
+      grant_types_supported: ['authorization_code', 'refresh_token'],
       code_challenge_methods_supported: ['S256'],
-      authorization_response_iss_parameter_supported: true,
       token_endpoint_auth_methods_supported: ['none'],
-      scopes_supported: ['mcp'],
+      scopes_supported: ['mcp', 'offline_access'],
     });
   };
   app.get('/.well-known/oauth-authorization-server', authorizationServerMetadata);
@@ -210,7 +239,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       resource: `${baseUrl}/mcp`,
       authorization_servers: [baseUrl],
       bearer_methods_supported: ['header'],
-      scopes_supported: ['mcp'],
+      scopes_supported: ['mcp', 'offline_access'],
     });
   };
   app.get('/.well-known/oauth-protected-resource', protectedResourceMetadata);
@@ -222,17 +251,24 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       typeof requested.client_id === 'string' && requested.client_id.length > 0
         ? (requested.client_id as string)
         : `mvmt-${Date.now().toString(36)}`;
+    const clientName = typeof requested.client_name === 'string' ? requested.client_name : undefined;
+    const scope = typeof requested.scope === 'string' ? requested.scope : undefined;
     const redirectUris = Array.isArray(requested.redirect_uris)
       ? requested.redirect_uris.filter((uri): uri is string => typeof uri === 'string' && uri.length > 0)
       : [];
     if (redirectUris.length === 0) {
-      logHttpRequest(requestLog, req, 400, 'oauth.register', 'missing_redirect_uris', clientId);
+      logHttpRequest(
+        requestLog, req, 400, 'oauth.register',
+        'missing_redirect_uris', clientId,
+      );
       res.status(400).json({ error: 'invalid_redirect_uri', error_description: 'redirect_uris is required' });
       return;
     }
+    const redirectHosts: string[] = [];
     for (const uri of redirectUris) {
       try {
-        new URL(uri);
+        const parsed = new URL(uri);
+        redirectHosts.push(parsed.host);
       } catch {
         logHttpRequest(requestLog, req, 400, 'oauth.register', 'invalid_redirect_uri', clientId);
         res.status(400).json({ error: 'invalid_redirect_uri' });
@@ -253,13 +289,22 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       }
       throw err;
     }
-    logHttpRequest(requestLog, req, 201, 'oauth.register', undefined, clientId);
+    const detail = `redirect_uris=${registered.redirectUris.length} hosts=${[...new Set(redirectHosts)].join(',')}${clientName ? ` name="${clientName}"` : ''}`;
+    logHttpRequest(requestLog, req, 201, 'oauth.register', detail, clientId);
+    // Response shape follows RFC 7591 §3.2.1 (Client Information Response).
+    // We are a public client (no client_secret), so token_endpoint_auth_method
+    // is "none". client_id_issued_at helps clients audit when they were
+    // provisioned. client_name and scope are echoed only when the client
+    // supplied them.
     res.status(201).json({
       client_id: registered.clientId,
+      client_id_issued_at: Math.floor(Date.now() / 1000),
       token_endpoint_auth_method: 'none',
-      grant_types: ['authorization_code'],
+      grant_types: ['authorization_code', 'refresh_token'],
       response_types: ['code'],
       redirect_uris: registered.redirectUris,
+      ...(clientName ? { client_name: clientName } : {}),
+      ...(scope ? { scope } : {}),
     });
   });
 
@@ -271,12 +316,24 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       return;
     }
     if (!oauth.isRedirectUriAllowed(params.clientId, params.redirectUri)) {
-      logHttpRequest(requestLog, req, 400, 'oauth.authorize', 'unregistered_redirect_uri', params.clientId);
+      const rejectedHost = safeHost(params.redirectUri);
+      logHttpRequest(
+        requestLog, req, 400, 'oauth.authorize',
+        `unregistered_redirect_uri host=${rejectedHost}`, params.clientId,
+      );
       res.status(400).type('text/plain').send('redirect_uri is not registered for this client');
       return;
     }
-    logHttpRequest(requestLog, req, 200, 'oauth.authorize', undefined, params.clientId);
-    res.type('text/html').send(renderAuthorizePage(params));
+    const requestId = params.requestId ?? randomUUID();
+    const promptDetail = formatAuthorizeLogDetail({
+      phase: 'prompt',
+      requestId,
+      redirectUri: params.redirectUri,
+      resource: params.resource,
+      state: params.state,
+    });
+    logHttpRequest(requestLog, req, 200, 'oauth.authorize', promptDetail, params.clientId);
+    res.type('text/html').send(renderAuthorizePage({ ...params, requestId }));
   });
 
   app.post('/authorize', authLimiter, (req, res) => {
@@ -287,18 +344,30 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       return;
     }
     if (!oauth.isRedirectUriAllowed(params.clientId, params.redirectUri)) {
-      logHttpRequest(requestLog, req, 400, 'oauth.authorize', 'unregistered_redirect_uri', params.clientId);
+      const rejectedHost = safeHost(params.redirectUri);
+      logHttpRequest(
+        requestLog, req, 400, 'oauth.authorize',
+        `unregistered_redirect_uri host=${rejectedHost}`, params.clientId,
+      );
       res.status(400).type('text/plain').send('redirect_uri is not registered for this client');
       return;
     }
 
+    const requestId = params.requestId ?? randomUUID();
     const sessionTokenRaw = typeof req.body?.session_token === 'string' ? req.body.session_token : '';
     if (!validateSessionToken(`Bearer ${sessionTokenRaw}`, tokenPath)) {
-      logHttpRequest(requestLog, req, 401, 'oauth.authorize', 'invalid_session_token', params.clientId);
+      const denyDetail = formatAuthorizeLogDetail({
+        phase: 'deny_invalid_session_token',
+        requestId,
+        redirectUri: params.redirectUri,
+        resource: params.resource,
+        state: params.state,
+      });
+      logHttpRequest(requestLog, req, 401, 'oauth.authorize', denyDetail, params.clientId);
       res
         .status(401)
         .type('text/html')
-        .send(renderAuthorizePage({ ...params, error: 'Invalid session token. Try again.' }));
+        .send(renderAuthorizePage({ ...params, requestId, error: 'Invalid session token. Try again.' }));
       return;
     }
 
@@ -313,50 +382,82 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
 
     const redirect = new URL(params.redirectUri);
     redirect.searchParams.set('code', authCode.code);
-    redirect.searchParams.set('iss', baseUrlFor(req));
     if (params.state) redirect.searchParams.set('state', params.state);
-    logHttpRequest(requestLog, req, 302, 'oauth.authorize', undefined, params.clientId);
+    const approveDetail = formatAuthorizeLogDetail({
+      phase: 'approved_redirect',
+      requestId,
+      redirectUri: params.redirectUri,
+      resource: params.resource,
+      state: params.state,
+    });
+    logHttpRequest(requestLog, req, 302, 'oauth.authorize', approveDetail, params.clientId);
     res.redirect(302, redirect.toString());
   });
 
   app.post('/token', authLimiter, (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const grantType = typeof body.grant_type === 'string' ? body.grant_type : undefined;
-    if (grantType !== 'authorization_code') {
+    const requestClientId = typeof body.client_id === 'string' ? body.client_id : undefined;
+    if (grantType !== 'authorization_code' && grantType !== 'refresh_token') {
       logHttpRequest(requestLog, req, 400, 'oauth.token', 'unsupported_grant_type');
       res.status(400).json({ error: 'unsupported_grant_type' });
       return;
     }
 
-    const code = typeof body.code === 'string' ? body.code : undefined;
-    const clientId = typeof body.client_id === 'string' ? body.client_id : undefined;
-    const redirectUri = typeof body.redirect_uri === 'string' ? body.redirect_uri : undefined;
-    const resource = typeof body.resource === 'string' ? body.resource : undefined;
-    const codeVerifier = typeof body.code_verifier === 'string' ? body.code_verifier : undefined;
-
-    if (!code || !clientId || !redirectUri || !codeVerifier) {
-      logHttpRequest(requestLog, req, 400, 'oauth.token', 'invalid_request', clientId);
-      res.status(400).json({ error: 'invalid_request' });
-      return;
-    }
-
     try {
-      const accessToken = oauth.consumeCode({ code, clientId, redirectUri, resource, codeVerifier });
-      logHttpRequest(requestLog, req, 200, 'oauth.token', undefined, clientId);
+      if (grantType === 'authorization_code') {
+        const code = typeof body.code === 'string' ? body.code : undefined;
+        const clientId = requestClientId;
+        const redirectUri = typeof body.redirect_uri === 'string' ? body.redirect_uri : undefined;
+        const resource = typeof body.resource === 'string' ? body.resource : undefined;
+        const codeVerifier = typeof body.code_verifier === 'string' ? body.code_verifier : undefined;
+
+        if (!code || !clientId || !redirectUri || !codeVerifier) {
+          logHttpRequest(requestLog, req, 400, 'oauth.token', 'invalid_request', clientId);
+          res.status(400).json({ error: 'invalid_request' });
+          return;
+        }
+
+        const tokens = oauth.exchangeCode({ code, clientId, redirectUri, resource, codeVerifier });
+        const tokenDetail = `issued grant=authorization_code aud=${tokens.accessToken.audience ? safeHost(tokens.accessToken.audience) : '(none)'}`;
+        logHttpRequest(requestLog, req, 200, 'oauth.token', tokenDetail, clientId);
+        res.json({
+          access_token: tokens.accessToken.token,
+          token_type: 'Bearer',
+          expires_in: oauth.tokenTtlSeconds,
+          refresh_token: tokens.refreshToken.token,
+          scope: tokens.accessToken.scope,
+        });
+        return;
+      }
+
+      const refreshToken = typeof body.refresh_token === 'string' ? body.refresh_token : undefined;
+      const clientId = requestClientId;
+      const scope = typeof body.scope === 'string' ? body.scope : undefined;
+      if (!refreshToken || !clientId) {
+        logHttpRequest(requestLog, req, 400, 'oauth.token', 'invalid_request', clientId);
+        res.status(400).json({ error: 'invalid_request' });
+        return;
+      }
+
+      const tokens = oauth.exchangeRefreshToken({ refreshToken, clientId, scope });
+      const tokenDetail = `issued grant=refresh_token aud=${tokens.accessToken.audience ? safeHost(tokens.accessToken.audience) : '(none)'}`;
+      logHttpRequest(requestLog, req, 200, 'oauth.token', tokenDetail, clientId);
       res.json({
-        access_token: accessToken.token,
+        access_token: tokens.accessToken.token,
         token_type: 'Bearer',
         expires_in: oauth.tokenTtlSeconds,
-        scope: accessToken.scope,
+        refresh_token: tokens.refreshToken.token,
+        scope: tokens.accessToken.scope,
       });
     } catch (err) {
       if (err instanceof OAuthError) {
-        logHttpRequest(requestLog, req, 400, 'oauth.token', err.code, clientId);
+        logHttpRequest(requestLog, req, 400, 'oauth.token', err.code, requestClientId);
         res.status(400).json({ error: err.code, error_description: err.message });
         return;
       }
       log.warn(`Token exchange failed: ${err instanceof Error ? err.message : 'unknown'}`);
-      logHttpRequest(requestLog, req, 500, 'oauth.token', 'server_error', clientId);
+      logHttpRequest(requestLog, req, 500, 'oauth.token', 'server_error', requestClientId);
       res.status(500).json({ error: 'server_error' });
     }
   });
@@ -546,6 +647,7 @@ type AuthorizeParams = {
   redirectUri: string;
   resource?: string;
   state?: string;
+  requestId?: string;
   scope?: string;
   codeChallenge: string;
   codeChallengeMethod: CodeChallengeMethod;
@@ -588,6 +690,7 @@ function parseAuthorizeParams(source: Record<string, unknown>): AuthorizeParams 
     redirectUri,
     resource,
     state: stringField(source.state),
+    requestId: stringField(source.request_id),
     scope: stringField(source.scope),
     codeChallenge,
     codeChallengeMethod: 'S256',
@@ -598,6 +701,38 @@ function stringField(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function firstHeaderValue(value: string | string[] | undefined): string | undefined {
+  if (Array.isArray(value)) return value[0];
+  return value;
+}
+
+// Used in request logs for redirect/resource URIs. We log the host only
+// (not the full path) because full redirect URLs can include
+// client-supplied identifiers that belong in an audit trail but not in
+// a general request log.
+function safeHost(uri: string): string {
+  try {
+    return new URL(uri).host || '(unknown)';
+  } catch {
+    return '(invalid)';
+  }
+}
+
+function formatAuthorizeLogDetail(input: {
+  phase: string;
+  requestId: string;
+  redirectUri: string;
+  resource?: string;
+  state?: string;
+}): string {
+  return `${input.phase} rid=${input.requestId} redirect_host=${safeHost(input.redirectUri)} resource_host=${input.resource ? safeHost(input.resource) : '(none)'} state_hash=${hashForLog(input.state)}`;
+}
+
+function hashForLog(value: string | undefined): string {
+  if (!value) return '(none)';
+  return createHash('sha256').update(value).digest('hex').slice(0, 12);
 }
 
 export function buildOriginCheck(extraAllowed: string[]): (req: Request) => boolean {

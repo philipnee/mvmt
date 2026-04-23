@@ -100,12 +100,9 @@ Most MCP clients let you add servers through their settings UI. You need two thi
 
 Claude Desktop is the exception — it uses stdio mode and launches mvmt directly, so no token is needed.
 
-For remote web clients that use OAuth, mvmt also enforces redirect-URI registration. The client must either:
+Remote web clients (ChatGPT, claude.ai) authenticate with OAuth 2.1 + PKCE. mvmt implements RFC 7591 Dynamic Client Registration as the primary path, and OpenAI's auth guide says ChatGPT supports it. In practice, if a web client does not call `/register`, you can still pre-register its exact `redirect_uri` manually. mvmt persists registrations to `~/.mvmt/.clients.json`. The issued access token is bound to the resource via the `aud` claim, so a token minted for one mvmt instance cannot be replayed against another.
 
-- register itself with mvmt through the OAuth `/register` endpoint, or
-- use a pre-registered exact `redirect_uri`
-
-If the client skips registration and sends an unknown `redirect_uri`, `/authorize` fails.
+If your web client does not support DCR, pre-register it manually by POSTing to `/register` once (see [Client Setup](docs/client-setup.md#remote-oauth-clients) for the curl example). Either way, an `/authorize` request with an unknown `redirect_uri` is rejected.
 
 See [Client Setup](docs/client-setup.md) for step-by-step instructions for Claude Desktop, Claude Code, Codex CLI, Cursor, VS Code, and raw HTTP.
 
@@ -269,7 +266,7 @@ mvmt token rotate
 
 `mvmt token` prints the current token, age, and file path. `mvmt token rotate` writes a new token to `~/.mvmt/.session-token` and prints it. Running HTTP servers validate against the token file on each request, so rotation takes effect immediately. Any connected client that stored the old token must be updated, and existing OAuth access tokens are revoked immediately.
 
-Normal `mvmt serve` restarts reuse the same root token. OAuth access tokens minted from that root token remain valid across restart until they expire or you rotate the token.
+Normal `mvmt serve` restarts reuse the same root token. OAuth access tokens minted from that root token remain valid across restart as long as the advertised resource URL stays the same; they still expire normally, and `mvmt token rotate` revokes them immediately.
 
 `mvmt token show` remains a hidden compatibility alias for raw token output.
 
@@ -344,7 +341,7 @@ Recommended quick tunnel: Cloudflare. For stable hostnames such as `pnee.example
 > Remote web clients authorize with OAuth/PKCE. Direct HTTP clients use bearer tokens. Auth controls who connects; connector scope controls what they can access.
 
 > [!IMPORTANT]
-> mvmt only redirects OAuth authorization codes to registered callback URLs. If your web MCP client does not support RFC 7591 dynamic client registration, you must pre-register its exact `redirect_uri` before testing the flow.
+> mvmt only redirects OAuth authorization codes to registered callback URLs and binds issued tokens to the requested `resource` via the `aud` claim. Dynamic Client Registration is the preferred path; if a web client does not call `/register` in practice, pre-register its exact `redirect_uri` first.
 
 Remote access checklist:
 

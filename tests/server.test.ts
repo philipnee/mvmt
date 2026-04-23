@@ -11,9 +11,10 @@ import {
   isStandaloneSseRequest,
   startHttpServer,
 } from '../src/server/index.js';
+import { OAuthStore } from '../src/server/oauth.js';
 import { ToolRouter } from '../src/server/router.js';
 import { Connector } from '../src/connectors/types.js';
-import { generateSessionToken, rotateSigningKey } from '../src/utils/token.js';
+import { ensureSigningKey, generateSessionToken, rotateSigningKey } from '../src/utils/token.js';
 
 function req(origin?: string): Request {
   return { headers: origin === undefined ? {} : { origin } } as unknown as Request;
@@ -94,7 +95,34 @@ describe('startHttpServer lifecycle', () => {
         expect(metadata.registration_endpoint).toBe(`http://127.0.0.1:${server.port}/register`);
         expect(metadata.authorization_endpoint).toBe(`http://127.0.0.1:${server.port}/authorize`);
         expect(metadata.token_endpoint).toBe(`http://127.0.0.1:${server.port}/token`);
-        expect(metadata.authorization_response_iss_parameter_supported).toBe(true);
+        expect(metadata.authorization_response_iss_parameter_supported).toBeUndefined();
+        expect(metadata.grant_types_supported).toEqual(['authorization_code', 'refresh_token']);
+        expect(metadata.scopes_supported).toEqual(['mcp', 'offline_access']);
+      }
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('serves protected resource metadata with the scopes ChatGPT requests', async () => {
+    const router = new ToolRouter([new EmptyConnector()]);
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const server = await startHttpServer(router, { port: 0, tokenPath });
+
+    try {
+      for (const pathSuffix of [
+        '/.well-known/oauth-protected-resource',
+        '/.well-known/oauth-protected-resource/mcp',
+      ]) {
+        const response = await fetch(`http://127.0.0.1:${server.port}${pathSuffix}`);
+        expect(response.status).toBe(200);
+        const metadata = await response.json();
+        expect(metadata.resource).toBe(`http://127.0.0.1:${server.port}/mcp`);
+        expect(metadata.authorization_servers).toEqual([`http://127.0.0.1:${server.port}`]);
+        expect(metadata.scopes_supported).toEqual(['mcp', 'offline_access']);
       }
     } finally {
       await server.close();
@@ -152,12 +180,47 @@ describe('startHttpServer lifecycle', () => {
             kind: 'mcp.auth',
             path: '/mcp',
             status: 401,
-            detail: 'missing_or_invalid_bearer',
+            detail: 'missing_bearer',
           }),
         ]),
       );
       expect(JSON.stringify(requestLogs)).not.toContain('secret-challenge');
       expect(JSON.stringify(requestLogs)).not.toContain('client.example/callback');
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('logs invalid bearer tokens distinctly from missing ones', async () => {
+    const router = new ToolRouter([new EmptyConnector()]);
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const requestLogs: Array<{ kind: string; path: string; status: number; detail?: string; clientId?: string }> = [];
+    const server = await startHttpServer(router, {
+      port: 0,
+      tokenPath,
+      requestLog: (entry) => requestLogs.push(entry),
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${server.port}/mcp`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer nope', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+      });
+      expect(response.status).toBe(401);
+      expect(requestLogs).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'mcp.auth',
+            path: '/mcp',
+            status: 401,
+            detail: 'invalid_bearer',
+          }),
+        ]),
+      );
     } finally {
       await server.close();
       fs.rmSync(tmp, { recursive: true, force: true });
@@ -197,7 +260,7 @@ describe('startHttpServer lifecycle', () => {
       const redirect = new URL(location!);
       const code = redirect.searchParams.get('code');
       expect(code).toBeTruthy();
-      expect(redirect.searchParams.get('iss')).toBe(`http://127.0.0.1:${server.port}`);
+      expect(redirect.searchParams.get('iss')).toBeNull();
 
       const token = await fetch(`http://127.0.0.1:${server.port}/token`, {
         method: 'POST',
@@ -215,6 +278,164 @@ describe('startHttpServer lifecycle', () => {
       const body = await token.json();
       expect(body.token_type).toBe('Bearer');
       expect(body.access_token).toBeTypeOf('string');
+      expect(body.refresh_token).toBeTypeOf('string');
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('exchanges an authorization code when the token request omits a resource already bound at authorize time', async () => {
+    const router = new ToolRouter([new EmptyConnector()]);
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const server = await startHttpServer(router, { port: 0, tokenPath });
+
+    try {
+      const sessionToken = fs.readFileSync(tokenPath, 'utf-8').trim();
+      const resource = `http://127.0.0.1:${server.port}/mcp`;
+      const redirectUri = 'https://claude.ai/api/mcp/auth_callback';
+      const { verifier, challenge } = s256Pair();
+      await registerClient(server.port, 'claude', [redirectUri]);
+      const authorize = await fetch(`http://127.0.0.1:${server.port}/authorize`, {
+        method: 'POST',
+        redirect: 'manual',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          response_type: 'code',
+          client_id: 'claude',
+          redirect_uri: redirectUri,
+          resource,
+          code_challenge: challenge,
+          code_challenge_method: 'S256',
+          session_token: sessionToken,
+        }),
+      });
+      expect(authorize.status).toBe(302);
+      const code = new URL(authorize.headers.get('location')!).searchParams.get('code');
+      expect(code).toBeTruthy();
+
+      const token = await fetch(`http://127.0.0.1:${server.port}/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'authorization_code',
+          code: code!,
+          client_id: 'claude',
+          redirect_uri: redirectUri,
+          code_verifier: verifier,
+        }),
+      });
+      expect(token.status).toBe(200);
+      const body = await token.json();
+      expect(body.token_type).toBe('Bearer');
+      expect(body.access_token).toBeTypeOf('string');
+      expect(body.refresh_token).toBeTypeOf('string');
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('exchanges a refresh token for a new access token', async () => {
+    const router = new ToolRouter([new EmptyConnector()]);
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const server = await startHttpServer(router, { port: 0, tokenPath });
+
+    try {
+      const sessionToken = fs.readFileSync(tokenPath, 'utf-8').trim();
+      const resource = `http://127.0.0.1:${server.port}/mcp`;
+      const redirectUri = 'https://chatgpt.com/connector/oauth/test-callback';
+      const { verifier, challenge } = s256Pair();
+      await registerClient(server.port, 'chatgpt', [redirectUri]);
+      const authorize = await fetch(`http://127.0.0.1:${server.port}/authorize`, {
+        method: 'POST',
+        redirect: 'manual',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          response_type: 'code',
+          client_id: 'chatgpt',
+          redirect_uri: redirectUri,
+          resource,
+          scope: 'mcp offline_access',
+          code_challenge: challenge,
+          code_challenge_method: 'S256',
+          session_token: sessionToken,
+        }),
+      });
+      const code = new URL(authorize.headers.get('location')!).searchParams.get('code');
+      expect(code).toBeTruthy();
+
+      const token = await fetch(`http://127.0.0.1:${server.port}/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'authorization_code',
+          code: code!,
+          client_id: 'chatgpt',
+          redirect_uri: redirectUri,
+          resource,
+          code_verifier: verifier,
+        }),
+      });
+      expect(token.status).toBe(200);
+      const firstGrant = await token.json();
+      expect(firstGrant.refresh_token).toBeTypeOf('string');
+
+      const refresh = await fetch(`http://127.0.0.1:${server.port}/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'refresh_token',
+          client_id: 'chatgpt',
+          refresh_token: firstGrant.refresh_token,
+        }),
+      });
+      expect(refresh.status).toBe(200);
+      const refreshedGrant = await refresh.json();
+      expect(refreshedGrant.access_token).toBeTypeOf('string');
+      expect(refreshedGrant.refresh_token).toBeTypeOf('string');
+      expect(refreshedGrant.access_token).not.toBe(firstGrant.access_token);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('omits the optional issuer parameter from the authorization redirect', async () => {
+    const router = new ToolRouter([new EmptyConnector()]);
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const server = await startHttpServer(router, { port: 0, tokenPath });
+
+    try {
+      const sessionToken = fs.readFileSync(tokenPath, 'utf-8').trim();
+      const redirectUri = 'https://claude.ai/api/mcp/auth_callback';
+      const { challenge } = s256Pair();
+      await registerClient(server.port, 'claude', [redirectUri]);
+      const authorize = await fetch(`http://127.0.0.1:${server.port}/authorize`, {
+        method: 'POST',
+        redirect: 'manual',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          response_type: 'code',
+          client_id: 'claude',
+          redirect_uri: redirectUri,
+          code_challenge: challenge,
+          code_challenge_method: 'S256',
+          state: 'test-state',
+          session_token: sessionToken,
+        }),
+      });
+      expect(authorize.status).toBe(302);
+      const redirect = new URL(authorize.headers.get('location')!);
+      expect(redirect.searchParams.get('code')).toBeTruthy();
+      expect(redirect.searchParams.get('state')).toBe('test-state');
+      expect(redirect.searchParams.has('iss')).toBe(false);
     } finally {
       await server.close();
       fs.rmSync(tmp, { recursive: true, force: true });
@@ -300,6 +521,42 @@ describe('startHttpServer lifecycle', () => {
     }
   });
 
+  it('returns an RFC 7591-style client information response from /register', async () => {
+    const router = new ToolRouter([new EmptyConnector()]);
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const server = await startHttpServer(router, { port: 0, tokenPath });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${server.port}/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          client_id: 'chatgpt',
+          client_name: 'ChatGPT Connector',
+          scope: 'mcp',
+          redirect_uris: ['https://chatgpt.com/connector/oauth/test-callback'],
+        }),
+      });
+      expect(response.status).toBe(201);
+      const body = await response.json();
+      expect(body).toMatchObject({
+        client_id: 'chatgpt',
+        client_name: 'ChatGPT Connector',
+        scope: 'mcp',
+        token_endpoint_auth_method: 'none',
+        grant_types: ['authorization_code', 'refresh_token'],
+        response_types: ['code'],
+        redirect_uris: ['https://chatgpt.com/connector/oauth/test-callback'],
+      });
+      expect(body.client_id_issued_at).toEqual(expect.any(Number));
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('uses resolvePublicBaseUrl and ignores X-Forwarded-Host in OAuth metadata', async () => {
     const router = new ToolRouter([new EmptyConnector()]);
     await router.initialize();
@@ -373,17 +630,22 @@ describe('startHttpServer lifecycle', () => {
     }
   });
 
-  it('keeps OAuth access tokens valid across server restarts when the session token is unchanged', async () => {
+  it('keeps OAuth access tokens valid across restarts when the advertised resource is unchanged', async () => {
     const router = new ToolRouter([new EmptyConnector()]);
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
-    const firstServer = await startHttpServer(router, { port: 0, tokenPath });
+    const resourceBaseUrl = 'https://mvmt.example.com';
+    const firstServer = await startHttpServer(router, {
+      port: 0,
+      tokenPath,
+      resolvePublicBaseUrl: () => resourceBaseUrl,
+    });
     const port = firstServer.port;
 
     try {
       const sessionToken = fs.readFileSync(tokenPath, 'utf-8').trim();
-      const accessToken = await exchangeAccessToken(port, sessionToken);
+      const accessToken = await exchangeAccessToken(port, sessionToken, resourceBaseUrl);
 
       const beforeRestart = await fetch(`http://127.0.0.1:${port}/health`, {
         headers: { Authorization: `Bearer ${accessToken}` },
@@ -392,7 +654,11 @@ describe('startHttpServer lifecycle', () => {
 
       await firstServer.close();
 
-      const secondServer = await startHttpServer(router, { port: 0, tokenPath });
+      const secondServer = await startHttpServer(router, {
+        port: 0,
+        tokenPath,
+        resolvePublicBaseUrl: () => resourceBaseUrl,
+      });
       try {
         const afterRestart = await fetch(`http://127.0.0.1:${secondServer.port}/health`, {
           headers: { Authorization: `Bearer ${accessToken}` },
@@ -402,6 +668,63 @@ describe('startHttpServer lifecycle', () => {
         await secondServer.close();
       }
     } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects OAuth access tokens when the advertised resource changes across restart', async () => {
+    const router = new ToolRouter([new EmptyConnector()]);
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const firstServer = await startHttpServer(router, {
+      port: 0,
+      tokenPath,
+      resolvePublicBaseUrl: () => 'https://mvmt.example.com',
+    });
+
+    try {
+      const sessionToken = fs.readFileSync(tokenPath, 'utf-8').trim();
+      const accessToken = await exchangeAccessToken(firstServer.port, sessionToken, 'https://mvmt.example.com');
+
+      await firstServer.close();
+
+      const secondServer = await startHttpServer(router, {
+        port: 0,
+        tokenPath,
+        resolvePublicBaseUrl: () => 'https://other.example.com',
+      });
+      try {
+        const afterRestart = await fetch(`http://127.0.0.1:${secondServer.port}/health`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        expect(afterRestart.status).toBe(401);
+      } finally {
+        await secondServer.close();
+      }
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts legacy audience-less OAuth access tokens during the compatibility window', async () => {
+    const router = new ToolRouter([new EmptyConnector()]);
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const signingKeyPath = path.join(tmp, '.mvmt', '.signing-key');
+    const signingKey = ensureSigningKey(signingKeyPath);
+    const legacyStore = new OAuthStore({ signingKey });
+    const legacyToken = legacyStore.issueAccessToken({ clientId: 'claude' }).token;
+    const server = await startHttpServer(router, { port: 0, tokenPath, signingKeyPath });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${server.port}/health`, {
+        headers: { Authorization: `Bearer ${legacyToken}` },
+      });
+      expect(response.status).toBe(200);
+    } finally {
+      await server.close();
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   });
@@ -560,10 +883,10 @@ async function registerClient(port: number, clientId: string, redirectUris: stri
   expect(response.status).toBe(201);
 }
 
-async function exchangeAccessToken(port: number, sessionToken: string): Promise<string> {
+async function exchangeAccessToken(port: number, sessionToken: string, resourceBaseUrl?: string): Promise<string> {
   const redirectUri = 'https://codex.example/callback';
   const { verifier, challenge } = s256Pair();
-  const resource = `http://127.0.0.1:${port}/mcp`;
+  const resource = `${resourceBaseUrl ?? `http://127.0.0.1:${port}`}/mcp`;
   await registerClient(port, 'codex', [redirectUri]);
   const authorize = await fetch(`http://127.0.0.1:${port}/authorize`, {
     method: 'POST',

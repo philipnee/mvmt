@@ -209,6 +209,110 @@ describe('OAuthStore', () => {
     ).toThrow(/Resource mismatch/);
   });
 
+  it('allows the token exchange to omit resource when the code is already resource-bound', () => {
+    const store = new OAuthStore({ signingKey: 'test-secret' });
+    const { verifier, challenge } = pkcePair();
+    const code = store.issueCode({
+      clientId: 'claude',
+      redirectUri: 'https://claude.ai/api/mcp/auth_callback',
+      resource: 'https://mcp.example.com/mcp',
+      codeChallenge: challenge,
+      codeChallengeMethod: 'S256',
+    });
+
+    const token = store.consumeCode({
+      code: code.code,
+      clientId: 'claude',
+      redirectUri: 'https://claude.ai/api/mcp/auth_callback',
+      codeVerifier: verifier,
+    });
+
+    expect(token.audience).toBe('https://mcp.example.com/mcp');
+  });
+
+  it('exchanges authorization codes into both access and refresh tokens', () => {
+    const store = new OAuthStore({ signingKey: 'test-secret' });
+    const { verifier, challenge } = pkcePair();
+    const code = store.issueCode({
+      clientId: 'chatgpt',
+      redirectUri: 'https://chatgpt.com/connector/oauth/callback',
+      scope: 'mcp offline_access',
+      resource: 'https://mcp.example.com/mcp',
+      codeChallenge: challenge,
+      codeChallengeMethod: 'S256',
+    });
+
+    const tokens = store.exchangeCode({
+      code: code.code,
+      clientId: 'chatgpt',
+      redirectUri: 'https://chatgpt.com/connector/oauth/callback',
+      resource: 'https://mcp.example.com/mcp',
+      codeVerifier: verifier,
+    });
+
+    expect(tokens.accessToken.scope).toBe('mcp offline_access');
+    expect(tokens.refreshToken.scope).toBe('mcp offline_access');
+    expect(tokens.refreshToken.audience).toBe('https://mcp.example.com/mcp');
+    expect(tokens.refreshToken.token).toBeTypeOf('string');
+  });
+
+  it('exchanges refresh tokens for a new access token', () => {
+    const store = new OAuthStore({ signingKey: 'test-secret' });
+    const refreshToken = store.issueRefreshToken({
+      clientId: 'chatgpt',
+      scope: 'mcp offline_access',
+      audience: 'https://mcp.example.com/mcp',
+    });
+
+    const tokens = store.exchangeRefreshToken({
+      refreshToken: refreshToken.token,
+      clientId: 'chatgpt',
+    });
+
+    expect(tokens.accessToken.token).not.toBe(tokens.refreshToken.token);
+    expect(tokens.accessToken.scope).toBe('mcp offline_access');
+    expect(tokens.accessToken.audience).toBe('https://mcp.example.com/mcp');
+    expect(tokens.refreshToken.scope).toBe('mcp offline_access');
+  });
+
+  it('rejects refresh token scope widening', () => {
+    const store = new OAuthStore({ signingKey: 'test-secret' });
+    const refreshToken = store.issueRefreshToken({
+      clientId: 'chatgpt',
+      scope: 'mcp',
+      audience: 'https://mcp.example.com/mcp',
+    });
+
+    expect(() =>
+      store.exchangeRefreshToken({
+        refreshToken: refreshToken.token,
+        clientId: 'chatgpt',
+        scope: 'mcp offline_access',
+      }),
+    ).toThrow(/scope/i);
+  });
+
+  it('rejects introducing a resource at token time when the authorization code had none', () => {
+    const store = new OAuthStore({ signingKey: 'test-secret' });
+    const { verifier, challenge } = pkcePair();
+    const code = store.issueCode({
+      clientId: 'claude',
+      redirectUri: 'https://claude.ai/api/mcp/auth_callback',
+      codeChallenge: challenge,
+      codeChallengeMethod: 'S256',
+    });
+
+    expect(() =>
+      store.consumeCode({
+        code: code.code,
+        clientId: 'claude',
+        redirectUri: 'https://claude.ai/api/mcp/auth_callback',
+        resource: 'https://mcp.example.com/mcp',
+        codeVerifier: verifier,
+      }),
+    ).toThrow(/Resource mismatch/);
+  });
+
   it('expires access tokens', () => {
     let now = 1_000_000;
     const store = new OAuthStore({ tokenTtlMs: 1000, signingKey: 'test-secret', now: () => now });
@@ -257,6 +361,42 @@ describe('OAuthStore', () => {
 
     expect(validated?.token).toBe(token.token);
     expect(validated?.clientId).toBe('codex');
+  });
+
+  it('rejects access tokens whose audience does not match the expected resource', () => {
+    const store = new OAuthStore({ signingKey: 'shared-secret' });
+    const token = store.issueAccessToken({
+      clientId: 'codex',
+      audience: 'https://mvmt.example.com/mcp',
+    });
+
+    expect(
+      store.validateAccessToken(`Bearer ${token.token}`, {
+        expectedAudience: 'https://mvmt.example.com/mcp',
+      })?.token,
+    ).toBe(token.token);
+    expect(
+      store.validateAccessToken(`Bearer ${token.token}`, {
+        expectedAudience: 'https://other.example.com/mcp',
+      }),
+    ).toBeUndefined();
+  });
+
+  it('allows legacy audience-less tokens only when explicitly requested', () => {
+    const store = new OAuthStore({ signingKey: 'shared-secret' });
+    const token = store.issueAccessToken({ clientId: 'codex' });
+
+    expect(
+      store.validateAccessToken(`Bearer ${token.token}`, {
+        expectedAudience: 'https://mvmt.example.com/mcp',
+      }),
+    ).toBeUndefined();
+    expect(
+      store.validateAccessToken(`Bearer ${token.token}`, {
+        expectedAudience: 'https://mvmt.example.com/mcp',
+        allowLegacyNoAudience: true,
+      })?.token,
+    ).toBe(token.token);
   });
 
   it('rejects access tokens signed with a different secret', () => {
