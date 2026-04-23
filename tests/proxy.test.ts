@@ -32,11 +32,10 @@ vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', () => ({
   }),
 }));
 
-const { StdioProxyConnector, sanitizeName, buildChildEnv, isLikelyWriteTool, isMemPalaceWriteTool } = await import(
-  '../src/connectors/proxy-stdio.js'
-);
+const { StdioProxyConnector, sanitizeName, buildChildEnv } = await import('../src/connectors/proxy-stdio.js');
 const { HttpProxyConnector } = await import('../src/connectors/proxy-http.js');
 const { createProxyConnector } = await import('../src/connectors/factory.js');
+const { isLikelyWriteTool, isMemPalaceWriteTool } = await import('../src/connectors/write-policy.js');
 
 describe('sanitizeName', () => {
   it('normalizes connector names for namespace prefixes', () => {
@@ -347,6 +346,41 @@ describe('HttpProxyConnector', () => {
       content: [{ type: 'text', text: 'remote ok' }],
     });
     await expect(connector.shutdown()).resolves.toBeUndefined();
+  });
+
+  it('filters and blocks HTTP proxy write tools when writeAccess is false', async () => {
+    mocks.connect.mockResolvedValue(undefined);
+    mocks.listTools.mockResolvedValue({
+      tools: [
+        { name: 'search_records', description: '', inputSchema: { type: 'object', properties: {} } },
+        { name: 'create_record', description: '', inputSchema: { type: 'object', properties: {} } },
+        { name: 'delete_record', description: '', inputSchema: { type: 'object', properties: {} } },
+      ],
+    });
+
+    const connector = createProxyConnector({
+      name: 'remote',
+      transport: 'http',
+      url: 'https://mcp.example.test/mcp',
+      args: [],
+      env: {},
+      enabled: true,
+      writeAccess: false,
+    });
+
+    expect(connector).toBeInstanceOf(HttpProxyConnector);
+    await connector!.initialize();
+
+    await expect(connector!.listTools()).resolves.toEqual([
+      { name: 'search_records', description: '', inputSchema: { type: 'object', properties: {} } },
+    ]);
+
+    mocks.callTool.mockClear();
+    await expect(connector!.callTool('create_record', {})).resolves.toMatchObject({
+      isError: true,
+      content: [{ type: 'text', text: expect.stringContaining('write access is disabled') }],
+    });
+    expect(mocks.callTool).not.toHaveBeenCalled();
   });
 });
 

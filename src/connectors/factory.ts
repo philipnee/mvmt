@@ -9,6 +9,7 @@ export function createProxyConnector(proxyConfig: ProxyConfig): Connector | unde
       name: proxyConfig.name,
       url: proxyConfig.url,
       env: proxyConfig.env,
+      writeAccess: proxyConfig.writeAccess,
     });
   }
 
