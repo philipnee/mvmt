@@ -30,6 +30,19 @@ export interface AccessToken {
   expiresAt: number;
 }
 
+export interface RefreshToken {
+  token: string;
+  clientId: string;
+  scope?: string;
+  audience?: string;
+  expiresAt: number;
+}
+
+export interface TokenGrant {
+  accessToken: AccessToken;
+  refreshToken: RefreshToken;
+}
+
 export interface IssueCodeInput {
   clientId: string;
   redirectUri: string;
@@ -47,9 +60,16 @@ export interface ConsumeCodeInput {
   codeVerifier: string;
 }
 
+export interface ConsumeRefreshTokenInput {
+  refreshToken: string;
+  clientId: string;
+  scope?: string;
+}
+
 export interface OAuthStoreOptions {
   codeTtlMs?: number;
   tokenTtlMs?: number;
+  refreshTokenTtlMs?: number;
   // Key material used to sign and validate self-contained access tokens.
   // Pass a function when the key can change at runtime (e.g. backed by a
   // file that `mvmt token rotate` rewrites) so rotation invalidates
@@ -61,7 +81,9 @@ export interface OAuthStoreOptions {
 
 const DEFAULT_CODE_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const ACCESS_TOKEN_PREFIX = 'mvmtv1';
+const REFRESH_TOKEN_PREFIX = 'mvmtr1';
 
 export interface RegisteredClient {
   clientId: string;
@@ -75,6 +97,7 @@ export class OAuthStore {
   private readonly clients = new Map<string, RegisteredClient>();
   private readonly codeTtlMs: number;
   private readonly tokenTtlMs: number;
+  private readonly refreshTokenTtlMs: number;
   private readonly resolveSigningKey: () => string;
   private readonly clientsPath?: string;
   private readonly now: () => number;
@@ -82,6 +105,7 @@ export class OAuthStore {
   constructor(options: OAuthStoreOptions = {}) {
     this.codeTtlMs = options.codeTtlMs ?? DEFAULT_CODE_TTL_MS;
     this.tokenTtlMs = options.tokenTtlMs ?? DEFAULT_TOKEN_TTL_MS;
+    this.refreshTokenTtlMs = options.refreshTokenTtlMs ?? DEFAULT_REFRESH_TOKEN_TTL_MS;
     const keyOption = options.signingKey;
     if (typeof keyOption === 'function') {
       this.resolveSigningKey = keyOption;
@@ -99,6 +123,10 @@ export class OAuthStore {
 
   get tokenTtlSeconds(): number {
     return Math.floor(this.tokenTtlMs / 1000);
+  }
+
+  get refreshTokenTtlSeconds(): number {
+    return Math.floor(this.refreshTokenTtlMs / 1000);
   }
 
   registerClient(client: RegisteredClient): RegisteredClient {
@@ -190,6 +218,10 @@ export class OAuthStore {
   }
 
   consumeCode(input: ConsumeCodeInput): AccessToken {
+    return this.exchangeCode(input).accessToken;
+  }
+
+  exchangeCode(input: ConsumeCodeInput): TokenGrant {
     const entry = this.codes.get(input.code);
     if (!entry) throw new OAuthError('invalid_grant', 'Authorization code not found');
 
@@ -222,31 +254,62 @@ export class OAuthStore {
     entry.consumed = true;
     this.codes.delete(input.code);
 
-    return this.issueAccessToken({
+    return this.issueTokenGrant({
       clientId: entry.clientId,
       scope: entry.scope,
       audience: entry.resource,
     });
   }
 
+  exchangeRefreshToken(input: ConsumeRefreshTokenInput): TokenGrant {
+    const refreshToken = this.parseRefreshToken(input.refreshToken);
+    if (!refreshToken) {
+      throw new OAuthError('invalid_grant', 'Refresh token not found');
+    }
+    if (refreshToken.clientId !== input.clientId) {
+      throw new OAuthError('invalid_grant', 'Client mismatch for refresh token');
+    }
+
+    return this.issueTokenGrant({
+      clientId: refreshToken.clientId,
+      scope: resolveRefreshScope(refreshToken.scope, input.scope),
+      audience: refreshToken.audience,
+    });
+  }
+
+  issueTokenGrant(input: { clientId: string; scope?: string; audience?: string }): TokenGrant {
+    return {
+      accessToken: this.issueAccessToken(input),
+      refreshToken: this.issueRefreshToken(input),
+    };
+  }
+
   issueAccessToken(input: { clientId: string; scope?: string; audience?: string }): AccessToken {
     const expiresAt = this.now() + this.tokenTtlMs;
-    const payload = Buffer.from(
-      JSON.stringify({
-        clientId: input.clientId,
-        scope: input.scope,
-        aud: input.audience,
-        expiresAt,
-      }),
-      'utf-8',
-    ).toString('base64url');
-    // HMAC-SHA256 MACs the access-token payload with a 256-bit random
-    // signing key. This is JWT-style token signing, not password hashing —
-    // CodeQL's js/insufficient-password-hash (which recommends bcrypt et al.)
-    // is a false positive because bcrypt is for low-entropy human secrets,
-    // not deterministic MACs over structured payloads.
-    const signature = crypto.createHmac('sha256', this.resolveSigningKey()).update(payload).digest('base64url');
-    const token = `${ACCESS_TOKEN_PREFIX}.${payload}.${signature}`;
+    const token = this.issueSignedToken(ACCESS_TOKEN_PREFIX, {
+      clientId: input.clientId,
+      scope: input.scope,
+      aud: input.audience,
+      expiresAt,
+    });
+
+    return {
+      token,
+      clientId: input.clientId,
+      scope: input.scope,
+      audience: input.audience,
+      expiresAt,
+    };
+  }
+
+  issueRefreshToken(input: { clientId: string; scope?: string; audience?: string }): RefreshToken {
+    const expiresAt = this.now() + this.refreshTokenTtlMs;
+    const token = this.issueSignedToken(REFRESH_TOKEN_PREFIX, {
+      clientId: input.clientId,
+      scope: input.scope,
+      aud: input.audience,
+      expiresAt,
+    });
 
     return {
       token,
@@ -294,8 +357,52 @@ export class OAuthStore {
   }
 
   private parseAccessToken(token: string): AccessToken | undefined {
+    const parsed = this.parseSignedToken(token, ACCESS_TOKEN_PREFIX);
+    if (!parsed) return undefined;
+    return {
+      token,
+      clientId: parsed.clientId,
+      scope: parsed.scope,
+      audience: parsed.aud,
+      expiresAt: parsed.expiresAt,
+    };
+  }
+
+  private parseRefreshToken(token: string): RefreshToken | undefined {
+    const parsed = this.parseSignedToken(token, REFRESH_TOKEN_PREFIX);
+    if (!parsed) return undefined;
+    return {
+      token,
+      clientId: parsed.clientId,
+      scope: parsed.scope,
+      audience: parsed.aud,
+      expiresAt: parsed.expiresAt,
+    };
+  }
+
+  private issueSignedToken(
+    prefix: string,
+    payloadObject: { clientId: string; scope?: string; aud?: string; expiresAt: number },
+  ): string {
+    const payload = Buffer.from(
+      JSON.stringify({
+        ...payloadObject,
+        jti: crypto.randomBytes(16).toString('base64url'),
+      }),
+      'utf-8',
+    ).toString('base64url');
+    // HMAC-SHA256 MACs the token payload with a 256-bit random signing key.
+    // This is JWT-style token signing, not password hashing.
+    const signature = crypto.createHmac('sha256', this.resolveSigningKey()).update(payload).digest('base64url');
+    return `${prefix}.${payload}.${signature}`;
+  }
+
+  private parseSignedToken(
+    token: string,
+    expectedPrefix: string,
+  ): { clientId: string; scope?: string; aud?: string; expiresAt: number } | undefined {
     const parts = token.split('.');
-    if (parts.length !== 3 || parts[0] !== ACCESS_TOKEN_PREFIX) return undefined;
+    if (parts.length !== 3 || parts[0] !== expectedPrefix) return undefined;
 
     const payload = parts[1];
     const signature = parts[2];
@@ -314,12 +421,10 @@ export class OAuthStore {
       if (decoded.aud !== undefined && typeof decoded.aud !== 'string') return undefined;
       if (typeof decoded.expiresAt !== 'number' || !Number.isFinite(decoded.expiresAt)) return undefined;
       if (decoded.expiresAt < this.now()) return undefined;
-
       return {
-        token,
         clientId: decoded.clientId,
         scope: decoded.scope,
-        audience: decoded.aud,
+        aud: decoded.aud,
         expiresAt: decoded.expiresAt,
       };
     } catch {
@@ -332,6 +437,7 @@ export class OAuthError extends Error {
   constructor(
     public readonly code:
       | 'invalid_request'
+      | 'invalid_scope'
       | 'invalid_grant'
       | 'unauthorized_client'
       | 'unsupported_grant_type'
@@ -366,6 +472,26 @@ function timingSafeStringEquals(a: string, b: string): boolean {
   const hashA = crypto.createHmac('sha256', COMPARE_KEY).update(a, 'utf8').digest();
   const hashB = crypto.createHmac('sha256', COMPARE_KEY).update(b, 'utf8').digest();
   return crypto.timingSafeEqual(hashA, hashB);
+}
+
+function resolveRefreshScope(grantedScope: string | undefined, requestedScope: string | undefined): string | undefined {
+  if (requestedScope === undefined) return grantedScope;
+  if (grantedScope === undefined) {
+    throw new OAuthError('invalid_scope', 'Refresh token does not allow scoped access');
+  }
+  if (!isScopeSubset(requestedScope, grantedScope)) {
+    throw new OAuthError('invalid_scope', 'Requested scope exceeds refresh token scope');
+  }
+  return requestedScope;
+}
+
+function isScopeSubset(requestedScope: string, grantedScope: string): boolean {
+  const granted = new Set(splitScope(grantedScope));
+  return splitScope(requestedScope).every((scope) => granted.has(scope));
+}
+
+function splitScope(scope: string): string[] {
+  return [...new Set(scope.split(/\s+/).map((entry) => entry.trim()).filter(Boolean))];
 }
 
 // Resolves the public-facing base URL for metadata and redirect responses.
@@ -407,6 +533,7 @@ export interface AuthorizePageParams {
   redirectUri: string;
   resource?: string;
   state?: string;
+  requestId?: string;
   scope?: string;
   codeChallenge: string;
   codeChallengeMethod: CodeChallengeMethod;
@@ -452,6 +579,7 @@ export function renderAuthorizePage(params: AuthorizePageParams): string {
     ${hidden('redirect_uri', params.redirectUri)}
     ${hidden('resource', params.resource)}
     ${hidden('state', params.state)}
+    ${hidden('request_id', params.requestId)}
     ${hidden('scope', params.scope)}
     ${hidden('code_challenge', params.codeChallenge)}
     ${hidden('code_challenge_method', params.codeChallengeMethod)}

@@ -96,6 +96,33 @@ describe('startHttpServer lifecycle', () => {
         expect(metadata.authorization_endpoint).toBe(`http://127.0.0.1:${server.port}/authorize`);
         expect(metadata.token_endpoint).toBe(`http://127.0.0.1:${server.port}/token`);
         expect(metadata.authorization_response_iss_parameter_supported).toBeUndefined();
+        expect(metadata.grant_types_supported).toEqual(['authorization_code', 'refresh_token']);
+        expect(metadata.scopes_supported).toEqual(['mcp', 'offline_access']);
+      }
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('serves protected resource metadata with the scopes ChatGPT requests', async () => {
+    const router = new ToolRouter([new EmptyConnector()]);
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const server = await startHttpServer(router, { port: 0, tokenPath });
+
+    try {
+      for (const pathSuffix of [
+        '/.well-known/oauth-protected-resource',
+        '/.well-known/oauth-protected-resource/mcp',
+      ]) {
+        const response = await fetch(`http://127.0.0.1:${server.port}${pathSuffix}`);
+        expect(response.status).toBe(200);
+        const metadata = await response.json();
+        expect(metadata.resource).toBe(`http://127.0.0.1:${server.port}/mcp`);
+        expect(metadata.authorization_servers).toEqual([`http://127.0.0.1:${server.port}`]);
+        expect(metadata.scopes_supported).toEqual(['mcp', 'offline_access']);
       }
     } finally {
       await server.close();
@@ -251,6 +278,7 @@ describe('startHttpServer lifecycle', () => {
       const body = await token.json();
       expect(body.token_type).toBe('Bearer');
       expect(body.access_token).toBeTypeOf('string');
+      expect(body.refresh_token).toBeTypeOf('string');
     } finally {
       await server.close();
       fs.rmSync(tmp, { recursive: true, force: true });
@@ -303,6 +331,74 @@ describe('startHttpServer lifecycle', () => {
       const body = await token.json();
       expect(body.token_type).toBe('Bearer');
       expect(body.access_token).toBeTypeOf('string');
+      expect(body.refresh_token).toBeTypeOf('string');
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('exchanges a refresh token for a new access token', async () => {
+    const router = new ToolRouter([new EmptyConnector()]);
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const server = await startHttpServer(router, { port: 0, tokenPath });
+
+    try {
+      const sessionToken = fs.readFileSync(tokenPath, 'utf-8').trim();
+      const resource = `http://127.0.0.1:${server.port}/mcp`;
+      const redirectUri = 'https://chatgpt.com/connector/oauth/test-callback';
+      const { verifier, challenge } = s256Pair();
+      await registerClient(server.port, 'chatgpt', [redirectUri]);
+      const authorize = await fetch(`http://127.0.0.1:${server.port}/authorize`, {
+        method: 'POST',
+        redirect: 'manual',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          response_type: 'code',
+          client_id: 'chatgpt',
+          redirect_uri: redirectUri,
+          resource,
+          scope: 'mcp offline_access',
+          code_challenge: challenge,
+          code_challenge_method: 'S256',
+          session_token: sessionToken,
+        }),
+      });
+      const code = new URL(authorize.headers.get('location')!).searchParams.get('code');
+      expect(code).toBeTruthy();
+
+      const token = await fetch(`http://127.0.0.1:${server.port}/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'authorization_code',
+          code: code!,
+          client_id: 'chatgpt',
+          redirect_uri: redirectUri,
+          resource,
+          code_verifier: verifier,
+        }),
+      });
+      expect(token.status).toBe(200);
+      const firstGrant = await token.json();
+      expect(firstGrant.refresh_token).toBeTypeOf('string');
+
+      const refresh = await fetch(`http://127.0.0.1:${server.port}/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'refresh_token',
+          client_id: 'chatgpt',
+          refresh_token: firstGrant.refresh_token,
+        }),
+      });
+      expect(refresh.status).toBe(200);
+      const refreshedGrant = await refresh.json();
+      expect(refreshedGrant.access_token).toBeTypeOf('string');
+      expect(refreshedGrant.refresh_token).toBeTypeOf('string');
+      expect(refreshedGrant.access_token).not.toBe(firstGrant.access_token);
     } finally {
       await server.close();
       fs.rmSync(tmp, { recursive: true, force: true });
@@ -450,7 +546,7 @@ describe('startHttpServer lifecycle', () => {
         client_name: 'ChatGPT Connector',
         scope: 'mcp',
         token_endpoint_auth_method: 'none',
-        grant_types: ['authorization_code'],
+        grant_types: ['authorization_code', 'refresh_token'],
         response_types: ['code'],
         redirect_uris: ['https://chatgpt.com/connector/oauth/test-callback'],
       });
