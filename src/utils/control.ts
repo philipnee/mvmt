@@ -114,8 +114,22 @@ export async function startJsonControlServer(
   });
 
   await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(socketPath, () => resolve());
+    const onError = (err: Error) => reject(err);
+    server.once('error', onError);
+    server.listen(socketPath, () => {
+      server.off('error', onError);
+      try {
+        hardenControlSocket(socketPath);
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error('Failed to harden control socket permissions');
+        server.close(() => {
+          removeControlSocket(socketPath);
+          reject(error);
+        });
+        return;
+      }
+      resolve();
+    });
   });
 
   return {
@@ -124,14 +138,23 @@ export async function startJsonControlServer(
         server.close((err) => (err ? reject(err) : resolve()));
       });
       if (process.platform !== 'win32') {
-        try {
-          fs.unlinkSync(socketPath);
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-        }
+        removeControlSocket(socketPath);
       }
     },
   };
+}
+
+function hardenControlSocket(socketPath: string): void {
+  if (process.platform === 'win32') return;
+  fs.chmodSync(socketPath, 0o600);
+}
+
+function removeControlSocket(socketPath: string): void {
+  try {
+    fs.unlinkSync(socketPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
 }
 
 export async function sendJsonControlRequest<T>(
