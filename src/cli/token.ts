@@ -33,7 +33,9 @@ export async function rotateToken(tokenPath = TOKEN_PATH): Promise<void> {
   // defeat the purpose of rotation.
   rotateSigningKey(defaultSigningKeyPath(tokenPath));
   console.log(token);
-  console.error(`Rotated session token at ${tokenPath}. Update any HTTP MCP clients that store the old token.`);
+  console.error(
+    `Rotated session token at ${tokenPath}. Update any HTTP MCP clients that store the old token. OAuth access tokens were revoked immediately.`,
+  );
 }
 
 export function readTokenSummary(tokenPath = TOKEN_PATH): TokenSummary {

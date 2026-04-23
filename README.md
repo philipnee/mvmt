@@ -56,7 +56,7 @@ For source installs, connector setup, client tokens, and troubleshooting, see th
 | Codex CLI | Streamable HTTP | supported | bearer token env var | Start Codex from a shell where the token env var is set |
 | Cursor | Streamable HTTP | expected | bearer token header | Client behavior may vary by Cursor MCP version |
 | VS Code / Copilot | Streamable HTTP | expected | bearer token header | Client behavior may vary by MCP extension/version |
-| claude.ai / ChatGPT web | public HTTPS tunnel | supported remote mode | OAuth/PKCE over tunnel | Requires a public HTTPS URL; use a named tunnel for a stable URL |
+| claude.ai / ChatGPT web | public HTTPS tunnel | supported remote mode | OAuth/PKCE over tunnel | Requires a public HTTPS URL; the client must either use dynamic client registration or have its exact `redirect_uri` pre-registered |
 | Raw HTTP/curl | Streamable HTTP | debug only | bearer token header | Must follow MCP session initialization rules |
 
 ## Security At A Glance
@@ -99,6 +99,13 @@ Most MCP clients let you add servers through their settings UI. You need two thi
 - **Authorization header**: `Bearer <token from mvmt token>`
 
 Claude Desktop is the exception — it uses stdio mode and launches mvmt directly, so no token is needed.
+
+For remote web clients that use OAuth, mvmt also enforces redirect-URI registration. The client must either:
+
+- register itself with mvmt through the OAuth `/register` endpoint, or
+- use a pre-registered exact `redirect_uri`
+
+If the client skips registration and sends an unknown `redirect_uri`, `/authorize` fails.
 
 See [Client Setup](docs/client-setup.md) for step-by-step instructions for Claude Desktop, Claude Code, Codex CLI, Cursor, VS Code, and raw HTTP.
 
@@ -260,7 +267,7 @@ mvmt token
 mvmt token rotate
 ```
 
-`mvmt token` prints the current token, age, and file path. `mvmt token rotate` writes a new token to `~/.mvmt/.session-token` and prints it. Running HTTP servers validate against the token file on each request, so rotation takes effect immediately. Any connected client that stored the old token must be updated.
+`mvmt token` prints the current token, age, and file path. `mvmt token rotate` writes a new token to `~/.mvmt/.session-token` and prints it. Running HTTP servers validate against the token file on each request, so rotation takes effect immediately. Any connected client that stored the old token must be updated, and existing OAuth access tokens are revoked immediately.
 
 Normal `mvmt serve` restarts reuse the same root token. OAuth access tokens minted from that root token remain valid across restart until they expire or you rotate the token.
 
@@ -321,7 +328,7 @@ Every file and data access in mvmt is gated. There is no open mode.
 - **Pattern redactor** — opt-in regex scrubbing of tool results before they reach clients.
 - **Audit log** — every tool call appended to `~/.mvmt/audit.log` as JSONL with mode `600`.
 
-Not yet enforced: TLS on localhost, per-client connector scoping, rate limiting, persistent OAuth client registry, token revocation, write gates for HTTP proxy connectors.
+Not yet enforced: TLS on localhost, per-client connector scoping, and write gates for HTTP proxy connectors.
 
 See [Security Memo](docs/security-memo.md) for design notes and [Audit Log](docs/audit-log.md) for log format and queries.
 
@@ -335,6 +342,9 @@ Recommended quick tunnel: Cloudflare. For stable hostnames such as `pnee.example
 
 > [!WARNING]
 > Remote web clients authorize with OAuth/PKCE. Direct HTTP clients use bearer tokens. Auth controls who connects; connector scope controls what they can access.
+
+> [!IMPORTANT]
+> mvmt only redirects OAuth authorization codes to registered callback URLs. If your web MCP client does not support RFC 7591 dynamic client registration, you must pre-register its exact `redirect_uri` before testing the flow.
 
 Remote access checklist:
 

@@ -273,6 +273,33 @@ describe('startHttpServer lifecycle', () => {
     }
   });
 
+  it('returns 500 from /register when the client registry cannot be persisted', async () => {
+    const router = new ToolRouter([new EmptyConnector()]);
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const server = await startHttpServer(router, { port: 0, tokenPath });
+
+    try {
+      fs.chmodSync(path.dirname(tokenPath), 0o500);
+      const response = await fetch(`http://127.0.0.1:${server.port}/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          client_id: 'persist-fail-client',
+          redirect_uris: ['https://persist-fail.example/cb'],
+        }),
+      });
+      expect(response.status).toBe(500);
+      const body = await response.json();
+      expect(body.error).toBe('server_error');
+    } finally {
+      fs.chmodSync(path.dirname(tokenPath), 0o700);
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('uses resolvePublicBaseUrl and ignores X-Forwarded-Host in OAuth metadata', async () => {
     const router = new ToolRouter([new EmptyConnector()]);
     await router.initialize();

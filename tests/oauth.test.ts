@@ -60,6 +60,27 @@ describe('OAuthStore client registration', () => {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   });
+
+  it('fails closed when client registrations cannot be persisted', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-oauth-clients-'));
+    const lockedDir = path.join(tmp, 'locked');
+    const clientsPath = path.join(lockedDir, '.clients.json');
+    fs.mkdirSync(lockedDir, { recursive: true });
+    fs.chmodSync(lockedDir, 0o500);
+    try {
+      const store = new OAuthStore({ signingKey: 'k', clientsPath });
+      expect(() =>
+        store.registerClient({
+          clientId: 'claude',
+          redirectUris: ['https://claude.ai/cb'],
+        }),
+      ).toThrow();
+      expect(store.isRedirectUriAllowed('claude', 'https://claude.ai/cb')).toBe(false);
+    } finally {
+      fs.chmodSync(lockedDir, 0o700);
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('OAuthStore signing key rotation', () => {

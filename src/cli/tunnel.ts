@@ -80,7 +80,7 @@ export async function configureTunnel(options: TunnelCommandOptions = {}): Promi
       return;
     }
     if (err instanceof ControlAuthError) {
-      console.error('Control socket rejected the session token. Run `mvmt serve` after `mvmt token rotate`.');
+      console.error('Control socket rejected the session token. The running mvmt instance may be using a different token.');
       process.exitCode = 1;
       return;
     }
@@ -125,6 +125,8 @@ export async function streamTunnelLogs(options: TunnelCommandOptions = {}): Prom
   const configPath = resolveConfigPath(options.config);
   const socketPath = getControlSocketPath(configPath);
   const token = requireControlToken();
+  let finish: (() => void) | undefined;
+  let handleSigint: (() => void) | undefined;
   const stop = await streamJsonControl(socketPath, { type: 'tunnel.logs.stream' }, (message) => {
     if (message?.kind === 'ready') {
       console.log(chalk.dim('Streaming tunnel logs. Press Ctrl+C to stop.'));
@@ -139,15 +141,27 @@ export async function streamTunnelLogs(options: TunnelCommandOptions = {}): Prom
     }
     if (message?.kind === 'error') {
       console.error(message.error ?? 'Tunnel log stream failed.');
+      finish?.();
+      return;
+    }
+    if (message?.kind === 'end') {
+      finish?.();
     }
   }, token);
 
   await new Promise<void>((resolve) => {
-    const handleSigint = () => {
-      process.off('SIGINT', handleSigint);
+    finish = () => {
+      if (handleSigint) {
+        process.off('SIGINT', handleSigint);
+      }
+      resolve();
+    };
+    const sigintHandler = () => {
+      process.off('SIGINT', sigintHandler);
       stop();
       resolve();
     };
+    handleSigint = sigintHandler;
     process.on('SIGINT', handleSigint);
   });
 }
@@ -311,7 +325,7 @@ async function sendTunnelRequest(configOverride: string | undefined, type: strin
       return { configured: false, running: false };
     }
     if (err instanceof ControlAuthError) {
-      console.error('Control socket rejected the session token. Restart `mvmt serve` after `mvmt token rotate`.');
+      console.error('Control socket rejected the session token. The running mvmt instance may be using a different token.');
       process.exitCode = 1;
       return { configured: false, running: false };
     }

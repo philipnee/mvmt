@@ -746,7 +746,9 @@ function printRotatedToken(): void {
   const token = generateSessionToken();
   rotateSigningKey(defaultSigningKeyPath(TOKEN_PATH));
   console.log(token);
-  console.log(chalk.yellow('Token rotated. Restart mvmt so OAuth clients re-authorize with the new signing key.'));
+  console.log(
+    chalk.yellow('Token rotated. HTTP clients storing the old token must update it. OAuth access tokens were revoked immediately.'),
+  );
 }
 
 function printInteractiveStatus(state: InteractivePromptState): void {

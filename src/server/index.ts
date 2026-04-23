@@ -10,6 +10,7 @@ import { log } from '../utils/logger.js';
 import { defaultClientsPath, defaultSigningKeyPath, ensureSessionToken, ensureSigningKey, readSigningKey, TOKEN_PATH, validateSessionToken } from '../utils/token.js';
 import {
   CodeChallengeMethod,
+  OAuthClientPersistenceError,
   OAuthError,
   OAuthStore,
   getBaseUrl,
@@ -238,7 +239,20 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
         return;
       }
     }
-    const registered = oauth.registerClient({ clientId, redirectUris });
+    let registered;
+    try {
+      registered = oauth.registerClient({ clientId, redirectUris });
+    } catch (err) {
+      if (err instanceof OAuthClientPersistenceError) {
+        logHttpRequest(requestLog, req, 500, 'oauth.register', 'persist_failed', clientId);
+        res.status(500).json({
+          error: 'server_error',
+          error_description: 'Failed to persist OAuth client registration',
+        });
+        return;
+      }
+      throw err;
+    }
     logHttpRequest(requestLog, req, 201, 'oauth.register', undefined, clientId);
     res.status(201).json({
       client_id: registered.clientId,

@@ -202,6 +202,14 @@ export async function streamJsonControl(
   const socket = net.createConnection(socketPath);
   socket.setEncoding('utf-8');
   let buffer = '';
+  let startupSettled = false;
+  let streamEnded = false;
+
+  const emitEnd = () => {
+    if (streamEnded) return;
+    streamEnded = true;
+    onMessage({ kind: 'end' });
+  };
 
   await new Promise<void>((resolve, reject) => {
     socket.once('error', (err: NodeJS.ErrnoException) => {
@@ -212,10 +220,22 @@ export async function streamJsonControl(
       reject(err);
     });
 
+    socket.once('close', () => {
+      if (!startupSettled) {
+        reject(new Error('Control stream closed before initialization'));
+        return;
+      }
+      emitEnd();
+    });
+
     socket.on('data', (chunk) => {
       buffer += chunk;
       if (buffer.length > MAX_CONTROL_BUFFER_BYTES) {
         socket.destroy();
+        if (!startupSettled) {
+          reject(new Error('Control stream exceeds maximum size'));
+          return;
+        }
         onMessage({ kind: 'error', error: 'Control stream exceeds maximum size' });
         return;
       }
@@ -223,8 +243,32 @@ export async function streamJsonControl(
       buffer = lines.pop() ?? '';
       for (const line of lines.map((value) => value.trim()).filter(Boolean)) {
         try {
-          onMessage(JSON.parse(line));
+          const parsed = JSON.parse(line);
+          if (parsed?.ok === false) {
+            const error = parsed?.error ?? 'Control stream failed';
+            const failure =
+              typeof error === 'string' && error.toLowerCase().includes('control token')
+                ? new ControlAuthError(error)
+                : new Error(String(error));
+            socket.end();
+            if (!startupSettled) {
+              reject(failure);
+              return;
+            }
+            onMessage({ kind: 'error', error: failure.message });
+            return;
+          }
+          if (!startupSettled) {
+            startupSettled = true;
+            resolve();
+          }
+          onMessage(parsed);
         } catch {
+          socket.end();
+          if (!startupSettled) {
+            reject(new Error('Invalid control stream message'));
+            return;
+          }
           onMessage({ kind: 'error', error: 'Invalid control stream message' });
         }
       }
@@ -232,7 +276,6 @@ export async function streamJsonControl(
 
     socket.on('connect', () => {
       socket.write(`${JSON.stringify({ ...message, token })}\n`);
-      resolve();
     });
   });
 

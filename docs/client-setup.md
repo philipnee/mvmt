@@ -16,6 +16,30 @@ Most MCP clients let you add servers through their settings UI. You only need tw
 
 Stdio mode (Claude Desktop) is the exception — it launches mvmt directly and does not need a token.
 
+## Remote OAuth clients
+
+Web clients that connect through a public HTTPS tunnel use OAuth/PKCE instead of a bearer token. mvmt will only authorize a client if its exact callback URL is registered first.
+
+That means the client must either:
+
+- support RFC 7591 dynamic client registration and call mvmt's `/register` endpoint itself, or
+- use a `client_id` whose exact `redirect_uri` has already been pre-registered
+
+If a client sends an unknown `redirect_uri`, mvmt rejects `/authorize`.
+
+Today mvmt persists OAuth client registrations on disk, but it does not yet ship a dashboard or CLI for manual OAuth client registration. For manual testing, register the client directly against mvmt before starting the OAuth flow:
+
+```bash
+curl -X POST https://your-public-mvmt-host/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_id": "my-client",
+    "redirect_uris": ["https://example.com/oauth/callback"]
+  }'
+```
+
+Use the same `client_id` and exact `redirect_uri` during `/authorize`.
+
 ## Claude Desktop
 
 Claude Desktop uses stdio mode, so it launches mvmt as a child process. No token is needed.

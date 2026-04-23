@@ -62,6 +62,8 @@ export interface RegisteredClient {
   redirectUris: string[];
 }
 
+export class OAuthClientPersistenceError extends Error {}
+
 export class OAuthStore {
   private readonly codes = new Map<string, AuthorizationCode>();
   private readonly clients = new Map<string, RegisteredClient>();
@@ -98,8 +100,18 @@ export class OAuthStore {
       clientId: client.clientId,
       redirectUris: [...new Set(client.redirectUris.filter((uri) => typeof uri === 'string' && uri.length > 0))],
     };
+    const previous = this.clients.get(normalized.clientId);
     this.clients.set(normalized.clientId, normalized);
-    this.persistClients();
+    try {
+      this.persistClients();
+    } catch (err) {
+      if (previous) {
+        this.clients.set(previous.clientId, previous);
+      } else {
+        this.clients.delete(normalized.clientId);
+      }
+      throw err;
+    }
     return normalized;
   }
 
@@ -147,9 +159,10 @@ export class OAuthStore {
       if (process.platform !== 'win32') {
         fs.chmodSync(this.clientsPath, 0o600);
       }
-    } catch {
-      // Persisting is best-effort. The in-memory registry still works
-      // for the current server lifetime.
+    } catch (err) {
+      throw new OAuthClientPersistenceError(
+        err instanceof Error ? err.message : 'Failed to persist OAuth client registry',
+      );
     }
   }
 
