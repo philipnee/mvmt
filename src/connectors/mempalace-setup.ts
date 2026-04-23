@@ -23,7 +23,6 @@ export interface MemPalaceConfigInput {
 export function createMemPalaceProxyConfig(memPalace: MemPalaceConfigInput): ProxyConfig {
   return {
     name: 'mempalace',
-    source: 'mempalace',
     transport: 'stdio',
     command: memPalace.command,
     args: ['-m', 'mempalace.mcp_server', '--palace', memPalace.palacePath],

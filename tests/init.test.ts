@@ -23,7 +23,6 @@ describe('init helpers', () => {
     expect(config.proxy).toEqual([
       {
         name: 'filesystem',
-        source: 'manual',
         transport: 'stdio',
         command: 'npx',
         args: [
@@ -132,7 +131,6 @@ describe('init helpers', () => {
     expect(config.proxy).toEqual([
       {
         name: 'mempalace',
-        source: 'mempalace',
         transport: 'stdio',
         command: '/venv/bin/python',
         args: ['-m', 'mempalace.mcp_server', '--palace', '/Users/me/.mempalace/palace'],

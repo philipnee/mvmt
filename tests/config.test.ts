@@ -117,6 +117,19 @@ describe('parseConfig', () => {
     expect(config.proxy[0].writeAccess).toBe(true);
   });
 
+  it('tolerates legacy proxy source metadata', () => {
+    const config = parseConfig({
+      version: 1,
+      proxy: [{ name: 'filesystem', source: 'manual', command: 'npx' }],
+    });
+
+    expect(config.proxy[0]).toMatchObject({
+      name: 'filesystem',
+      source: 'manual',
+      command: 'npx',
+    });
+  });
+
   it('parses pattern redactor plugin config', () => {
     const config = parseConfig({
       version: 1,

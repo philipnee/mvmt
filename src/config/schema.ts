@@ -9,7 +9,7 @@ export const TunnelSchema = z.object({
 export const ProxySchema = z
   .object({
     name: z.string().min(1),
-    source: z.string().optional(),
+    source: z.string().optional(), // legacy setup-provenance metadata; runtime ignores it
     transport: z.enum(['stdio', 'http']).default('stdio'),
     command: z.string().min(1).optional(),
     args: z.array(z.string()).default([]),
