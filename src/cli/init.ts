@@ -24,10 +24,6 @@ import {
   normalizeTunnelBaseUrl,
 } from '../utils/tunnel.js';
 
-export { createMemPalaceProxyConfig, detectMemPalace, findExecutableOnPath, readShebangCommand, promptForMemPalace } from '../connectors/mempalace-setup.js';
-export { countNotes, detectObsidianVaults } from '../connectors/obsidian-setup.js';
-export type { DetectedMemPalace, MemPalaceConfigInput } from '../connectors/mempalace-setup.js';
-
 export interface SetupConfigOptions {
   config?: string;
   promptOnOverwrite?: boolean;

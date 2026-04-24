@@ -4,19 +4,7 @@ export { printConfigSummary, runConfigSetup, showConfig } from './cli/config.js'
 export type { ConfigCommandOptions, ConfigSummaryRuntime } from './cli/config.js';
 export { addConnector, getConnectorSetupStatuses, listConnectors } from './cli/connectors.js';
 export type { ConnectorCommandOptions, ConnectorSetupStatus } from './cli/connectors.js';
-export {
-  init,
-  setupConfig,
-  buildConfig,
-  createMemPalaceProxyConfig,
-  countNotes,
-  detectMemPalace,
-  detectObsidianVaults,
-  findExecutableOnPath,
-  readShebangCommand,
-  promptForMemPalace,
-} from './cli/init.js';
-export type { DetectedMemPalace, MemPalaceConfigInput } from './cli/init.js';
+export { setupConfig } from './cli/init.js';
 export { start } from './cli/start.js';
 export type { StartOptions } from './cli/start.js';
 export {
