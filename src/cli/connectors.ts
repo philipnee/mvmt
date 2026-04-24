@@ -7,7 +7,7 @@ import {
   createMemPalaceProxyConfig,
   detectMemPalace,
   promptForMemPalace,
-} from './init.js';
+} from '../connectors/mempalace-setup.js';
 
 export interface ConnectorCommandOptions {
   config?: string;
