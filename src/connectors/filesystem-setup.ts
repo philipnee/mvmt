@@ -1,7 +1,9 @@
 import { confirm, input } from '@inquirer/prompts';
 import fs from 'fs/promises';
-import { ProxyConfig } from '../config/schema.js';
+import { MvmtConfig, ProxyConfig } from '../config/schema.js';
+import type { ConnectorSetupDefinition } from './setup-registry.js';
 import { resolveSetupPath } from './setup-paths.js';
+import { sameProxyName, upsertProxyConfig } from './setup-utils.js';
 
 export interface FilesystemConfigInput {
   paths: string[];
@@ -62,3 +64,22 @@ export async function promptForFilesystemFolders(): Promise<FilesystemConfigInpu
 
   return { paths, writeAccess };
 }
+
+export const filesystemSetupDefinition = {
+  id: 'filesystem',
+  displayName: 'Filesystem',
+  isAddable: false,
+  async detect(): Promise<null> {
+    return null;
+  },
+  async prompt(): Promise<FilesystemConfigInput | undefined> {
+    const filesystem = await promptForFilesystemFolders();
+    return filesystem.paths.length > 0 ? filesystem : undefined;
+  },
+  isConfigured(config: MvmtConfig): boolean {
+    return config.proxy.some((proxy) => sameProxyName(proxy.name, 'filesystem') && proxy.enabled !== false);
+  },
+  apply(config: MvmtConfig, input: FilesystemConfigInput): MvmtConfig {
+    return upsertProxyConfig(config, createFilesystemProxyConfig(input));
+  },
+} satisfies ConnectorSetupDefinition<null, FilesystemConfigInput, 'filesystem'>;

@@ -175,6 +175,13 @@ describe('parseConfig', () => {
         ],
       }),
     ).toThrow('Invalid config');
+
+    expect(() =>
+      parseConfig({
+        version: 1,
+        plugins: [{ name: 'unknown-plugin' }],
+      }),
+    ).toThrow('Invalid config');
   });
 
   it('rejects invalid ports', () => {

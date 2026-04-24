@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { getConnectorSetupStatuses, upsertProxyConfig } from '../src/cli/connectors.js';
+import { getConnectorSetupStatuses } from '../src/cli/connectors.js';
 import { MvmtConfig } from '../src/config/schema.js';
+import { upsertProxyConfig } from '../src/connectors/setup-utils.js';
 
 const baseConfig: MvmtConfig = {
   version: 1,
@@ -14,6 +15,16 @@ const baseConfig: MvmtConfig = {
 };
 
 describe('connector setup helpers', () => {
+  it('reports unconfigured local connector setups', () => {
+    const statuses = getConnectorSetupStatuses(baseConfig);
+
+    expect(statuses.map((status) => [status.name, status.configured, status.addable])).toEqual([
+      ['filesystem', false, false],
+      ['obsidian', false, false],
+      ['mempalace', false, true],
+    ]);
+  });
+
   it('reports configured local connector setups', () => {
     const statuses = getConnectorSetupStatuses({
       ...baseConfig,

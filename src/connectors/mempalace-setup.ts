@@ -3,8 +3,10 @@ import { constants as fsConstants } from 'fs';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
-import { ProxyConfig } from '../config/schema.js';
+import { MvmtConfig, ProxyConfig } from '../config/schema.js';
+import type { ConnectorSetupDefinition } from './setup-registry.js';
 import { normalizeExecutableInput, pathExists, resolveSetupPath } from './setup-paths.js';
+import { sameProxyName, upsertProxyConfig } from './setup-utils.js';
 
 export interface DetectedMemPalace {
   executable?: string;
@@ -143,3 +145,17 @@ async function detectMemPalacePalacePath(): Promise<string | undefined> {
   if (await pathExists(defaultPath)) return defaultPath;
   return undefined;
 }
+
+export const memPalaceSetupDefinition = {
+  id: 'mempalace',
+  displayName: 'MemPalace',
+  isAddable: true,
+  detect: detectMemPalace,
+  prompt: promptForMemPalaceSetup,
+  isConfigured(config: MvmtConfig): boolean {
+    return config.proxy.some((proxy) => sameProxyName(proxy.name, 'mempalace') && proxy.enabled !== false);
+  },
+  apply(config: MvmtConfig, input: MemPalaceConfigInput): MvmtConfig {
+    return upsertProxyConfig(config, createMemPalaceProxyConfig(input));
+  },
+} satisfies ConnectorSetupDefinition<DetectedMemPalace, MemPalaceConfigInput, 'mempalace'>;

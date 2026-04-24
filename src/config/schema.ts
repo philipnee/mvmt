@@ -115,7 +115,9 @@ export const PatternRedactorPluginSchema = z.object({
   patterns: z.array(PatternRedactorPatternSchema).default(DEFAULT_PATTERN_REDACTOR_PATTERNS),
 });
 
-export const PluginSchema = PatternRedactorPluginSchema;
+export const PluginSchema = z.discriminatedUnion('name', [
+  PatternRedactorPluginSchema,
+]);
 
 export const ConfigSchema = z.object({
   version: z.literal(1),

@@ -8,19 +8,14 @@ import {
   PluginConfig,
   TunnelConfig,
 } from '../config/schema.js';
-import { createFilesystemProxyConfig, promptForFilesystemFolders } from '../connectors/filesystem-setup.js';
-import {
-  createObsidianConfig,
-  detectObsidianVaults,
-  promptForObsidianSetup,
-} from '../connectors/obsidian-setup.js';
+import { createFilesystemProxyConfig } from '../connectors/filesystem-setup.js';
+import { createObsidianConfig } from '../connectors/obsidian-setup.js';
 import {
   createMemPalaceProxyConfig,
-  detectMemPalace,
   type DetectedMemPalace,
   type MemPalaceConfigInput,
-  promptForMemPalaceSetup,
 } from '../connectors/mempalace-setup.js';
+import { getSetupRegistry } from '../connectors/setup-registry.js';
 import { pathExists, resolveSetupPath } from '../connectors/setup-paths.js';
 import {
   cloudflareNamedTunnelCommand,
@@ -60,12 +55,25 @@ export async function setupConfig(
   console.log('Configure the local data mvmt is allowed to expose.\n');
 
   console.log('Checking available connectors...\n');
-  const [vaults, detectedMemPalace] = await Promise.all([detectObsidianVaults(), detectMemPalace()]);
+  const setupRegistry = getSetupRegistry();
+  const detections = new Map(
+    await Promise.all(
+      setupRegistry.map(async (definition) => [definition.id, await definition.detect()] as const),
+    ),
+  );
+
+  const vaults = (detections.get('obsidian') as string[] | undefined) ?? [];
+  const detectedMemPalace = (detections.get('mempalace') as DetectedMemPalace | undefined) ?? {};
   printAvailableConnectors(vaults, detectedMemPalace);
 
-  const filesystemAccess = await promptForFilesystemFolders();
-  const obsidian = await promptForObsidianSetup(vaults);
-  const memPalaceConfig = await promptForMemPalaceSetup(detectedMemPalace);
+  const applySelections: Array<(config: MvmtConfig) => MvmtConfig> = [];
+  for (const definition of setupRegistry) {
+    const detected = detections.get(definition.id);
+    const input = await definition.prompt(detected);
+    if (input !== undefined) {
+      applySelections.push((config) => definition.apply(config, input));
+    }
+  }
 
   const plugins = await promptForPlugins();
 
@@ -80,16 +88,10 @@ export async function setupConfig(
   const port = Number(portAnswer);
   const access = await promptForAccess(port);
 
-  const config = buildConfig(
-    obsidian?.path,
-    port,
-    filesystemAccess.paths,
-    filesystemAccess.writeAccess,
-    obsidian?.writeAccess ?? false,
-    access,
-    plugins,
-    memPalaceConfig,
-  );
+  let config = buildConfig(undefined, port, [], false, false, access, plugins);
+  for (const applySelection of applySelections) {
+    config = applySelection(config);
+  }
 
   await saveConfig(configPath, config);
 
