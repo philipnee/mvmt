@@ -13,7 +13,6 @@ export interface FilesystemConfigInput {
 export function createFilesystemProxyConfig(filesystem: FilesystemConfigInput): ProxyConfig {
   return {
     name: 'filesystem',
-    source: 'manual',
     transport: 'stdio',
     command: 'npx',
     args: ['-y', '@modelcontextprotocol/server-filesystem', ...filesystem.paths],

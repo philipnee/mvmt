@@ -55,7 +55,6 @@ describe('addConnector', () => {
       proxy: [
         {
           name: 'mempalace',
-          source: 'mempalace',
           transport: 'stdio',
           command: '/venv/bin/python',
           args: ['-m', 'mempalace.mcp_server', '--palace', '/Users/me/.mempalace/palace'],

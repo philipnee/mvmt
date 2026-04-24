@@ -31,7 +31,6 @@ describe('connector setup helpers', () => {
       proxy: [
         {
           name: 'filesystem',
-          source: 'manual',
           transport: 'stdio',
           command: 'npx',
           args: [],
@@ -40,7 +39,6 @@ describe('connector setup helpers', () => {
         },
         {
           name: 'mempalace',
-          source: 'mempalace',
           transport: 'stdio',
           command: '/venv/bin/python',
           args: ['-m', 'mempalace.mcp_server'],
@@ -70,7 +68,6 @@ describe('connector setup helpers', () => {
         proxy: [
           {
             name: 'MemPalace',
-            source: 'mempalace',
             transport: 'stdio',
             command: '/old/python',
             args: [],
@@ -82,7 +79,6 @@ describe('connector setup helpers', () => {
       },
       {
         name: 'mempalace',
-        source: 'mempalace',
         transport: 'stdio',
         command: '/new/python',
         args: ['-m', 'mempalace.mcp_server'],
@@ -95,7 +91,6 @@ describe('connector setup helpers', () => {
     expect(config.proxy).toEqual([
       {
         name: 'mempalace',
-        source: 'mempalace',
         transport: 'stdio',
         command: '/new/python',
         args: ['-m', 'mempalace.mcp_server'],
