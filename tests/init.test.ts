@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
-import { buildConfig, findExecutableOnPath, readShebangCommand } from '../src/cli/init.js';
+import { buildConfig } from '../src/cli/init.js';
+import { findExecutableOnPath, readShebangCommand } from '../src/connectors/mempalace-setup.js';
 
 describe('init helpers', () => {
   it('builds config from explicit local scopes and native Obsidian path', () => {
