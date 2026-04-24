@@ -18,6 +18,20 @@ This project follows the spirit of Keep a Changelog and uses semantic versioning
 - npm package export metadata and a restricted publish file list.
 - Build specs and `rules.md` removed from the public tracked surface.
 - `mvmt start -i` interactive control prompt with token, status, URL, and live-log controls.
+- Typed connector setup registry (`src/connectors/setup-registry.ts`) so each connector owns its own detection, prompting, and config application.
+
+### Changed
+
+- Internal refactor: `src/cli/start.ts` split into focused modules (`connector-loader`, `interactive`, `tunnel-controller`). Per-connector setup extracted into `src/connectors/{filesystem,obsidian,mempalace}-setup.ts`. Shared `saveConfig()` consolidated on `src/config/loader.ts`.
+- `PluginSchema` is now a single-variant `z.discriminatedUnion('name', ...)` so adding a second plugin is a schema addition rather than a structural refactor.
+
+### Deprecated
+
+- `source` field on proxy config entries is no longer written by guided setup or `mvmt connectors add`. The schema still accepts it so existing configs continue to parse; it will be removed in a future release.
+
+### Removed
+
+- Internal CLI setup helpers are no longer exported from the package root: `init`, `buildConfig`, `createMemPalaceProxyConfig`, `countNotes`, `detectMemPalace`, `detectObsidianVaults`, `findExecutableOnPath`, `readShebangCommand`, `promptForMemPalace`, `DetectedMemPalace`, `MemPalaceConfigInput`. Use `setupConfig` for guided setup or import from the connector setup modules under `src/connectors/*-setup.ts` directly.
 
 ## 0.1.0 - Unreleased
 

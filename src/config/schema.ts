@@ -115,6 +115,8 @@ export const PatternRedactorPluginSchema = z.object({
   patterns: z.array(PatternRedactorPatternSchema).default(DEFAULT_PATTERN_REDACTOR_PATTERNS),
 });
 
+// Single-variant today; kept as a discriminated union so plugin #N lands as
+// a schema addition, not a structural refactor of PluginSchema.
 export const PluginSchema = z.discriminatedUnion('name', [
   PatternRedactorPluginSchema,
 ]);

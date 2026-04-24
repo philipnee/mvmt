@@ -8,13 +8,7 @@ import {
   PluginConfig,
   TunnelConfig,
 } from '../config/schema.js';
-import { createFilesystemProxyConfig } from '../connectors/filesystem-setup.js';
-import { createObsidianConfig } from '../connectors/obsidian-setup.js';
-import {
-  createMemPalaceProxyConfig,
-  type DetectedMemPalace,
-  type MemPalaceConfigInput,
-} from '../connectors/mempalace-setup.js';
+import type { DetectedMemPalace } from '../connectors/mempalace-setup.js';
 import { getSetupRegistry } from '../connectors/setup-registry.js';
 import { pathExists, resolveSetupPath } from '../connectors/setup-paths.js';
 import {
@@ -84,7 +78,7 @@ export async function setupConfig(
   const port = Number(portAnswer);
   const access = await promptForAccess(port);
 
-  let config = buildConfig(undefined, port, [], false, false, access, plugins);
+  let config = buildConfig({ port, access, plugins });
   for (const applySelection of applySelections) {
     config = applySelection(config);
   }
@@ -105,40 +99,24 @@ export async function init(options: SetupConfigOptions = {}): Promise<void> {
   await setupConfig(options);
 }
 
-export function buildConfig(
-  obsidianPath: string | undefined,
-  port: number,
-  filesystemPaths: string[] = [],
-  filesystemWriteAccess = false,
-  obsidianWriteAccess = false,
-  access: { access: 'local' | 'tunnel'; tunnel?: TunnelConfig } = { access: 'local' },
-  plugins: PluginConfig[] = [],
-  memPalace?: MemPalaceConfigInput,
-): MvmtConfig {
-  const proxy: MvmtConfig['proxy'] = [];
+export interface BuildConfigInput {
+  port: number;
+  access?: { access: 'local' | 'tunnel'; tunnel?: TunnelConfig };
+  plugins?: PluginConfig[];
+}
 
-  if (filesystemPaths.length > 0) {
-    proxy.push(createFilesystemProxyConfig({
-      paths: filesystemPaths,
-      writeAccess: filesystemWriteAccess,
-    }));
-  }
-
-  if (memPalace) {
-    proxy.push(createMemPalaceProxyConfig(memPalace));
-  }
-
+export function buildConfig(input: BuildConfigInput): MvmtConfig {
+  const access = input.access ?? { access: 'local' };
   return {
     version: 1,
     server: {
-      port,
+      port: input.port,
       allowedOrigins: [],
       access: access.access,
       ...(access.tunnel ? { tunnel: access.tunnel } : {}),
     },
-    proxy,
-    plugins,
-    ...(obsidianPath ? { obsidian: createObsidianConfig({ path: obsidianPath, writeAccess: obsidianWriteAccess }) } : {}),
+    proxy: [],
+    plugins: input.plugins ?? [],
   };
 }
 

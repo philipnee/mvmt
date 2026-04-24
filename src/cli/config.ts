@@ -2,9 +2,9 @@ import chalk from 'chalk';
 import fsPromises from 'fs/promises';
 import os from 'os';
 import path from 'path';
-import yaml from 'yaml';
 import { MvmtConfig, ProxyConfig } from '../config/schema.js';
-import { configExists, expandHome, readConfig, resolveConfigPath } from '../config/loader.js';
+import { configExists, expandHome, readConfig, resolveConfigPath, saveConfig } from '../config/loader.js';
+import { filesystemSetupDefinition } from '../connectors/filesystem-setup.js';
 import { buildConfig, SetupConfigOptions, setupConfig } from './init.js';
 import { formatMcpPublicUrl } from '../utils/tunnel.js';
 
@@ -66,7 +66,11 @@ export async function createTemporaryFilesystemConfig(
     throw new Error('At least one folder is required for `mvmt serve --path`.');
   }
 
-  const config = buildConfig(undefined, options.port ?? 4141, normalizedPaths);
+  const base = buildConfig({ port: options.port ?? 4141 });
+  const config = filesystemSetupDefinition.apply(base, {
+    paths: normalizedPaths,
+    writeAccess: false,
+  });
   const tempDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'mvmt-serve-'));
   const configPath = path.join(tempDir, 'config.yaml');
   await saveConfig(configPath, config);
@@ -184,10 +188,3 @@ function readArgValue(args: string[] = [], name: string): string | undefined {
   return args[index + 1];
 }
 
-async function saveConfig(configPath: string, config: MvmtConfig): Promise<void> {
-  await fsPromises.mkdir(path.dirname(configPath), { recursive: true });
-  await fsPromises.writeFile(configPath, yaml.stringify(config), 'utf-8');
-  if (process.platform !== 'win32') {
-    await fsPromises.chmod(configPath, 0o600);
-  }
-}

@@ -3,11 +3,15 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { buildConfig } from '../src/cli/init.js';
+import { filesystemSetupDefinition } from '../src/connectors/filesystem-setup.js';
+import { obsidianSetupDefinition } from '../src/connectors/obsidian-setup.js';
+import { memPalaceSetupDefinition } from '../src/connectors/mempalace-setup.js';
 import { findExecutableOnPath, readShebangCommand } from '../src/connectors/mempalace-setup.js';
 
 describe('init helpers', () => {
   it('builds config from explicit local scopes and native Obsidian path', () => {
-    const config = buildConfig('/vault', 4141);
+    const base = buildConfig({ port: 4141 });
+    const config = obsidianSetupDefinition.apply(base, { path: '/vault', writeAccess: false });
 
     expect(config).toMatchObject({
       version: 1,
@@ -18,7 +22,11 @@ describe('init helpers', () => {
   });
 
   it('adds a manual filesystem proxy for explicit folder access', () => {
-    const config = buildConfig(undefined, 4141, ['/Users/me/project', '/Users/me/docs']);
+    const base = buildConfig({ port: 4141 });
+    const config = filesystemSetupDefinition.apply(base, {
+      paths: ['/Users/me/project', '/Users/me/docs'],
+      writeAccess: false,
+    });
 
     expect(config.proxy).toEqual([
       {
@@ -39,7 +47,11 @@ describe('init helpers', () => {
   });
 
   it('records explicit filesystem write access only when requested', () => {
-    const config = buildConfig(undefined, 4141, ['/Users/me/project'], true);
+    const base = buildConfig({ port: 4141 });
+    const config = filesystemSetupDefinition.apply(base, {
+      paths: ['/Users/me/project'],
+      writeAccess: true,
+    });
 
     expect(config.proxy[0]).toMatchObject({
       name: 'filesystem',
@@ -47,14 +59,15 @@ describe('init helpers', () => {
     });
   });
 
-  it('does not create a proxy when no filesystem folders are selected', () => {
-    const config = buildConfig(undefined, 4141);
+  it('does not create a proxy when no connector is applied', () => {
+    const config = buildConfig({ port: 4141 });
 
     expect(config.proxy).toEqual([]);
   });
 
   it('records Obsidian write access only when requested', () => {
-    const config = buildConfig('/vault', 4141, [], false, true);
+    const base = buildConfig({ port: 4141 });
+    const config = obsidianSetupDefinition.apply(base, { path: '/vault', writeAccess: true });
 
     expect(config.obsidian).toMatchObject({
       path: '/vault',
@@ -64,12 +77,15 @@ describe('init helpers', () => {
   });
 
   it('records tunnel access when requested', () => {
-    const config = buildConfig('/vault', 4141, [], false, false, {
-      access: 'tunnel',
-      tunnel: {
-        provider: 'cloudflare-quick',
-        command: 'cloudflared tunnel --url http://127.0.0.1:{port}',
-        url: 'https://demo.trycloudflare.com',
+    const config = buildConfig({
+      port: 4141,
+      access: {
+        access: 'tunnel',
+        tunnel: {
+          provider: 'cloudflare-quick',
+          command: 'cloudflared tunnel --url http://127.0.0.1:{port}',
+          url: 'https://demo.trycloudflare.com',
+        },
       },
     });
 
@@ -84,23 +100,26 @@ describe('init helpers', () => {
   });
 
   it('records selected security plugins', () => {
-    const config = buildConfig(undefined, 4141, [], false, false, { access: 'local' }, [
-      {
-        name: 'pattern-redactor',
-        enabled: true,
-        mode: 'redact',
-        maxBytes: 1024 * 1024,
-        patterns: [
-          {
-            name: 'emails',
-            regex: '\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b',
-            flags: 'gi',
-            replacement: '[REDACTED:EMAIL]',
-            enabled: true,
-          },
-        ],
-      },
-    ]);
+    const config = buildConfig({
+      port: 4141,
+      plugins: [
+        {
+          name: 'pattern-redactor',
+          enabled: true,
+          mode: 'redact',
+          maxBytes: 1024 * 1024,
+          patterns: [
+            {
+              name: 'emails',
+              regex: '\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b',
+              flags: 'gi',
+              replacement: '[REDACTED:EMAIL]',
+              enabled: true,
+            },
+          ],
+        },
+      ],
+    });
 
     expect(config.plugins).toEqual([
       {
@@ -122,7 +141,8 @@ describe('init helpers', () => {
   });
 
   it('adds a MemPalace proxy when configured', () => {
-    const config = buildConfig(undefined, 4141, [], false, false, { access: 'local' }, [], {
+    const base = buildConfig({ port: 4141 });
+    const config = memPalaceSetupDefinition.apply(base, {
       command: '/venv/bin/python',
       palacePath: '/Users/me/.mempalace/palace',
       writeAccess: false,
