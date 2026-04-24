@@ -7,7 +7,7 @@ import { ConfigSchema, MvmtConfig } from './schema.js';
 
 export async function saveConfig(configPath: string, config: MvmtConfig): Promise<void> {
   await fsp.mkdir(path.dirname(configPath), { recursive: true });
-  await fsp.writeFile(configPath, yaml.stringify(config), 'utf-8');
+  await fsp.writeFile(configPath, yaml.stringify(config), { encoding: 'utf-8', mode: 0o600 });
   if (process.platform !== 'win32') {
     await fsp.chmod(configPath, 0o600);
   }
