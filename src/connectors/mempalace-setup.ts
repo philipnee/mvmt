@@ -6,6 +6,7 @@ import path from 'path';
 import { MvmtConfig, ProxyConfig } from '../config/schema.js';
 import type { ConnectorSetupDefinition } from './setup-registry.js';
 import { normalizeExecutableInput, pathExists, resolveSetupPath } from './setup-paths.js';
+import { sameProxyName, upsertProxyConfig } from './setup-utils.js';
 
 export interface DetectedMemPalace {
   executable?: string;
@@ -158,13 +159,3 @@ export const memPalaceSetupDefinition = {
     return upsertProxyConfig(config, createMemPalaceProxyConfig(input));
   },
 } satisfies ConnectorSetupDefinition<DetectedMemPalace, MemPalaceConfigInput, 'mempalace'>;
-
-function upsertProxyConfig(config: MvmtConfig, proxyConfig: ProxyConfig): MvmtConfig {
-  const proxy = config.proxy.filter((entry) => !sameProxyName(entry.name, proxyConfig.name));
-  proxy.push(proxyConfig);
-  return { ...config, proxy };
-}
-
-function sameProxyName(left: string, right: string): boolean {
-  return left.toLowerCase() === right.toLowerCase();
-}

@@ -17,6 +17,8 @@ export interface ConnectorSetupDefinition<TDetected, TInput, TId extends Connect
 
 export type AnyConnectorSetupDefinition = ConnectorSetupDefinition<unknown, unknown>;
 
+// Registry order controls the guided setup prompt order and connector status
+// display order shown by the CLI.
 const setupRegistry = [
   filesystemSetupDefinition,
   obsidianSetupDefinition,

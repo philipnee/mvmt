@@ -3,6 +3,7 @@ import fs from 'fs/promises';
 import { MvmtConfig, ProxyConfig } from '../config/schema.js';
 import type { ConnectorSetupDefinition } from './setup-registry.js';
 import { resolveSetupPath } from './setup-paths.js';
+import { sameProxyName, upsertProxyConfig } from './setup-utils.js';
 
 export interface FilesystemConfigInput {
   paths: string[];
@@ -82,13 +83,3 @@ export const filesystemSetupDefinition = {
     return upsertProxyConfig(config, createFilesystemProxyConfig(input));
   },
 } satisfies ConnectorSetupDefinition<null, FilesystemConfigInput, 'filesystem'>;
-
-function upsertProxyConfig(config: MvmtConfig, proxyConfig: ProxyConfig): MvmtConfig {
-  const proxy = config.proxy.filter((entry) => !sameProxyName(entry.name, proxyConfig.name));
-  proxy.push(proxyConfig);
-  return { ...config, proxy };
-}
-
-function sameProxyName(left: string, right: string): boolean {
-  return left.toLowerCase() === right.toLowerCase();
-}
