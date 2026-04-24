@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { getConnectorSetupStatuses, upsertProxyConfig } from '../src/cli/connectors.js';
+import { getConnectorSetupStatuses } from '../src/cli/connectors.js';
 import { MvmtConfig } from '../src/config/schema.js';
+import { upsertProxyConfig } from '../src/connectors/setup-utils.js';
 
 const baseConfig: MvmtConfig = {
   version: 1,

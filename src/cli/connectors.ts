@@ -1,9 +1,10 @@
 import { confirm, select } from '@inquirer/prompts';
 import chalk from 'chalk';
-import path from 'path';
-import { expandHome, getConfigPath, loadConfig, saveConfig } from '../config/loader.js';
-import { MvmtConfig, ProxyConfig } from '../config/schema.js';
+import { getConfigPath, loadConfig, saveConfig } from '../config/loader.js';
+import { MvmtConfig } from '../config/schema.js';
 import { getConnectorSetupDefinition, getSetupRegistry } from '../connectors/setup-registry.js';
+import { resolveSetupPath } from '../connectors/setup-paths.js';
+import { upsertProxyConfig } from '../connectors/setup-utils.js';
 
 export interface ConnectorCommandOptions {
   config?: string;
@@ -41,8 +42,8 @@ export async function listConnectors(options: ConnectorCommandOptions = {}): Pro
 }
 
 export async function addConnector(name?: string, options: ConnectorCommandOptions = {}): Promise<void> {
-  const configPath = options.config ? path.resolve(expandHome(options.config)) : getConfigPath();
-  const config = loadConfig(options.config);
+  const configPath = options.config ? resolveSetupPath(options.config) : getConfigPath();
+  const config = loadConfig(configPath);
   const connectorName = name || (await promptForConnectorToAdd(config));
   const definition = getConnectorSetupDefinition(connectorName);
 
@@ -81,13 +82,6 @@ export async function addConnector(name?: string, options: ConnectorCommandOptio
   console.log(chalk.green(`${definition.displayName} connector saved to ${configPath}`));
   console.log(chalk.dim('Restart mvmt for the new connector to load.'));
 }
-
-export function upsertProxyConfig(config: MvmtConfig, proxyConfig: ProxyConfig): MvmtConfig {
-  const proxy = config.proxy.filter((entry) => !sameProxyName(entry.name, proxyConfig.name));
-  proxy.push(proxyConfig);
-  return { ...config, proxy };
-}
-
 async function promptForConnectorToAdd(config: MvmtConfig): Promise<string> {
   const addable = getConnectorSetupStatuses(config).filter((status) => status.addable && !status.configured);
   if (addable.length === 0) {
@@ -103,8 +97,4 @@ async function promptForConnectorToAdd(config: MvmtConfig): Promise<string> {
       value: status.name,
     })),
   });
-}
-
-function sameProxyName(left: string, right: string): boolean {
-  return left.toLowerCase() === right.toLowerCase();
 }
