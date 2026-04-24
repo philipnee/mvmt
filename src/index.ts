@@ -2,7 +2,7 @@ export { doctor, collectDoctorReport } from './cli/doctor.js';
 export type { DoctorOptions, DoctorReport, DoctorStatus } from './cli/doctor.js';
 export { printConfigSummary, runConfigSetup, showConfig } from './cli/config.js';
 export type { ConfigCommandOptions, ConfigSummaryRuntime } from './cli/config.js';
-export { addConnector, getConnectorSetupStatuses, listConnectors, upsertProxyConfig } from './cli/connectors.js';
+export { addConnector, getConnectorSetupStatuses, listConnectors } from './cli/connectors.js';
 export type { ConnectorCommandOptions, ConnectorSetupStatus } from './cli/connectors.js';
 export {
   init,
@@ -53,6 +53,7 @@ export { configExists, expandHome, getConfigPath, loadConfig, parseConfig, readC
 
 export { ObsidianConnector, extractTags } from './connectors/obsidian.js';
 export { createProxyConnector } from './connectors/factory.js';
+export { upsertProxyConfig } from './connectors/setup-utils.js';
 export type { CallToolResult, Connector, ToolDefinition } from './connectors/types.js';
 export { createMcpServer, startHttpServer, startStdioServer } from './server/index.js';
 export type { HttpServerOptions, StartedHttpServer } from './server/index.js';
