@@ -1,9 +1,7 @@
 import { confirm, select } from '@inquirer/prompts';
 import chalk from 'chalk';
-import fs from 'fs/promises';
 import path from 'path';
-import yaml from 'yaml';
-import { expandHome, getConfigPath, loadConfig } from '../config/loader.js';
+import { expandHome, getConfigPath, loadConfig, saveConfig } from '../config/loader.js';
 import { MvmtConfig, ProxyConfig } from '../config/schema.js';
 import {
   createMemPalaceProxyConfig,
@@ -112,14 +110,6 @@ async function promptForConnectorToAdd(config: MvmtConfig): Promise<string> {
       value: status.name,
     })),
   });
-}
-
-async function saveConfig(configPath: string, config: MvmtConfig): Promise<void> {
-  await fs.mkdir(path.dirname(configPath), { recursive: true });
-  await fs.writeFile(configPath, yaml.stringify(config), 'utf-8');
-  if (process.platform !== 'win32') {
-    await fs.chmod(configPath, 0o600);
-  }
 }
 
 function hasEnabledProxy(config: MvmtConfig, name: string): boolean {

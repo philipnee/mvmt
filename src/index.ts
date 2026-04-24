@@ -49,7 +49,8 @@ export type {
   ProxyConfig,
   TunnelConfig,
 } from './config/schema.js';
-export { configExists, expandHome, getConfigPath, loadConfig, parseConfig, readConfig, resolveConfigPath } from './config/loader.js';
+export { configExists, expandHome, getConfigPath, loadConfig, parseConfig, readConfig, resolveConfigPath, saveConfig } from './config/loader.js';
+
 export { ObsidianConnector, extractTags } from './connectors/obsidian.js';
 export { createProxyConnector } from './connectors/factory.js';
 export type { CallToolResult, Connector, ToolDefinition } from './connectors/types.js';
