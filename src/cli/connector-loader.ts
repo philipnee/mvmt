@@ -2,22 +2,17 @@ import { MvmtConfig } from '../config/schema.js';
 import { Connector } from '../connectors/types.js';
 import { ObsidianConnector } from '../connectors/obsidian.js';
 import { createProxyConnector } from '../connectors/factory.js';
+import { Logger } from '../utils/logger.js';
 
 export type LoadedConnector = {
   connector: Connector;
   toolCount: number;
 };
 
-export interface ConnectorLoaderLogger {
-  info(message: string): void;
-  warn(message: string): void;
-  error(message: string): void;
-}
-
 export async function initializeConnectors(
   config: MvmtConfig,
   stdioMode: boolean,
-  logger: ConnectorLoaderLogger,
+  logger: Logger,
 ): Promise<LoadedConnector[]> {
   const loaded: LoadedConnector[] = [];
 
@@ -95,7 +90,7 @@ export function formatConnectorError(err: unknown): string {
 function emit(
   message: string,
   stdioMode: boolean,
-  logger: ConnectorLoaderLogger,
+  logger: Logger,
   level: 'info' | 'warn' | 'error' = 'info',
 ): void {
   if (stdioMode) {

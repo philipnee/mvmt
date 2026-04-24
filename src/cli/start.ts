@@ -3,7 +3,7 @@ import path from 'path';
 import chalk from 'chalk';
 import yaml from 'yaml';
 import { configExists, loadConfig, resolveConfigPath } from '../config/loader.js';
-import { MvmtConfig } from '../config/schema.js';
+import { MvmtConfig, TunnelSchema } from '../config/schema.js';
 import { createTemporaryFilesystemConfig, readFilesystemPaths } from './config.js';
 import { setupConfig } from './init.js';
 import { createPlugins } from '../plugins/factory.js';
@@ -156,7 +156,13 @@ export async function start(options: StartOptions = {}): Promise<void> {
             connection.close();
             return;
           }
-          const tunnelConfig = (message as { tunnel: any }).tunnel;
+          const parsedTunnel = TunnelSchema.safeParse(message.tunnel);
+          if (!parsedTunnel.success) {
+            connection.send({ ok: false, error: 'Invalid tunnel config' });
+            connection.close();
+            return;
+          }
+          const tunnelConfig = parsedTunnel.data;
           config.server.access = 'tunnel';
           config.server.tunnel = tunnelConfig;
           await saveRuntimeConfig(configPath, config);
@@ -195,7 +201,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
         totalTools: router.getAllTools().length,
         audit: audit as InteractiveAuditLogger,
         shutdown,
-        persistConfig: (config) => saveRuntimeConfig(configPath, config),
+        persistConfig: () => saveRuntimeConfig(configPath, config),
       });
     }
   } catch (err) {

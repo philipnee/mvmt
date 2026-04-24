@@ -19,6 +19,8 @@ export class TunnelController {
   private lastError: string | undefined;
 
   constructor(
+    // This intentionally aliases the caller-owned server config so tunnel
+    // changes stay in sync with the config object that gets persisted.
     private readonly serverConfig: MvmtConfig['server'],
     private readonly port: number,
     private readonly logger: Logger,

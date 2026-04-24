@@ -54,7 +54,7 @@ export interface InteractivePromptState {
   totalTools: number;
   audit: InteractiveAuditLogger;
   shutdown: () => Promise<void>;
-  persistConfig: (config: MvmtConfig) => Promise<void>;
+  persistConfig: () => Promise<void>;
 }
 
 export function startInteractivePrompt(state: InteractivePromptState): void {
@@ -302,7 +302,7 @@ async function handleTunnelConfig(state: InteractivePromptState): Promise<void> 
   state.tunnel.configure(tunnel);
   state.config.server.access = 'tunnel';
   state.config.server.tunnel = tunnel;
-  await state.persistConfig(state.config);
+  await state.persistConfig();
 
   console.log(chalk.green(`Tunnel config saved to ${state.configPath}`));
   if (!wasRunning) {
