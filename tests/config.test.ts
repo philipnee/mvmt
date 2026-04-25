@@ -4,7 +4,9 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { expandHome, loadConfig, parseConfig, readConfig, saveConfig } from '../src/config/loader.js';
-import { MvmtConfig } from '../src/config/schema.js';
+import { MvmtConfig, resolveProxySourceId } from '../src/config/schema.js';
+
+const SHA256_HEX_64 = 'a'.repeat(64);
 
 describe('saveConfig', () => {
   it('writes a config file that loadConfig can read back', async () => {
@@ -242,5 +244,233 @@ describe('loadConfig', () => {
       server: { port: 4142 },
       proxy: [],
     });
+  });
+});
+
+describe('client policy schema', () => {
+  it('treats clients and semanticTools as optional (no behavior change for existing configs)', () => {
+    const config = parseConfig({ version: 1 });
+    expect(config.clients).toBeUndefined();
+    expect(config.semanticTools).toBeUndefined();
+  });
+
+  it('parses a token-auth client with permissions referencing known sources', () => {
+    const config = parseConfig({
+      version: 1,
+      proxy: [{ name: 'workspace', command: 'npx' }],
+      obsidian: { path: '/vault' },
+      clients: [
+        {
+          id: 'codex',
+          name: 'Codex CLI',
+          auth: { type: 'token', tokenHash: SHA256_HEX_64 },
+          rawToolsEnabled: true,
+          permissions: [
+            { sourceId: 'workspace', actions: ['search', 'read', 'write'] },
+            { sourceId: 'obsidian', actions: ['search', 'read'] },
+          ],
+        },
+      ],
+    });
+
+    expect(config.clients).toHaveLength(1);
+    expect(config.clients?.[0]).toMatchObject({
+      id: 'codex',
+      name: 'Codex CLI',
+      auth: { type: 'token', tokenHash: SHA256_HEX_64 },
+      rawToolsEnabled: true,
+    });
+  });
+
+  it('parses an oauth-auth client with mapped client ids', () => {
+    const config = parseConfig({
+      version: 1,
+      obsidian: { path: '/vault' },
+      clients: [
+        {
+          id: 'chatgpt',
+          name: 'ChatGPT',
+          auth: { type: 'oauth', oauthClientIds: ['chatgpt-mvmt', 'chatgpt-mvmt-v2'] },
+          permissions: [{ sourceId: 'obsidian', actions: ['search', 'read'] }],
+        },
+      ],
+    });
+
+    expect(config.clients?.[0].auth).toEqual({
+      type: 'oauth',
+      oauthClientIds: ['chatgpt-mvmt', 'chatgpt-mvmt-v2'],
+    });
+    expect(config.clients?.[0].rawToolsEnabled).toBe(false);
+  });
+
+  it('rejects unknown sourceId in client permissions', () => {
+    expect(() =>
+      parseConfig({
+        version: 1,
+        clients: [
+          {
+            id: 'codex',
+            name: 'Codex',
+            auth: { type: 'token', tokenHash: SHA256_HEX_64 },
+            permissions: [{ sourceId: 'nonexistent', actions: ['read'] }],
+          },
+        ],
+      }),
+    ).toThrow(/unknown sourceId "nonexistent"/);
+  });
+
+  it('rejects duplicate client ids', () => {
+    expect(() =>
+      parseConfig({
+        version: 1,
+        clients: [
+          { id: 'codex', name: 'A', auth: { type: 'token', tokenHash: SHA256_HEX_64 } },
+          { id: 'codex', name: 'B', auth: { type: 'token', tokenHash: 'b'.repeat(64) } },
+        ],
+      }),
+    ).toThrow(/duplicate client id "codex"/);
+  });
+
+  it('rejects duplicate tokenHash across clients (config order would otherwise be a security decision)', () => {
+    expect(() =>
+      parseConfig({
+        version: 1,
+        clients: [
+          { id: 'codex', name: 'Codex', auth: { type: 'token', tokenHash: SHA256_HEX_64 } },
+          { id: 'cursor', name: 'Cursor', auth: { type: 'token', tokenHash: SHA256_HEX_64 } },
+        ],
+      }),
+    ).toThrow(/duplicate tokenHash/);
+  });
+
+  it('rejects duplicate tokenHash even when one is uppercase hex', () => {
+    expect(() =>
+      parseConfig({
+        version: 1,
+        clients: [
+          { id: 'codex', name: 'Codex', auth: { type: 'token', tokenHash: SHA256_HEX_64 } },
+          { id: 'cursor', name: 'Cursor', auth: { type: 'token', tokenHash: SHA256_HEX_64.toUpperCase() } },
+        ],
+      }),
+    ).toThrow(/duplicate tokenHash/);
+  });
+
+  it('rejects duplicate oauthClientIds across OAuth clients', () => {
+    expect(() =>
+      parseConfig({
+        version: 1,
+        clients: [
+          {
+            id: 'chatgpt',
+            name: 'ChatGPT',
+            auth: { type: 'oauth', oauthClientIds: ['mvmt-shared'] },
+          },
+          {
+            id: 'claude',
+            name: 'Claude',
+            auth: { type: 'oauth', oauthClientIds: ['mvmt-shared', 'claude-only'] },
+          },
+        ],
+      }),
+    ).toThrow(/oauth client_id "mvmt-shared" is already mapped/);
+  });
+
+  it('rejects an OAuth client_id duplicated within the same client', () => {
+    expect(() =>
+      parseConfig({
+        version: 1,
+        clients: [
+          {
+            id: 'chatgpt',
+            name: 'ChatGPT',
+            auth: { type: 'oauth', oauthClientIds: ['mvmt-shared', 'mvmt-shared'] },
+          },
+        ],
+      }),
+    ).toThrow(/oauth client_id "mvmt-shared" is already mapped/);
+  });
+
+  it('rejects malformed client id', () => {
+    expect(() =>
+      parseConfig({
+        version: 1,
+        clients: [
+          {
+            id: 'Has Spaces',
+            name: 'bad',
+            auth: { type: 'token', tokenHash: SHA256_HEX_64 },
+          },
+        ],
+      }),
+    ).toThrow(/lowercase alphanum/);
+  });
+
+  it('rejects malformed tokenHash', () => {
+    expect(() =>
+      parseConfig({
+        version: 1,
+        clients: [
+          {
+            id: 'codex',
+            name: 'Codex',
+            auth: { type: 'token', tokenHash: 'plaintext-token' },
+          },
+        ],
+      }),
+    ).toThrow(/64-char hex SHA-256/);
+  });
+
+  it('parses semanticTools and validates source references', () => {
+    const config = parseConfig({
+      version: 1,
+      proxy: [{ name: 'workspace', command: 'npx' }],
+      obsidian: { path: '/vault' },
+      semanticTools: {
+        searchPersonalContext: { enabled: true, sourceIds: ['workspace', 'obsidian'] },
+        readContextItem: { sourceIds: ['workspace'] },
+      },
+    });
+
+    expect(config.semanticTools?.searchPersonalContext?.sourceIds).toEqual(['workspace', 'obsidian']);
+    expect(config.semanticTools?.readContextItem?.enabled).toBe(true);
+  });
+
+  it('rejects unknown sourceId in semanticTools', () => {
+    expect(() =>
+      parseConfig({
+        version: 1,
+        semanticTools: {
+          searchPersonalContext: { sourceIds: ['nonexistent'] },
+        },
+      }),
+    ).toThrow(/unknown sourceId "nonexistent"/);
+  });
+
+  it('uses proxy.id when set, falling back to name for source resolution', () => {
+    const config = parseConfig({
+      version: 1,
+      proxy: [
+        { id: 'workspace', name: 'filesystem', command: 'npx' },
+      ],
+      clients: [
+        {
+          id: 'codex',
+          name: 'Codex',
+          auth: { type: 'token', tokenHash: SHA256_HEX_64 },
+          permissions: [{ sourceId: 'workspace', actions: ['read'] }],
+        },
+      ],
+    });
+
+    expect(resolveProxySourceId(config.proxy[0])).toBe('workspace');
+    expect(config.clients?.[0].permissions[0].sourceId).toBe('workspace');
+  });
+
+  it('falls back to proxy.name when id is omitted', () => {
+    const config = parseConfig({
+      version: 1,
+      proxy: [{ name: 'mempalace', command: '/venv/bin/python' }],
+    });
+    expect(resolveProxySourceId(config.proxy[0])).toBe('mempalace');
   });
 });

@@ -8,6 +8,10 @@ export const TunnelSchema = z.object({
 
 export const ProxySchema = z
   .object({
+    // id is the policy-stable identifier used by client permissions and
+    // semantic tools. When omitted, name is used. Set id explicitly when
+    // you need to rename a proxy without re-mapping policy.
+    id: z.string().min(1).optional(),
     name: z.string().min(1),
     source: z.string().optional(), // legacy setup-provenance metadata; runtime ignores it
     transport: z.enum(['stdio', 'http']).default('stdio'),
@@ -121,29 +125,176 @@ export const PluginSchema = z.discriminatedUnion('name', [
   PatternRedactorPluginSchema,
 ]);
 
-export const ConfigSchema = z.object({
-  version: z.literal(1),
-  server: z
-    .object({
-      port: z.number().int().min(1).max(65535).default(4141),
-      allowedOrigins: z.array(z.string().min(1)).default([]),
-      access: z.enum(['local', 'tunnel']).default('local'),
-      tunnel: TunnelSchema.optional(),
-    })
-    .superRefine((data, ctx) => {
-      if (data.access === 'tunnel' && !data.tunnel) {
+// OBSIDIAN_SOURCE_ID is the conventional source id for the native Obsidian
+// connector. Used by client permissions and semantic tool source lists.
+export const OBSIDIAN_SOURCE_ID = 'obsidian';
+
+export const PermissionAction = z.enum(['search', 'read', 'write', 'memory_write']);
+
+export const PermissionSchema = z.object({
+  sourceId: z.string().min(1),
+  actions: z.array(PermissionAction).default([]),
+});
+
+export const ClientAuthTokenSchema = z.object({
+  type: z.literal('token'),
+  // SHA-256 hex hash of the issued bearer token. Plaintext is shown to
+  // the operator once at issuance and never persisted.
+  tokenHash: z.string().regex(/^[0-9a-f]{64}$/i, 'tokenHash must be a 64-char hex SHA-256'),
+});
+
+export const ClientAuthOAuthSchema = z.object({
+  type: z.literal('oauth'),
+  oauthClientIds: z.array(z.string().min(1)).default([]),
+});
+
+export const ClientAuthSchema = z.discriminatedUnion('type', [
+  ClientAuthTokenSchema,
+  ClientAuthOAuthSchema,
+]);
+
+export const ClientSchema = z.object({
+  id: z.string().min(1).regex(/^[a-z0-9][a-z0-9_-]*$/, 'client id must be lowercase alphanum/dash/underscore'),
+  name: z.string().min(1),
+  auth: ClientAuthSchema,
+  rawToolsEnabled: z.boolean().default(false),
+  permissions: z.array(PermissionSchema).default([]),
+});
+
+export const SemanticToolEntrySchema = z.object({
+  enabled: z.boolean().default(true),
+  sourceIds: z.array(z.string().min(1)).default([]),
+});
+
+// SemanticToolsSchema is an object keyed by well-known tool names rather
+// than an array, so adding a new semantic tool is a schema addition, not
+// a structural change. Keys are camelCase; the runtime tool name is the
+// snake_case form (search_personal_context, read_context_item).
+export const SemanticToolsSchema = z.object({
+  searchPersonalContext: SemanticToolEntrySchema.optional(),
+  readContextItem: SemanticToolEntrySchema.optional(),
+}).default({});
+
+export const ConfigSchema = z
+  .object({
+    version: z.literal(1),
+    server: z
+      .object({
+        port: z.number().int().min(1).max(65535).default(4141),
+        allowedOrigins: z.array(z.string().min(1)).default([]),
+        access: z.enum(['local', 'tunnel']).default('local'),
+        tunnel: TunnelSchema.optional(),
+      })
+      .superRefine((data, ctx) => {
+        if (data.access === 'tunnel' && !data.tunnel) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'tunnel access requires "tunnel" config',
+            path: ['tunnel'],
+          });
+        }
+      })
+      .default({}),
+    proxy: z.array(ProxySchema).default([]),
+    obsidian: ObsidianSchema.optional(),
+    plugins: z.array(PluginSchema).default([]),
+    // clients and semanticTools are additive to the v1 schema. When
+    // absent, the runtime synthesizes a single default client that maps
+    // to the existing session token (preserves pre-PR behavior).
+    clients: z.array(ClientSchema).optional(),
+    semanticTools: SemanticToolsSchema.optional(),
+  })
+  .superRefine((data, ctx) => {
+    const knownSourceIds = collectKnownSourceIds(data);
+    const seenClientIds = new Set<string>();
+    // Track auth bindings across clients so config order does not silently
+    // become an authorization decision when two clients share the same
+    // OAuth client_id or token hash.
+    const seenTokenHashes = new Map<string, number>();
+    const seenOauthClientIds = new Map<string, number>();
+
+    for (const [clientIndex, client] of (data.clients ?? []).entries()) {
+      if (seenClientIds.has(client.id)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: 'tunnel access requires "tunnel" config',
-          path: ['tunnel'],
+          message: `duplicate client id "${client.id}"`,
+          path: ['clients', clientIndex, 'id'],
         });
+      } else {
+        seenClientIds.add(client.id);
       }
-    })
-    .default({}),
-  proxy: z.array(ProxySchema).default([]),
-  obsidian: ObsidianSchema.optional(),
-  plugins: z.array(PluginSchema).default([]),
-});
+
+      if (client.auth.type === 'token') {
+        const tokenHash = client.auth.tokenHash.toLowerCase();
+        const firstSeen = seenTokenHashes.get(tokenHash);
+        if (firstSeen !== undefined) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `duplicate tokenHash; first seen on clients[${firstSeen}]`,
+            path: ['clients', clientIndex, 'auth', 'tokenHash'],
+          });
+        } else {
+          seenTokenHashes.set(tokenHash, clientIndex);
+        }
+      } else if (client.auth.type === 'oauth') {
+        for (const [oauthIndex, oauthClientId] of client.auth.oauthClientIds.entries()) {
+          const firstSeen = seenOauthClientIds.get(oauthClientId);
+          if (firstSeen !== undefined) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: `oauth client_id "${oauthClientId}" is already mapped on clients[${firstSeen}]`,
+              path: ['clients', clientIndex, 'auth', 'oauthClientIds', oauthIndex],
+            });
+          } else {
+            seenOauthClientIds.set(oauthClientId, clientIndex);
+          }
+        }
+      }
+
+      for (const [permIndex, permission] of client.permissions.entries()) {
+        if (!knownSourceIds.has(permission.sourceId)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `unknown sourceId "${permission.sourceId}"; configure a proxy or obsidian first`,
+            path: ['clients', clientIndex, 'permissions', permIndex, 'sourceId'],
+          });
+        }
+      }
+    }
+
+    if (data.semanticTools) {
+      for (const [toolKey, tool] of Object.entries(data.semanticTools)) {
+        if (!tool) continue;
+        for (const [sourceIndex, sourceId] of tool.sourceIds.entries()) {
+          if (!knownSourceIds.has(sourceId)) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: `unknown sourceId "${sourceId}"; configure a proxy or obsidian first`,
+              path: ['semanticTools', toolKey, 'sourceIds', sourceIndex],
+            });
+          }
+        }
+      }
+    }
+  });
+
+// resolveProxySourceId returns the policy-stable source id for a proxy
+// entry (id when set, otherwise name). Exported so policy enforcement
+// uses the same lookup the schema validation uses.
+export function resolveProxySourceId(proxy: ProxyConfig): string {
+  return proxy.id ?? proxy.name;
+}
+
+function collectKnownSourceIds(data: { proxy: ProxyConfig[]; obsidian?: ObsidianConfig }): Set<string> {
+  const ids = new Set<string>();
+  for (const proxy of data.proxy) {
+    ids.add(resolveProxySourceId(proxy));
+  }
+  if (data.obsidian) {
+    ids.add(OBSIDIAN_SOURCE_ID);
+  }
+  return ids;
+}
 
 export type TunnelConfig = z.infer<typeof TunnelSchema>;
 export type ProxyConfig = z.infer<typeof ProxySchema>;
@@ -151,4 +302,9 @@ export type ObsidianConfig = z.infer<typeof ObsidianSchema>;
 export type PatternRedactorPatternConfig = z.infer<typeof PatternRedactorPatternSchema>;
 export type PatternRedactorPluginConfig = z.infer<typeof PatternRedactorPluginSchema>;
 export type PluginConfig = z.infer<typeof PluginSchema>;
+export type PermissionConfig = z.infer<typeof PermissionSchema>;
+export type ClientAuthConfig = z.infer<typeof ClientAuthSchema>;
+export type ClientConfig = z.infer<typeof ClientSchema>;
+export type SemanticToolEntryConfig = z.infer<typeof SemanticToolEntrySchema>;
+export type SemanticToolsConfig = z.infer<typeof SemanticToolsSchema>;
 export type MvmtConfig = z.infer<typeof ConfigSchema>;
