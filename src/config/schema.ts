@@ -207,6 +207,11 @@ export const ConfigSchema = z
   .superRefine((data, ctx) => {
     const knownSourceIds = collectKnownSourceIds(data);
     const seenClientIds = new Set<string>();
+    // Track auth bindings across clients so config order does not silently
+    // become an authorization decision when two clients share the same
+    // OAuth client_id or token hash.
+    const seenTokenHashes = new Map<string, number>();
+    const seenOauthClientIds = new Map<string, number>();
 
     for (const [clientIndex, client] of (data.clients ?? []).entries()) {
       if (seenClientIds.has(client.id)) {
@@ -217,6 +222,33 @@ export const ConfigSchema = z
         });
       } else {
         seenClientIds.add(client.id);
+      }
+
+      if (client.auth.type === 'token') {
+        const tokenHash = client.auth.tokenHash.toLowerCase();
+        const firstSeen = seenTokenHashes.get(tokenHash);
+        if (firstSeen !== undefined) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `duplicate tokenHash; first seen on clients[${firstSeen}]`,
+            path: ['clients', clientIndex, 'auth', 'tokenHash'],
+          });
+        } else {
+          seenTokenHashes.set(tokenHash, clientIndex);
+        }
+      } else if (client.auth.type === 'oauth') {
+        for (const [oauthIndex, oauthClientId] of client.auth.oauthClientIds.entries()) {
+          const firstSeen = seenOauthClientIds.get(oauthClientId);
+          if (firstSeen !== undefined) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: `oauth client_id "${oauthClientId}" is already mapped on clients[${firstSeen}]`,
+              path: ['clients', clientIndex, 'auth', 'oauthClientIds', oauthIndex],
+            });
+          } else {
+            seenOauthClientIds.set(oauthClientId, clientIndex);
+          }
+        }
       }
 
       for (const [permIndex, permission] of client.permissions.entries()) {

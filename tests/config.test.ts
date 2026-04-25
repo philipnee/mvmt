@@ -325,10 +325,69 @@ describe('client policy schema', () => {
         version: 1,
         clients: [
           { id: 'codex', name: 'A', auth: { type: 'token', tokenHash: SHA256_HEX_64 } },
-          { id: 'codex', name: 'B', auth: { type: 'token', tokenHash: SHA256_HEX_64 } },
+          { id: 'codex', name: 'B', auth: { type: 'token', tokenHash: 'b'.repeat(64) } },
         ],
       }),
     ).toThrow(/duplicate client id "codex"/);
+  });
+
+  it('rejects duplicate tokenHash across clients (config order would otherwise be a security decision)', () => {
+    expect(() =>
+      parseConfig({
+        version: 1,
+        clients: [
+          { id: 'codex', name: 'Codex', auth: { type: 'token', tokenHash: SHA256_HEX_64 } },
+          { id: 'cursor', name: 'Cursor', auth: { type: 'token', tokenHash: SHA256_HEX_64 } },
+        ],
+      }),
+    ).toThrow(/duplicate tokenHash/);
+  });
+
+  it('rejects duplicate tokenHash even when one is uppercase hex', () => {
+    expect(() =>
+      parseConfig({
+        version: 1,
+        clients: [
+          { id: 'codex', name: 'Codex', auth: { type: 'token', tokenHash: SHA256_HEX_64 } },
+          { id: 'cursor', name: 'Cursor', auth: { type: 'token', tokenHash: SHA256_HEX_64.toUpperCase() } },
+        ],
+      }),
+    ).toThrow(/duplicate tokenHash/);
+  });
+
+  it('rejects duplicate oauthClientIds across OAuth clients', () => {
+    expect(() =>
+      parseConfig({
+        version: 1,
+        clients: [
+          {
+            id: 'chatgpt',
+            name: 'ChatGPT',
+            auth: { type: 'oauth', oauthClientIds: ['mvmt-shared'] },
+          },
+          {
+            id: 'claude',
+            name: 'Claude',
+            auth: { type: 'oauth', oauthClientIds: ['mvmt-shared', 'claude-only'] },
+          },
+        ],
+      }),
+    ).toThrow(/oauth client_id "mvmt-shared" is already mapped/);
+  });
+
+  it('rejects an OAuth client_id duplicated within the same client', () => {
+    expect(() =>
+      parseConfig({
+        version: 1,
+        clients: [
+          {
+            id: 'chatgpt',
+            name: 'ChatGPT',
+            auth: { type: 'oauth', oauthClientIds: ['mvmt-shared', 'mvmt-shared'] },
+          },
+        ],
+      }),
+    ).toThrow(/oauth client_id "mvmt-shared" is already mapped/);
   });
 
   it('rejects malformed client id', () => {
