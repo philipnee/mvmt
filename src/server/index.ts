@@ -18,6 +18,8 @@ import {
   renderAuthorizePage,
 } from './oauth.js';
 import { rateLimit } from './rate-limit.js';
+import { ClientConfig } from '../config/schema.js';
+import { attachClientIdentity, resolveClientIdentity } from './client-identity.js';
 
 // Rate limits are defense-in-depth against brute-force and DoS,
 // primarily meaningful when mvmt is exposed via a tunnel. Auth-gated
@@ -55,6 +57,11 @@ export interface HttpServerOptions {
   // without blasting thousands of requests.
   rateLimits?: RateLimitOverrides;
   requestLog?: (entry: HttpRequestLogEntry) => void;
+  // Per-client policy entries (from `config.clients`). When undefined or
+  // empty, requests authenticated via the session token resolve to a
+  // synthesized default identity that preserves pre-PR single-token
+  // behavior. Pass an array to enable per-client identity resolution.
+  clients?: readonly ClientConfig[];
 }
 
 export interface StartedHttpServer {
@@ -206,13 +213,18 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     // we validate it here so a token minted for a different resource
     // cannot be replayed at this server.
     const expectedAudience = `${baseUrlFor(req)}/mcp`;
-    if (
-      oauth.validateAccessToken(authHeader, {
-        expectedAudience,
-        allowLegacyNoAudience: true,
-      }) ||
-      validateSessionToken(authHeader, tokenPath)
-    ) {
+    const oauthAccessToken = oauth.validateAccessToken(authHeader, {
+      expectedAudience,
+      allowLegacyNoAudience: true,
+    });
+    const identity = resolveClientIdentity({
+      authHeader,
+      clients: options.clients ?? [],
+      oauthAccessToken,
+      validateSession: (header) => validateSessionToken(header, tokenPath),
+    });
+    if (identity) {
+      attachClientIdentity(req, identity);
       next();
       return;
     }

@@ -1,0 +1,234 @@
+import crypto from 'crypto';
+import { describe, expect, it } from 'vitest';
+import { ClientConfig } from '../src/config/schema.js';
+import {
+  isQuarantined,
+  quarantineIdentity,
+  resolveClientIdentity,
+  synthesizeDefaultClient,
+} from '../src/server/client-identity.js';
+import { AccessToken } from '../src/server/oauth.js';
+
+const SHA256_HEX_LEN = 64;
+const ALWAYS_FALSE = () => false;
+const ALWAYS_TRUE = () => true;
+
+function sha256Hex(value: string): string {
+  return crypto.createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+function tokenClient(id: string, plaintext: string, overrides: Partial<ClientConfig> = {}): ClientConfig {
+  return {
+    id,
+    name: id,
+    auth: { type: 'token', tokenHash: sha256Hex(plaintext) },
+    rawToolsEnabled: false,
+    permissions: [],
+    ...overrides,
+  };
+}
+
+function oauthClient(id: string, oauthClientIds: string[], overrides: Partial<ClientConfig> = {}): ClientConfig {
+  return {
+    id,
+    name: id,
+    auth: { type: 'oauth', oauthClientIds },
+    rawToolsEnabled: false,
+    permissions: [],
+    ...overrides,
+  };
+}
+
+function fakeOauthAccessToken(clientId: string): AccessToken {
+  return {
+    token: 'access-token-stub',
+    clientId,
+    audience: 'http://127.0.0.1:4141/mcp',
+    expiresAt: Date.now() + 60_000,
+  };
+}
+
+describe('synthesizeDefaultClient', () => {
+  it('returns a legacy default identity with raw tools enabled', () => {
+    const id = synthesizeDefaultClient();
+    expect(id.id).toBe('default');
+    expect(id.source).toBe('session');
+    expect(id.rawToolsEnabled).toBe(true);
+    expect(id.isLegacyDefault).toBe(true);
+    expect(id.permissions).toEqual([]);
+  });
+});
+
+describe('quarantineIdentity', () => {
+  it('produces a zero-permission identity prefixed with quarantine:', () => {
+    const id = quarantineIdentity('mystery-oauth-client');
+    expect(id.id).toBe('quarantine:mystery-oauth-client');
+    expect(id.source).toBe('quarantine');
+    expect(id.rawToolsEnabled).toBe(false);
+    expect(id.permissions).toEqual([]);
+    expect(id.oauthClientId).toBe('mystery-oauth-client');
+    expect(isQuarantined(id)).toBe(true);
+  });
+});
+
+describe('resolveClientIdentity', () => {
+  describe('OAuth path', () => {
+    it('maps a known OAuth client_id to the named client', () => {
+      const chatgpt = oauthClient('chatgpt', ['chatgpt-mvmt', 'chatgpt-mvmt-v2']);
+      const identity = resolveClientIdentity({
+        authHeader: 'Bearer mvmtv1.something',
+        clients: [chatgpt],
+        oauthAccessToken: fakeOauthAccessToken('chatgpt-mvmt-v2'),
+        validateSession: ALWAYS_FALSE,
+      });
+
+      expect(identity?.source).toBe('oauth');
+      expect(identity?.id).toBe('chatgpt');
+      expect(identity?.oauthClientId).toBe('chatgpt-mvmt-v2');
+    });
+
+    it('quarantines an unknown OAuth client_id', () => {
+      const identity = resolveClientIdentity({
+        authHeader: 'Bearer mvmtv1.something',
+        clients: [],
+        oauthAccessToken: fakeOauthAccessToken('unknown-dcr-client'),
+        validateSession: ALWAYS_TRUE, // even with valid session, OAuth path wins for OAuth-authenticated requests
+      });
+
+      expect(identity?.source).toBe('quarantine');
+      expect(identity?.id).toBe('quarantine:unknown-dcr-client');
+      expect(identity?.rawToolsEnabled).toBe(false);
+      expect(identity?.permissions).toEqual([]);
+    });
+
+    it('does not fall through to client-token or session paths when OAuth token is present', () => {
+      // Even if a token client matches the bearer string, the OAuth path
+      // takes precedence for OAuth-authenticated requests.
+      const codex = tokenClient('codex', 'plaintext');
+      const identity = resolveClientIdentity({
+        authHeader: 'Bearer plaintext',
+        clients: [codex],
+        oauthAccessToken: fakeOauthAccessToken('chatgpt-mvmt'),
+        validateSession: ALWAYS_TRUE,
+      });
+
+      expect(identity?.source).toBe('quarantine');
+      expect(identity?.oauthClientId).toBe('chatgpt-mvmt');
+    });
+  });
+
+  describe('client token path', () => {
+    it('matches a configured token client by sha256 hash', () => {
+      const codex = tokenClient('codex', 'codex-plaintext-token', { rawToolsEnabled: true });
+      const identity = resolveClientIdentity({
+        authHeader: 'Bearer codex-plaintext-token',
+        clients: [codex],
+        oauthAccessToken: undefined,
+        validateSession: ALWAYS_FALSE,
+      });
+
+      expect(identity?.source).toBe('token');
+      expect(identity?.id).toBe('codex');
+      expect(identity?.rawToolsEnabled).toBe(true);
+    });
+
+    it('does not match when bearer hash differs', () => {
+      const codex = tokenClient('codex', 'expected-token');
+      const identity = resolveClientIdentity({
+        authHeader: 'Bearer wrong-token',
+        clients: [codex],
+        oauthAccessToken: undefined,
+        validateSession: ALWAYS_FALSE,
+      });
+
+      expect(identity).toBeUndefined();
+    });
+
+    it('skips oauth-typed clients when matching token bearers', () => {
+      const oauth = oauthClient('chatgpt', ['chatgpt-mvmt']);
+      const identity = resolveClientIdentity({
+        authHeader: 'Bearer some-token',
+        clients: [oauth],
+        oauthAccessToken: undefined,
+        validateSession: ALWAYS_FALSE,
+      });
+
+      expect(identity).toBeUndefined();
+    });
+
+    it('verifies tokenHash format (full 64-char hex) is enforced by schema, but matches case-insensitively here', () => {
+      const upperHash = sha256Hex('case-token').toUpperCase();
+      const codex = tokenClient('codex', 'case-token');
+      // Replace the lowercase hash with an uppercase one to confirm
+      // timingSafeHexEqual handles case via Buffer.from(..., 'hex').
+      codex.auth = { type: 'token', tokenHash: upperHash };
+
+      const identity = resolveClientIdentity({
+        authHeader: 'Bearer case-token',
+        clients: [codex],
+        oauthAccessToken: undefined,
+        validateSession: ALWAYS_FALSE,
+      });
+
+      expect(identity?.id).toBe('codex');
+    });
+  });
+
+  describe('session token path', () => {
+    it('synthesizes default identity when validateSession returns true and no client matches', () => {
+      const identity = resolveClientIdentity({
+        authHeader: 'Bearer session-token',
+        clients: [],
+        oauthAccessToken: undefined,
+        validateSession: ALWAYS_TRUE,
+      });
+
+      expect(identity?.source).toBe('session');
+      expect(identity?.id).toBe('default');
+      expect(identity?.isLegacyDefault).toBe(true);
+    });
+
+    it('falls through to session validation only after token client match fails', () => {
+      const codex = tokenClient('codex', 'real-codex-token');
+      const identity = resolveClientIdentity({
+        authHeader: 'Bearer some-other-bearer',
+        clients: [codex],
+        oauthAccessToken: undefined,
+        validateSession: ALWAYS_TRUE,
+      });
+
+      expect(identity?.source).toBe('session');
+    });
+
+    it('returns undefined when nothing matches', () => {
+      const identity = resolveClientIdentity({
+        authHeader: 'Bearer unknown',
+        clients: [],
+        oauthAccessToken: undefined,
+        validateSession: ALWAYS_FALSE,
+      });
+
+      expect(identity).toBeUndefined();
+    });
+  });
+
+  describe('bearer extraction', () => {
+    it('returns undefined for missing Bearer prefix when no other path matches', () => {
+      const identity = resolveClientIdentity({
+        authHeader: 'Basic abc',
+        clients: [tokenClient('codex', 'codex-token')],
+        oauthAccessToken: undefined,
+        validateSession: ALWAYS_FALSE,
+      });
+
+      expect(identity).toBeUndefined();
+    });
+  });
+});
+
+describe('tokenHash format invariants', () => {
+  it('sha256 hashes used in tests are always 64 hex chars', () => {
+    expect(sha256Hex('anything')).toHaveLength(SHA256_HEX_LEN);
+    expect(sha256Hex('')).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
