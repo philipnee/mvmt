@@ -18,6 +18,8 @@ import {
   renderAuthorizePage,
 } from './oauth.js';
 import { rateLimit } from './rate-limit.js';
+import { ClientConfig } from '../config/schema.js';
+import { attachClientIdentity, isQuarantined, resolveClientIdentity } from './client-identity.js';
 
 // Rate limits are defense-in-depth against brute-force and DoS,
 // primarily meaningful when mvmt is exposed via a tunnel. Auth-gated
@@ -55,6 +57,11 @@ export interface HttpServerOptions {
   // without blasting thousands of requests.
   rateLimits?: RateLimitOverrides;
   requestLog?: (entry: HttpRequestLogEntry) => void;
+  // Per-client policy entries (from `config.clients`). When undefined or
+  // empty, requests authenticated via the session token resolve to a
+  // synthesized default identity that preserves pre-PR single-token
+  // behavior. Pass an array to enable per-client identity resolution.
+  clients?: readonly ClientConfig[];
 }
 
 export interface StartedHttpServer {
@@ -206,13 +213,38 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     // we validate it here so a token minted for a different resource
     // cannot be replayed at this server.
     const expectedAudience = `${baseUrlFor(req)}/mcp`;
-    if (
-      oauth.validateAccessToken(authHeader, {
-        expectedAudience,
-        allowLegacyNoAudience: true,
-      }) ||
-      validateSessionToken(authHeader, tokenPath)
-    ) {
+    const oauthAccessToken = oauth.validateAccessToken(authHeader, {
+      expectedAudience,
+      allowLegacyNoAudience: true,
+    });
+    const identity = resolveClientIdentity({
+      authHeader,
+      clients: options.clients ?? [],
+      oauthAccessToken,
+      validateSession: (header) => validateSessionToken(header, tokenPath),
+    });
+    if (identity && isQuarantined(identity)) {
+      // Quarantined identities are authenticated (the OAuth access token
+      // is valid) but the OAuth client_id has no mapping to a configured
+      // client. Reject at auth time until a separate enforcement layer
+      // exists; otherwise quarantine would be in-name-only and the
+      // unknown client would still reach the global tool surface.
+      logHttpRequest(
+        requestLog,
+        req,
+        403,
+        authLogKind(req),
+        `quarantined oauth_client_id=${identity.oauthClientId ?? '(none)'}`,
+        identity.id,
+      );
+      res.status(403).json({
+        error: 'oauth_client_quarantined',
+        error_description: 'OAuth client_id is not mapped to a configured mvmt client; admin must approve',
+      });
+      return;
+    }
+    if (identity) {
+      attachClientIdentity(req, identity);
       next();
       return;
     }

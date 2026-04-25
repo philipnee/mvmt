@@ -113,6 +113,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
       port,
       allowedOrigins: config.server.allowedOrigins,
       resolvePublicBaseUrl: () => tunnelController.publicUrl,
+      clients: config.clients,
       requestLog: interactiveMode
         ? (entry) => (audit as InteractiveAuditLogger).recordHttp(entry)
         : options.verbose
