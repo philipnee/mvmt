@@ -64,16 +64,25 @@ export interface ResolveClientIdentityInput {
 // `undefined` as 401 and a quarantine identity as "authenticated but
 // permitted to do nothing" (enforcement in a follow-up PR).
 export function resolveClientIdentity(input: ResolveClientIdentityInput): ClientIdentity | undefined {
+  const policyConfigured = input.clients.length > 0;
+
   // OAuth access token: the bearer was already verified by the caller.
-  // Map its OAuth client_id to a named client; if no mapping exists,
-  // quarantine. This is the path that prevents silent privilege grants
-  // to unrecognized OAuth/DCR clients.
+  // Map its OAuth client_id to a named client. Behavior depends on
+  // whether the operator has configured per-client policy:
+  //   - empty clients[]  → legacy mode: synthesized default identity,
+  //     same compatibility path used for the session token. Pre-PR
+  //     OAuth flows keep working until the operator adds clients[].
+  //   - non-empty clients[] → strict mode: unknown OAuth client_id is
+  //     quarantined (zero permissions, raw tools off) so DCR-issued or
+  //     unfamiliar OAuth clients cannot silently inherit the legacy
+  //     surface.
   if (input.oauthAccessToken) {
     const oauthClientId = input.oauthAccessToken.clientId;
     const named = input.clients.find(
       (c) => c.auth.type === 'oauth' && c.auth.oauthClientIds.includes(oauthClientId),
     );
     if (named) return identityFromConfig(named, 'oauth', oauthClientId);
+    if (!policyConfigured) return synthesizeDefaultClient();
     return quarantineIdentity(oauthClientId);
   }
 
@@ -92,9 +101,13 @@ export function resolveClientIdentity(input: ResolveClientIdentityInput): Client
   }
 
   // Session token: pre-PR single-token mode. Synthesized default
-  // identity preserves backward compatibility for users who haven't
-  // migrated to per-client policy yet.
-  if (input.validateSession(input.authHeader)) {
+  // identity preserves backward compatibility ONLY when no per-client
+  // policy is configured. Once an operator adds clients[], the session
+  // token stops being a /mcp credential — it remains valid for admin
+  // and control endpoints, but data-plane access must come through a
+  // configured client. This prevents the session token from being a
+  // parallel credential that bypasses per-client policy.
+  if (!policyConfigured && input.validateSession(input.authHeader)) {
     return synthesizeDefaultClient();
   }
 

@@ -19,7 +19,7 @@ import {
 } from './oauth.js';
 import { rateLimit } from './rate-limit.js';
 import { ClientConfig } from '../config/schema.js';
-import { attachClientIdentity, resolveClientIdentity } from './client-identity.js';
+import { attachClientIdentity, isQuarantined, resolveClientIdentity } from './client-identity.js';
 
 // Rate limits are defense-in-depth against brute-force and DoS,
 // primarily meaningful when mvmt is exposed via a tunnel. Auth-gated
@@ -223,6 +223,26 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       oauthAccessToken,
       validateSession: (header) => validateSessionToken(header, tokenPath),
     });
+    if (identity && isQuarantined(identity)) {
+      // Quarantined identities are authenticated (the OAuth access token
+      // is valid) but the OAuth client_id has no mapping to a configured
+      // client. Reject at auth time until a separate enforcement layer
+      // exists; otherwise quarantine would be in-name-only and the
+      // unknown client would still reach the global tool surface.
+      logHttpRequest(
+        requestLog,
+        req,
+        403,
+        authLogKind(req),
+        `quarantined oauth_client_id=${identity.oauthClientId ?? '(none)'}`,
+        identity.id,
+      );
+      res.status(403).json({
+        error: 'oauth_client_quarantined',
+        error_description: 'OAuth client_id is not mapped to a configured mvmt client; admin must approve',
+      });
+      return;
+    }
     if (identity) {
       attachClientIdentity(req, identity);
       next();

@@ -87,12 +87,16 @@ describe('resolveClientIdentity', () => {
       expect(identity?.oauthClientId).toBe('chatgpt-mvmt-v2');
     });
 
-    it('quarantines an unknown OAuth client_id', () => {
+    it('quarantines an unknown OAuth client_id when per-client policy is configured', () => {
+      // With a non-empty clients[], an unmapped OAuth client_id is
+      // quarantined (zero permissions, raw tools off). authMiddleware
+      // returns 403 before the request reaches any tool surface.
+      const someTokenClient = tokenClient('codex', 'codex-token');
       const identity = resolveClientIdentity({
         authHeader: 'Bearer mvmtv1.something',
-        clients: [],
+        clients: [someTokenClient],
         oauthAccessToken: fakeOauthAccessToken('unknown-dcr-client'),
-        validateSession: ALWAYS_TRUE, // even with valid session, OAuth path wins for OAuth-authenticated requests
+        validateSession: ALWAYS_TRUE,
       });
 
       expect(identity?.source).toBe('quarantine');
@@ -101,7 +105,22 @@ describe('resolveClientIdentity', () => {
       expect(identity?.permissions).toEqual([]);
     });
 
-    it('does not fall through to client-token or session paths when OAuth token is present', () => {
+    it('falls back to the legacy default identity for OAuth tokens when clients[] is empty', () => {
+      // Pre-PR OAuth flows keep working in legacy mode (no clients[]
+      // configured). The operator opts into the strict quarantine model
+      // by adding entries to clients[].
+      const identity = resolveClientIdentity({
+        authHeader: 'Bearer mvmtv1.something',
+        clients: [],
+        oauthAccessToken: fakeOauthAccessToken('legacy-oauth-client'),
+        validateSession: ALWAYS_FALSE,
+      });
+
+      expect(identity?.source).toBe('session');
+      expect(identity?.isLegacyDefault).toBe(true);
+    });
+
+    it('does not fall through to client-token or session paths when OAuth token is present (and policy is configured)', () => {
       // Even if a token client matches the bearer string, the OAuth path
       // takes precedence for OAuth-authenticated requests.
       const codex = tokenClient('codex', 'plaintext');
@@ -175,7 +194,7 @@ describe('resolveClientIdentity', () => {
   });
 
   describe('session token path', () => {
-    it('synthesizes default identity when validateSession returns true and no client matches', () => {
+    it('synthesizes default identity when clients[] is empty (legacy compatibility)', () => {
       const identity = resolveClientIdentity({
         authHeader: 'Bearer session-token',
         clients: [],
@@ -188,16 +207,19 @@ describe('resolveClientIdentity', () => {
       expect(identity?.isLegacyDefault).toBe(true);
     });
 
-    it('falls through to session validation only after token client match fails', () => {
+    it('does NOT fall back to default when clients[] is non-empty (session token is admin-only once policy is configured)', () => {
       const codex = tokenClient('codex', 'real-codex-token');
       const identity = resolveClientIdentity({
-        authHeader: 'Bearer some-other-bearer',
+        authHeader: 'Bearer session-token',
         clients: [codex],
         oauthAccessToken: undefined,
         validateSession: ALWAYS_TRUE,
       });
 
-      expect(identity?.source).toBe('session');
+      // Session token is valid but no client token matched and clients[] is configured;
+      // the resolver returns undefined so the caller can 401. This prevents the session
+      // token from being a parallel /mcp credential that bypasses per-client policy.
+      expect(identity).toBeUndefined();
     });
 
     it('returns undefined when nothing matches', () => {
