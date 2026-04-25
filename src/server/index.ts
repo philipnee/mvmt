@@ -367,12 +367,14 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   });
 
   app.get('/authorize', authLimiter, oauthOriginMiddleware, (req, res) => {
-    const params = parseAuthorizeParams(req.query);
-    if ('error' in params) {
-      logHttpRequest(requestLog, req, 400, 'oauth.authorize', params.error);
-      res.status(400).type('text/plain').send(params.error);
+    const parsed = parseAuthorizeParams(req.query);
+    if ('error' in parsed) {
+      logHttpRequest(requestLog, req, 400, 'oauth.authorize', parsed.error);
+      res.status(400).type('text/plain').send(parsed.error);
       return;
     }
+    const canonicalResource = `${baseUrlFor(req)}/mcp`;
+    const { params, resourceDefaulted } = defaultAuthorizeResource(parsed, canonicalResource);
     if (!oauth.isRedirectUriAllowed(params.clientId, params.redirectUri)) {
       const rejectedHost = safeHost(params.redirectUri);
       logHttpRequest(
@@ -382,7 +384,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       res.status(400).type('text/plain').send('redirect_uri is not registered for this client');
       return;
     }
-    const resourceError = validateAuthorizeResource(params.resource, `${baseUrlFor(req)}/mcp`);
+    const resourceError = validateAuthorizeResource(params.resource, canonicalResource);
     if (resourceError) {
       const redirect = authorizeErrorRedirect(params, 'invalid_target', resourceError.description);
       logHttpRequest(requestLog, req, 302, 'oauth.authorize', resourceError.code, params.clientId);
@@ -395,6 +397,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       requestId,
       redirectUri: params.redirectUri,
       resource: params.resource,
+      resourceDefaulted,
       state: params.state,
     });
     logHttpRequest(requestLog, req, 200, 'oauth.authorize', promptDetail, params.clientId);
@@ -402,12 +405,14 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   });
 
   app.post('/authorize', authLimiter, oauthOriginMiddleware, (req, res) => {
-    const params = parseAuthorizeParams(req.body ?? {});
-    if ('error' in params) {
-      logHttpRequest(requestLog, req, 400, 'oauth.authorize', params.error);
-      res.status(400).type('text/plain').send(params.error);
+    const parsed = parseAuthorizeParams(req.body ?? {});
+    if ('error' in parsed) {
+      logHttpRequest(requestLog, req, 400, 'oauth.authorize', parsed.error);
+      res.status(400).type('text/plain').send(parsed.error);
       return;
     }
+    const canonicalResource = `${baseUrlFor(req)}/mcp`;
+    const { params, resourceDefaulted } = defaultAuthorizeResource(parsed, canonicalResource);
     if (!oauth.isRedirectUriAllowed(params.clientId, params.redirectUri)) {
       const rejectedHost = safeHost(params.redirectUri);
       logHttpRequest(
@@ -417,7 +422,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       res.status(400).type('text/plain').send('redirect_uri is not registered for this client');
       return;
     }
-    const resourceError = validateAuthorizeResource(params.resource, `${baseUrlFor(req)}/mcp`);
+    const resourceError = validateAuthorizeResource(params.resource, canonicalResource);
     if (resourceError) {
       const redirect = authorizeErrorRedirect(params, 'invalid_target', resourceError.description);
       logHttpRequest(requestLog, req, 302, 'oauth.authorize', resourceError.code, params.clientId);
@@ -433,6 +438,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
         requestId,
         redirectUri: params.redirectUri,
         resource: params.resource,
+        resourceDefaulted,
         state: params.state,
       });
       logHttpRequest(requestLog, req, 401, 'oauth.authorize', denyDetail, params.clientId);
@@ -460,6 +466,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       requestId,
       redirectUri: params.redirectUri,
       resource: params.resource,
+      resourceDefaulted,
       state: params.state,
     });
     logHttpRequest(requestLog, req, 302, 'oauth.authorize', approveDetail, params.clientId);
@@ -784,6 +791,17 @@ function parseAuthorizeParams(source: Record<string, unknown>): AuthorizeParams 
   };
 }
 
+function defaultAuthorizeResource(
+  params: AuthorizeParams,
+  canonicalResource: string,
+): { params: AuthorizeParams; resourceDefaulted: boolean } {
+  if (params.resource) return { params, resourceDefaulted: false };
+  return {
+    params: { ...params, resource: canonicalResource },
+    resourceDefaulted: true,
+  };
+}
+
 function stringField(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
@@ -850,9 +868,10 @@ function formatAuthorizeLogDetail(input: {
   requestId: string;
   redirectUri: string;
   resource?: string;
+  resourceDefaulted?: boolean;
   state?: string;
 }): string {
-  return `${input.phase} rid=${input.requestId} redirect_host=${safeHost(input.redirectUri)} resource_host=${input.resource ? safeHost(input.resource) : '(none)'} state_hash=${hashForLog(input.state)}`;
+  return `${input.phase} rid=${input.requestId} redirect_host=${safeHost(input.redirectUri)} resource_host=${input.resource ? safeHost(input.resource) : '(none)'} resource_defaulted=${input.resourceDefaulted ? 'true' : 'false'} state_hash=${hashForLog(input.state)}`;
 }
 
 function hashForLog(value: string | undefined): string {
