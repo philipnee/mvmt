@@ -24,6 +24,7 @@ This project follows the spirit of Keep a Changelog and uses semantic versioning
 
 - Internal refactor: `src/cli/start.ts` split into focused modules (`connector-loader`, `interactive`, `tunnel-controller`). Per-connector setup extracted into `src/connectors/{filesystem,obsidian,mempalace}-setup.ts`. Shared `saveConfig()` consolidated on `src/config/loader.ts`.
 - `PluginSchema` is now a single-variant `z.discriminatedUnion('name', ...)` so adding a second plugin is a schema addition rather than a structural refactor.
+- OAuth `/authorize` now defaults a missing `resource` parameter to the instance's canonical `/mcp` resource for client compatibility, while preserving token audience binding and still rejecting explicit wrong resources.
 
 ### Deprecated
 

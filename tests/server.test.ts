@@ -562,7 +562,148 @@ describe('startHttpServer lifecycle', () => {
     }
   });
 
-  it('redirects /authorize resource errors to the registered redirect_uri', async () => {
+  it('defaults a missing GET /authorize resource to the canonical MCP resource', async () => {
+    const router = new ToolRouter([new EmptyConnector()]);
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const signingKeyPath = path.join(tmp, '.mvmt', '.signing-key');
+    const requestLogs: Array<{ kind: string; status: number; detail?: string; clientId?: string }> = [];
+    const server = await startHttpServer(router, {
+      port: 0,
+      tokenPath,
+      signingKeyPath,
+      requestLog: (entry) => requestLogs.push(entry),
+    });
+
+    try {
+      const sessionToken = fs.readFileSync(tokenPath, 'utf-8').trim();
+      const redirectUri = 'https://claude.ai/api/mcp/auth_callback';
+      const { verifier, challenge } = s256Pair();
+      const resource = `http://127.0.0.1:${server.port}/mcp`;
+      await registerClient(server.port, 'claude', [redirectUri], sessionToken);
+
+      const promptUrl = new URL(`http://127.0.0.1:${server.port}/authorize`);
+      promptUrl.search = new URLSearchParams({
+        response_type: 'code',
+        client_id: 'claude',
+        redirect_uri: redirectUri,
+        state: 'resource-state',
+        code_challenge: challenge,
+        code_challenge_method: 'S256',
+      }).toString();
+      const prompt = await fetch(promptUrl);
+      expect(prompt.status).toBe(200);
+      const promptBody = await prompt.text();
+      expect(promptBody).toContain(`name="resource" value="${resource}"`);
+
+      const approve = await fetch(`http://127.0.0.1:${server.port}/authorize`, {
+        method: 'POST',
+        redirect: 'manual',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          response_type: 'code',
+          client_id: 'claude',
+          redirect_uri: redirectUri,
+          resource,
+          state: 'resource-state',
+          code_challenge: challenge,
+          code_challenge_method: 'S256',
+          session_token: sessionToken,
+        }),
+      });
+      expect(approve.status).toBe(302);
+      const approveRedirect = new URL(approve.headers.get('location')!);
+      const code = approveRedirect.searchParams.get('code');
+      expect(code).toBeTruthy();
+
+      const accessToken = await exchangeAuthorizationCodeForToken({
+        port: server.port,
+        clientId: 'claude',
+        redirectUri,
+        code: code!,
+        verifier,
+      });
+      expectAccessTokenAudience(accessToken, signingKeyPath, resource);
+      expect(requestLogs).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'oauth.authorize',
+            status: 200,
+            detail: expect.stringContaining('resource_defaulted=true'),
+          }),
+        ]),
+      );
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('defaults a missing POST /authorize resource to the canonical MCP resource', async () => {
+    const router = new ToolRouter([new EmptyConnector()]);
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const signingKeyPath = path.join(tmp, '.mvmt', '.signing-key');
+    const requestLogs: Array<{ kind: string; status: number; detail?: string; clientId?: string }> = [];
+    const server = await startHttpServer(router, {
+      port: 0,
+      tokenPath,
+      signingKeyPath,
+      requestLog: (entry) => requestLogs.push(entry),
+    });
+
+    try {
+      const sessionToken = fs.readFileSync(tokenPath, 'utf-8').trim();
+      const redirectUri = 'https://claude.ai/api/mcp/auth_callback';
+      const { verifier, challenge } = s256Pair();
+      const resource = `http://127.0.0.1:${server.port}/mcp`;
+      await registerClient(server.port, 'claude', [redirectUri], sessionToken);
+
+      const authorize = await fetch(`http://127.0.0.1:${server.port}/authorize`, {
+        method: 'POST',
+        redirect: 'manual',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          response_type: 'code',
+          client_id: 'claude',
+          redirect_uri: redirectUri,
+          state: 'resource-state',
+          code_challenge: challenge,
+          code_challenge_method: 'S256',
+          session_token: sessionToken,
+        }),
+      });
+      expect(authorize.status).toBe(302);
+      const authorizeRedirect = new URL(authorize.headers.get('location')!);
+      const code = authorizeRedirect.searchParams.get('code');
+      expect(code).toBeTruthy();
+
+      const accessToken = await exchangeAuthorizationCodeForToken({
+        port: server.port,
+        clientId: 'claude',
+        redirectUri,
+        code: code!,
+        verifier,
+      });
+      expectAccessTokenAudience(accessToken, signingKeyPath, resource);
+      expect(requestLogs).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'oauth.authorize',
+            status: 302,
+            detail: expect.stringContaining('resource_defaulted=true'),
+          }),
+        ]),
+      );
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('redirects explicit /authorize resource mismatches to the registered redirect_uri', async () => {
     const router = new ToolRouter([new EmptyConnector()]);
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
@@ -579,31 +720,6 @@ describe('startHttpServer lifecycle', () => {
       const redirectUri = 'https://claude.ai/api/mcp/auth_callback';
       const { challenge } = s256Pair();
       await registerClient(server.port, 'claude', [redirectUri], sessionToken);
-
-      const authorize = (resource?: string) =>
-        fetch(`http://127.0.0.1:${server.port}/authorize`, {
-          method: 'POST',
-          redirect: 'manual',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({
-            response_type: 'code',
-            client_id: 'claude',
-            redirect_uri: redirectUri,
-            ...(resource ? { resource } : {}),
-            state: 'resource-state',
-            code_challenge: challenge,
-            code_challenge_method: 'S256',
-            session_token: sessionToken,
-          }),
-        });
-
-      const missing = await authorize();
-      expect(missing.status).toBe(302);
-      const missingRedirect = new URL(missing.headers.get('location')!);
-      expect(`${missingRedirect.origin}${missingRedirect.pathname}`).toBe(redirectUri);
-      expect(missingRedirect.searchParams.get('error')).toBe('invalid_target');
-      expect(missingRedirect.searchParams.get('error_description')).toBe('Missing resource');
-      expect(missingRedirect.searchParams.get('state')).toBe('resource-state');
 
       const wrongUrl = new URL(`http://127.0.0.1:${server.port}/authorize`);
       wrongUrl.search = new URLSearchParams({
@@ -624,7 +740,6 @@ describe('startHttpServer lifecycle', () => {
       expect(wrongRedirect.searchParams.get('state')).toBe('get-state');
       expect(requestLogs).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ kind: 'oauth.authorize', status: 302, detail: 'missing_resource' }),
           expect.objectContaining({ kind: 'oauth.authorize', status: 302, detail: 'invalid_resource' }),
         ]),
       );
@@ -1062,6 +1177,110 @@ describe('startHttpServer lifecycle', () => {
     }
   });
 
+  it('rejects unknown OAuth clients with a quarantine error once clients[] is configured', async () => {
+    const router = new ToolRouter([new EmptyConnector()]);
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const signingKeyPath = path.join(tmp, '.mvmt', '.signing-key');
+    const requestLogs: Array<{ kind: string; status: number; detail?: string; clientId?: string }> = [];
+    const server = await startHttpServer(router, {
+      port: 0,
+      tokenPath,
+      signingKeyPath,
+      clients: [
+        {
+          id: 'codex',
+          name: 'Codex CLI',
+          auth: { type: 'token', tokenHash: sha256Hex('codex-local-token') },
+          rawToolsEnabled: true,
+          permissions: [],
+        },
+      ],
+      requestLog: (entry) => requestLogs.push(entry),
+    });
+
+    try {
+      const oauthStore = new OAuthStore({ signingKey: ensureSigningKey(signingKeyPath) });
+      const accessToken = oauthStore.issueAccessToken({
+        clientId: 'unknown-dcr-client',
+        audience: `http://127.0.0.1:${server.port}/mcp`,
+      }).token;
+      const response = await fetch(`http://127.0.0.1:${server.port}/health`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({
+        error: 'oauth_client_quarantined',
+        error_description: 'OAuth client_id is not mapped to a configured mvmt client; admin must approve',
+      });
+      expect(requestLogs).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'health.auth',
+            status: 403,
+            clientId: 'quarantine:unknown-dcr-client',
+            detail: 'quarantined oauth_client_id=unknown-dcr-client',
+          }),
+        ]),
+      );
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects the session token on /mcp once clients[] is configured', async () => {
+    const router = new ToolRouter([new EmptyConnector()]);
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const server = await startHttpServer(router, {
+      port: 0,
+      tokenPath,
+      clients: [
+        {
+          id: 'codex',
+          name: 'Codex CLI',
+          auth: { type: 'token', tokenHash: sha256Hex('codex-local-token') },
+          rawToolsEnabled: true,
+          permissions: [],
+        },
+      ],
+    });
+
+    try {
+      const sessionToken = fs.readFileSync(tokenPath, 'utf-8').trim();
+      const response = await fetch(`http://127.0.0.1:${server.port}/mcp`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${sessionToken}` },
+      });
+      expect(response.status).toBe(401);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves legacy session-token access when clients[] is absent', async () => {
+    const router = new ToolRouter([new EmptyConnector()]);
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const server = await startHttpServer(router, { port: 0, tokenPath });
+
+    try {
+      const sessionToken = fs.readFileSync(tokenPath, 'utf-8').trim();
+      const response = await fetch(`http://127.0.0.1:${server.port}/health`, {
+        headers: { Authorization: `Bearer ${sessionToken}` },
+      });
+      expect(response.status).toBe(200);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('revokes outstanding OAuth access tokens the moment the signing key file is rewritten', async () => {
     const router = new ToolRouter([new EmptyConnector()]);
     await router.initialize();
@@ -1259,4 +1478,43 @@ async function exchangeAccessToken(port: number, sessionToken: string, resourceB
   expect(token.status).toBe(200);
   expect(body.access_token).toBeTypeOf('string');
   return body.access_token as string;
+}
+
+async function exchangeAuthorizationCodeForToken(input: {
+  port: number;
+  clientId: string;
+  redirectUri: string;
+  code: string;
+  verifier: string;
+  resource?: string;
+}): Promise<string> {
+  const token = await fetch(`http://127.0.0.1:${input.port}/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'authorization_code',
+      code: input.code,
+      client_id: input.clientId,
+      redirect_uri: input.redirectUri,
+      ...(input.resource ? { resource: input.resource } : {}),
+      code_verifier: input.verifier,
+    }),
+  });
+  const body = await token.json();
+  expect(token.status).toBe(200);
+  expect(body.access_token).toBeTypeOf('string');
+  return body.access_token as string;
+}
+
+function expectAccessTokenAudience(accessToken: string, signingKeyPath: string, expectedAudience: string): void {
+  const validator = new OAuthStore({ signingKey: ensureSigningKey(signingKeyPath) });
+  const validated = validator.validateAccessToken(`Bearer ${accessToken}`, {
+    expectedAudience,
+    allowLegacyNoAudience: false,
+  });
+  expect(validated?.audience).toBe(expectedAudience);
+}
+
+function sha256Hex(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
 }
