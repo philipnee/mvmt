@@ -1,4 +1,4 @@
-import { MvmtConfig } from '../config/schema.js';
+import { MvmtConfig, OBSIDIAN_SOURCE_ID, resolveProxySourceId } from '../config/schema.js';
 import { Connector } from '../connectors/types.js';
 import { ObsidianConnector } from '../connectors/obsidian.js';
 import { createProxyConnector } from '../connectors/factory.js';
@@ -6,6 +6,7 @@ import { Logger } from '../utils/logger.js';
 
 export type LoadedConnector = {
   connector: Connector;
+  sourceId: string;
   toolCount: number;
 };
 
@@ -28,7 +29,7 @@ export async function initializeConnectors(
     try {
       await connector.initialize();
       const toolCount = (await connector.listTools()).length;
-      loaded.push({ connector, toolCount });
+      loaded.push({ connector, sourceId: resolveProxySourceId(proxyConfig), toolCount });
       emit(`Loaded proxy:${proxyConfig.name} (${toolCount} tools)`, stdioMode, logger);
     } catch (err) {
       emit(
@@ -46,7 +47,7 @@ export async function initializeConnectors(
     try {
       await connector.initialize();
       const toolCount = (await connector.listTools()).length;
-      loaded.push({ connector, toolCount });
+      loaded.push({ connector, sourceId: OBSIDIAN_SOURCE_ID, toolCount });
       emit(`Loaded obsidian (${toolCount} tools)`, stdioMode, logger);
     } catch (err) {
       emit(

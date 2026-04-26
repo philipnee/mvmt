@@ -8,6 +8,7 @@ export interface AuditEntry {
   ts: string;
   connectorId: string;
   tool: string;
+  clientId?: string;
   argKeys: string[];
   argPreview: string;
   redactions?: Array<{
@@ -18,6 +19,7 @@ export interface AuditEntry {
     truncated?: boolean;
   }>;
   isError: boolean;
+  deniedReason?: string;
   durationMs: number;
 }
 

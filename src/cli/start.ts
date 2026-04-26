@@ -91,7 +91,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
   const audit = interactiveMode
     ? new InteractiveAuditLogger(createAuditLogger())
     : createAuditLogger();
-  const router = new ToolRouter(loaded.map((entry) => entry.connector), audit, plugins);
+  const router = new ToolRouter(loaded.map((entry) => ({ connector: entry.connector, sourceId: entry.sourceId })), audit, plugins);
   await router.initialize();
 
   // Cleanup tasks run on SIGINT/SIGTERM and on startup failure.
