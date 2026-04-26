@@ -33,6 +33,7 @@ describe('ToolRouter', () => {
         connectorId: 'proxy_github',
         sourceId: 'proxy_github',
         requiredAction: 'write',
+        toolKind: 'raw',
         description: '[github] Create an issue',
         inputSchema: { type: 'object', properties: { title: { type: 'string' } } },
       },
@@ -267,6 +268,76 @@ describe('ToolRouter', () => {
 
     expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ clientId: 'codex', isError: false }));
   });
+
+  it('lists semantic tools even when raw tools are disabled', async () => {
+    const connector = obsidianFixtureConnector();
+    const router = new ToolRouter([connector], undefined, [], {
+      semanticTools: {
+        searchPersonalContext: { enabled: true, sourceIds: ['obsidian'] },
+        readContextItem: { enabled: true, sourceIds: ['obsidian'] },
+      },
+    });
+    await router.initialize();
+
+    expect(router.getAllTools(client('chatgpt', false, [
+      { sourceId: 'obsidian', actions: ['search', 'read'] },
+    ])).map((tool) => tool.namespacedName)).toEqual([
+      'search_personal_context',
+      'read_context_item',
+    ]);
+  });
+
+  it('searches allowed semantic sources and returns source-attributed results', async () => {
+    const connector = obsidianFixtureConnector();
+    const router = new ToolRouter([connector], undefined, [], {
+      semanticTools: {
+        searchPersonalContext: { enabled: true, sourceIds: ['obsidian'] },
+      },
+    });
+    await router.initialize();
+
+    const result = await router.callTool('search_personal_context', { query: 'launch' }, client('chatgpt', false, [
+      { sourceId: 'obsidian', actions: ['search'] },
+    ]));
+    const parsed = JSON.parse(result.content[0].type === 'text' ? result.content[0].text : '{}');
+
+    expect(parsed).toMatchObject({
+      query: 'launch',
+      ranking: 'per_source_keyword_union',
+      results: [
+        {
+          item_id: 'projects/launch.md',
+          source_id: 'obsidian',
+          source_type: 'obsidian',
+          actions: ['read_context_item'],
+        },
+      ],
+    });
+  });
+
+  it('reads allowed semantic context items without enabling raw tools', async () => {
+    const connector = obsidianFixtureConnector();
+    const router = new ToolRouter([connector], undefined, [], {
+      semanticTools: {
+        readContextItem: { enabled: true, sourceIds: ['obsidian'] },
+      },
+    });
+    await router.initialize();
+
+    const result = await router.callTool(
+      'read_context_item',
+      { source_id: 'obsidian', item_id: 'projects/launch.md' },
+      client('chatgpt', false, [{ sourceId: 'obsidian', actions: ['read'] }]),
+    );
+    const parsed = JSON.parse(result.content[0].type === 'text' ? result.content[0].text : '{}');
+
+    expect(parsed).toMatchObject({
+      source_id: 'obsidian',
+      item_id: 'projects/launch.md',
+      mime_type: 'text/markdown',
+      content: '# Launch\nShip it.',
+    });
+  });
 });
 
 function client(
@@ -280,5 +351,40 @@ function client(
     source: 'token',
     rawToolsEnabled,
     permissions,
+  };
+}
+
+function obsidianFixtureConnector(): Connector {
+  return {
+    id: 'obsidian',
+    displayName: 'obsidian',
+    initialize: vi.fn(),
+    shutdown: vi.fn(),
+    listTools: vi.fn(async () => [
+      { name: 'search_notes', description: 'Search notes', inputSchema: { type: 'object', properties: {} } },
+      { name: 'read_note', description: 'Read a note', inputSchema: { type: 'object', properties: {} } },
+    ]),
+    callTool: vi.fn(async (name: string) => {
+      if (name === 'search_notes') {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({
+                results: [{ path: 'projects/launch.md', snippet: 'launch plan' }],
+              }),
+            },
+          ],
+        };
+      }
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify({ path: 'projects/launch.md', content: '# Launch\nShip it.' }),
+          },
+        ],
+      };
+    }),
   };
 }

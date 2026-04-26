@@ -1321,6 +1321,53 @@ describe('startHttpServer lifecycle', () => {
     }
   });
 
+  it('serves semantic tools over MCP for clients without raw tool access', async () => {
+    const connector = new SemanticConnector();
+    const router = new ToolRouter([{ connector, sourceId: 'obsidian' }], undefined, [], {
+      semanticTools: {
+        searchPersonalContext: { enabled: true, sourceIds: ['obsidian'] },
+        readContextItem: { enabled: true, sourceIds: ['obsidian'] },
+      },
+    });
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const server = await startHttpServer(router, {
+      port: 0,
+      tokenPath,
+      clients: [
+        {
+          id: 'chatgpt',
+          name: 'ChatGPT',
+          auth: { type: 'token', tokenHash: sha256Hex('chatgpt-token') },
+          rawToolsEnabled: false,
+          permissions: [{ sourceId: 'obsidian', actions: ['search', 'read'] }],
+        },
+      ],
+    });
+
+    try {
+      const sessionId = await initializeMcpSession(server.port, 'chatgpt-token');
+      const listTools = await mcpJsonRequest(server.port, 'chatgpt-token', sessionId, 2, 'tools/list', {});
+      expect(listTools.result.tools.map((tool: { name: string }) => tool.name)).toEqual([
+        'search_personal_context',
+        'read_context_item',
+      ]);
+
+      const search = await mcpJsonRequest(server.port, 'chatgpt-token', sessionId, 3, 'tools/call', {
+        name: 'search_personal_context',
+        arguments: { query: 'launch' },
+      });
+      expect(JSON.parse(search.result.content[0].text).results).toEqual([
+        expect.objectContaining({ item_id: 'projects/launch.md', source_id: 'obsidian' }),
+      ]);
+      expect(connector.calls.map((call) => call.name)).toEqual(['search_notes']);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('revokes outstanding OAuth access tokens the moment the signing key file is rewritten', async () => {
     const router = new ToolRouter([new EmptyConnector()]);
     await router.initialize();
@@ -1470,6 +1517,45 @@ class PolicyConnector implements Connector {
   async callTool(name: string, args: Record<string, unknown>) {
     this.calls.push({ name, args });
     return { content: [{ type: 'text' as const, text: 'ok' }] };
+  }
+
+  async shutdown(): Promise<void> {}
+}
+
+class SemanticConnector implements Connector {
+  readonly id = 'obsidian';
+  readonly displayName = 'obsidian';
+  readonly calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+
+  async initialize(): Promise<void> {}
+
+  async listTools() {
+    return [
+      { name: 'search_notes', description: 'Search notes', inputSchema: { type: 'object', properties: {} } },
+      { name: 'read_note', description: 'Read a note', inputSchema: { type: 'object', properties: {} } },
+    ];
+  }
+
+  async callTool(name: string, args: Record<string, unknown>) {
+    this.calls.push({ name, args });
+    if (name === 'search_notes') {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify({ results: [{ path: 'projects/launch.md', snippet: 'launch plan' }] }),
+          },
+        ],
+      };
+    }
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: JSON.stringify({ path: 'projects/launch.md', content: '# Launch\nShip it.' }),
+        },
+      ],
+    };
   }
 
   async shutdown(): Promise<void> {}
