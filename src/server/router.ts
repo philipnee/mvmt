@@ -1,11 +1,26 @@
 import { CallToolResult, Connector, ToolDefinition } from '../connectors/types.js';
 import { isLikelyWriteTool, isMemPalaceWriteTool } from '../connectors/write-policy.js';
-import { PermissionConfig } from '../config/schema.js';
+import { PermissionConfig, SemanticToolsConfig } from '../config/schema.js';
 import { PatternRedactorAuditEvent, ToolResultPlugin } from '../plugins/types.js';
 import { AuditLogger, summarizeArgs } from '../utils/audit.js';
 import { ClientIdentity } from './client-identity.js';
 
 type PermissionAction = PermissionConfig['actions'][number];
+type ToolKind = 'raw' | 'semantic';
+type SemanticToolName = 'search_personal_context' | 'read_context_item';
+
+interface ToolEntry {
+  connector: Connector;
+  originalName: string;
+  sourceId: string;
+  requiredAction: PermissionAction;
+  namespacedName: string;
+  toolKind: ToolKind;
+}
+
+export interface ToolRouterOptions {
+  semanticTools?: SemanticToolsConfig;
+}
 
 export interface RouterConnector {
   connector: Connector;
@@ -18,30 +33,31 @@ export interface NamespacedTool {
   connectorId: string;
   sourceId: string;
   requiredAction: PermissionAction;
+  toolKind: ToolKind;
   description: string;
   inputSchema: Record<string, unknown>;
 }
 
 export class ToolRouter {
-  private readonly toolMap = new Map<string, {
-    connector: Connector;
-    originalName: string;
-    sourceId: string;
-    requiredAction: PermissionAction;
-  }>();
+  private readonly toolMap = new Map<string, ToolEntry>();
+  private readonly toolsBySource = new Map<string, ToolEntry[]>();
   private readonly allTools: NamespacedTool[] = [];
+  private readonly semanticToolDefinitions: NamespacedTool[] = [];
   private readonly connectors: RouterConnector[];
+  private readonly semanticTools: SemanticToolsConfig;
 
   constructor(
     connectors: Array<Connector | RouterConnector>,
     private readonly audit?: AuditLogger,
     private readonly plugins: ToolResultPlugin[] = [],
+    options: ToolRouterOptions = {},
   ) {
     this.connectors = connectors.map((entry) => (
       'connector' in entry
         ? entry
         : { connector: entry, sourceId: entry.id }
     ));
+    this.semanticTools = options.semanticTools ?? {};
   }
 
   async initialize(): Promise<void> {
@@ -57,12 +73,19 @@ export class ToolRouter {
           throw new Error(`Duplicate tool name after namespacing: ${namespacedName}`);
         }
 
-        this.toolMap.set(namespacedName, {
+        const entry: ToolEntry = {
           connector,
           originalName: tool.name,
           sourceId,
           requiredAction,
-        });
+          namespacedName,
+          toolKind: 'raw',
+        };
+
+        this.toolMap.set(namespacedName, entry);
+        const sourceTools = this.toolsBySource.get(sourceId) ?? [];
+        sourceTools.push(entry);
+        this.toolsBySource.set(sourceId, sourceTools);
 
         this.allTools.push({
           namespacedName,
@@ -70,15 +93,23 @@ export class ToolRouter {
           connectorId: connector.id,
           sourceId,
           requiredAction,
+          toolKind: 'raw',
           description: `[${connector.displayName}] ${tool.description}`,
           inputSchema: normalizeInputSchema(tool),
         });
       }
     }
+
+    this.semanticToolDefinitions.push(...buildSemanticToolDefinitions());
   }
 
   getAllTools(identity?: ClientIdentity): NamespacedTool[] {
-    return this.allTools.filter((tool) => isToolAllowed(tool, identity)).map((tool) => ({ ...tool }));
+    return [
+      ...this.allTools.filter((tool) => isToolAllowed(tool, identity)).map((tool) => ({ ...tool })),
+      ...this.semanticToolDefinitions
+        .filter((tool) => this.isSemanticToolVisible(tool.namespacedName as SemanticToolName, identity))
+        .map((tool) => ({ ...tool })),
+    ];
   }
 
   async callTool(
@@ -86,6 +117,10 @@ export class ToolRouter {
     args: Record<string, unknown>,
     identity?: ClientIdentity,
   ): Promise<CallToolResult> {
+    if (isSemanticToolName(namespacedName)) {
+      return this.callSemanticTool(namespacedName, args, identity);
+    }
+
     const entry = this.toolMap.get(namespacedName);
     if (!entry) {
       throw new Error(`Unknown tool: ${namespacedName}`);
@@ -127,6 +162,158 @@ export class ToolRouter {
     }
   }
 
+  private async callSemanticTool(
+    name: SemanticToolName,
+    args: Record<string, unknown>,
+    identity?: ClientIdentity,
+  ): Promise<CallToolResult> {
+    const start = Date.now();
+    const redactions: NonNullable<import('../utils/audit.js').AuditEntry['redactions']> = [];
+    let result: CallToolResult | undefined;
+    let threw = false;
+
+    try {
+      result = name === 'search_personal_context'
+        ? await this.searchPersonalContext(args, identity)
+        : await this.readContextItem(args, identity);
+
+      for (const plugin of this.plugins) {
+        const output = await plugin.process({
+          connectorId: 'mvmt',
+          toolName: name,
+          originalName: name,
+          args,
+          result,
+        });
+        result = output.result;
+        redactions.push(...flattenRedactionEvents(output.auditEvents ?? []));
+      }
+      return result;
+    } catch (err) {
+      threw = true;
+      result = {
+        content: [
+          {
+            type: 'text',
+            text: `Error: ${err instanceof Error ? err.message : 'Unknown error'}`,
+          },
+        ],
+        isError: true,
+      };
+      return result;
+    } finally {
+      this.recordAudit(
+        { connector: { id: 'mvmt', displayName: 'mvmt' } as Connector },
+        name,
+        args,
+        start,
+        result,
+        threw,
+        redactions,
+        identity,
+        result?.isError ? semanticErrorText(result) : undefined,
+      );
+    }
+  }
+
+  private async searchPersonalContext(
+    args: Record<string, unknown>,
+    identity?: ClientIdentity,
+  ): Promise<CallToolResult> {
+    const query = requireString(args.query, 'query');
+    const requestedSourceIds = optionalStringArray(args.source_ids);
+    const limit = normalizeLimit(args.limit);
+    const sourceIds = this.allowedSemanticSources('search_personal_context', identity, requestedSourceIds);
+    const results: PersonalContextSearchResult[] = [];
+    const warnings: string[] = [];
+
+    for (const sourceId of sourceIds) {
+      if (results.length >= limit) break;
+      const adapter = this.findSemanticAdapter(sourceId, 'search');
+      if (!adapter) {
+        warnings.push(`source ${sourceId} has no supported search adapter`);
+        continue;
+      }
+
+      const raw = await adapter.connector.callTool(adapter.originalName, buildSearchArgs(adapter.originalName, query, limit));
+      if (raw.isError) {
+        warnings.push(`source ${sourceId} search failed: ${extractToolText(raw).slice(0, 160)}`);
+        continue;
+      }
+
+      for (const item of normalizeSearchResults(sourceId, sourceTypeFor(adapter), query, raw)) {
+        results.push(item);
+        if (results.length >= limit) break;
+      }
+    }
+
+    return jsonResult({
+      query,
+      ranking: 'per_source_keyword_union',
+      results,
+      ...(warnings.length > 0 ? { warnings } : {}),
+    });
+  }
+
+  private async readContextItem(args: Record<string, unknown>, identity?: ClientIdentity): Promise<CallToolResult> {
+    const sourceId = requireString(args.source_id, 'source_id');
+    const itemId = requireString(args.item_id, 'item_id');
+    const allowedSources = this.allowedSemanticSources('read_context_item', identity, [sourceId]);
+    if (!allowedSources.includes(sourceId)) {
+      return accessDeniedResult(`missing_permission source=${sourceId} action=read`);
+    }
+
+    const adapter = this.findSemanticAdapter(sourceId, 'read');
+    if (!adapter) return accessDeniedResult(`source ${sourceId} has no supported read adapter`);
+
+    const raw = await adapter.connector.callTool(adapter.originalName, buildReadArgs(adapter.originalName, itemId));
+    if (raw.isError) return raw;
+    const parsed = parseToolJson(raw);
+    const content = typeof parsed?.content === 'string' ? parsed.content : extractToolText(raw);
+    const title = typeof parsed?.path === 'string' ? titleFromLocator(parsed.path) : titleFromLocator(itemId);
+
+    return jsonResult({
+      source_id: sourceId,
+      item_id: itemId,
+      mime_type: sourceTypeFor(adapter) === 'obsidian' ? 'text/markdown' : 'text/plain',
+      title,
+      content,
+      metadata: objectMetadata(parsed, ['path', 'tags']),
+    });
+  }
+
+  private isSemanticToolVisible(name: SemanticToolName, identity?: ClientIdentity): boolean {
+    return this.allowedSemanticSources(name, identity).length > 0;
+  }
+
+  private allowedSemanticSources(
+    name: SemanticToolName,
+    identity?: ClientIdentity,
+    requestedSourceIds?: string[],
+  ): string[] {
+    const config = name === 'search_personal_context'
+      ? this.semanticTools.searchPersonalContext
+      : this.semanticTools.readContextItem;
+    if (!config || config.enabled === false) return [];
+    const action: PermissionAction = name === 'search_personal_context' ? 'search' : 'read';
+    const requested = requestedSourceIds ? new Set(requestedSourceIds) : undefined;
+    return config.sourceIds.filter((sourceId) => (
+      (!requested || requested.has(sourceId)) &&
+      semanticSourceAllowed(sourceId, action, identity) &&
+      Boolean(this.findSemanticAdapter(sourceId, action))
+    ));
+  }
+
+  private findSemanticAdapter(sourceId: string, action: PermissionAction): ToolEntry | undefined {
+    const tools = this.toolsBySource.get(sourceId) ?? [];
+    const preferred = action === 'search'
+      ? ['search_personal_context', 'search_notes', 'search_files', 'mempalace_search', 'mempalace_kg_search']
+      : ['read_context_item', 'read_note', 'read_file', 'read_text_file'];
+    return preferred
+      .map((name) => tools.find((tool) => tool.originalName === name))
+      .find((tool): tool is ToolEntry => Boolean(tool));
+  }
+
   private recordAudit(
     entry: { connector: Connector },
     namespacedName: string,
@@ -160,15 +347,13 @@ function isToolAllowed(tool: NamespacedTool, identity?: ClientIdentity): boolean
 }
 
 function toolDeniedReason(
-  tool: { sourceId: string; requiredAction: PermissionAction },
+  tool: { sourceId: string; requiredAction: PermissionAction; toolKind?: ToolKind },
   identity?: ClientIdentity,
 ): string | undefined {
   if (!identity || identity.isLegacyDefault) return undefined;
+  if (tool.toolKind === 'semantic') return undefined;
   if (!identity.rawToolsEnabled) return 'raw_tools_disabled';
-  const allowedActions = identity.permissions
-    .filter((permission) => permission.sourceId === tool.sourceId)
-    .flatMap((permission) => permission.actions);
-  if (allowedActions.includes(tool.requiredAction)) return undefined;
+  if (semanticSourceAllowed(tool.sourceId, tool.requiredAction, identity)) return undefined;
   return `missing_permission source=${tool.sourceId} action=${tool.requiredAction}`;
 }
 
@@ -178,6 +363,190 @@ function inferRequiredAction(toolName: string): PermissionAction {
   if (isLikelyWriteTool(lower)) return 'write';
   if (lower.includes('search') || lower.startsWith('find_') || lower.startsWith('query_')) return 'search';
   return 'read';
+}
+
+interface PersonalContextSearchResult {
+  item_id: string;
+  source_id: string;
+  source_type: 'filesystem' | 'obsidian' | 'mempalace' | 'generic';
+  title: string;
+  snippet: string;
+  locator: string;
+  actions: ['read_context_item'];
+}
+
+function buildSemanticToolDefinitions(): NamespacedTool[] {
+  return [
+    {
+      namespacedName: 'search_personal_context',
+      originalName: 'search_personal_context',
+      connectorId: 'mvmt',
+      sourceId: 'mvmt',
+      requiredAction: 'search',
+      toolKind: 'semantic',
+      description: 'Search configured personal context sources and return source-attributed keyword results.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Keyword or phrase to search for' },
+          source_ids: { type: 'array', items: { type: 'string' }, description: 'Optional source IDs to search' },
+          limit: { type: 'number', description: 'Maximum total results. Default 8, max 20' },
+        },
+        required: ['query'],
+      },
+    },
+    {
+      namespacedName: 'read_context_item',
+      originalName: 'read_context_item',
+      connectorId: 'mvmt',
+      sourceId: 'mvmt',
+      requiredAction: 'read',
+      toolKind: 'semantic',
+      description: 'Read a specific item returned by search_personal_context.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          source_id: { type: 'string', description: 'Source ID returned by search_personal_context' },
+          item_id: { type: 'string', description: 'Item ID returned by search_personal_context' },
+        },
+        required: ['source_id', 'item_id'],
+      },
+    },
+  ];
+}
+
+function isSemanticToolName(value: string): value is SemanticToolName {
+  return value === 'search_personal_context' || value === 'read_context_item';
+}
+
+function semanticSourceAllowed(sourceId: string, action: PermissionAction, identity?: ClientIdentity): boolean {
+  if (!identity || identity.isLegacyDefault) return true;
+  return identity.permissions.some((permission) => (
+    permission.sourceId === sourceId && permission.actions.includes(action)
+  ));
+}
+
+function requireString(value: unknown, field: string): string {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new Error(`${field} is required`);
+  }
+  return value.trim();
+}
+
+function optionalStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0);
+}
+
+function normalizeLimit(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 8;
+  return Math.max(1, Math.min(20, Math.floor(value)));
+}
+
+function buildSearchArgs(toolName: string, query: string, limit: number): Record<string, unknown> {
+  if (toolName === 'search_notes') return { query, maxResults: limit };
+  if (toolName === 'search_files') return { path: '.', pattern: query };
+  return { query, limit };
+}
+
+function buildReadArgs(toolName: string, itemId: string): Record<string, unknown> {
+  if (toolName === 'read_note') return { notePath: itemId };
+  if (toolName === 'read_file' || toolName === 'read_text_file') return { path: itemId };
+  return { item_id: itemId };
+}
+
+function normalizeSearchResults(
+  sourceId: string,
+  sourceType: PersonalContextSearchResult['source_type'],
+  query: string,
+  raw: CallToolResult,
+): PersonalContextSearchResult[] {
+  const parsed = parseToolJson(raw);
+  const rawResults = Array.isArray(parsed?.results) ? parsed.results : [];
+  const results: PersonalContextSearchResult[] = [];
+
+  for (const item of rawResults) {
+    if (!item || typeof item !== 'object') continue;
+    const record = item as Record<string, unknown>;
+    const locator = stringValue(record.path) ?? stringValue(record.file) ?? stringValue(record.id) ?? stringValue(record.title);
+    if (!locator) continue;
+    const snippet = stringValue(record.snippet) ?? stringValue(record.text) ?? stringValue(record.content) ?? query;
+    results.push({
+      item_id: locator,
+      source_id: sourceId,
+      source_type: sourceType,
+      title: stringValue(record.title) ?? titleFromLocator(locator),
+      snippet: snippet.slice(0, 500),
+      locator,
+      actions: ['read_context_item'],
+    });
+  }
+
+  return results;
+}
+
+function parseToolJson(raw: CallToolResult): Record<string, unknown> | undefined {
+  const text = extractToolText(raw);
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function extractToolText(raw: CallToolResult): string {
+  return raw.content
+    .filter((item): item is { type: 'text'; text: string } => item.type === 'text')
+    .map((item) => item.text)
+    .join('\n');
+}
+
+function jsonResult(value: unknown): CallToolResult {
+  return { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }] };
+}
+
+function accessDeniedResult(reason: string): CallToolResult {
+  return {
+    content: [{ type: 'text', text: `Error: access denied (${reason}).` }],
+    isError: true,
+  };
+}
+
+function sourceTypeFor(entry: ToolEntry): PersonalContextSearchResult['source_type'] {
+  const fingerprint = `${entry.sourceId} ${entry.connector.id} ${entry.connector.displayName} ${entry.originalName}`.toLowerCase();
+  if (fingerprint.includes('obsidian')) return 'obsidian';
+  if (fingerprint.includes('mempalace')) return 'mempalace';
+  if (fingerprint.includes('file')) return 'filesystem';
+  return 'generic';
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function titleFromLocator(locator: string): string {
+  const normalized = locator.replace(/\\/g, '/');
+  const leaf = normalized.split('/').filter(Boolean).at(-1) ?? normalized;
+  return leaf.replace(/\.md$/i, '') || locator;
+}
+
+function objectMetadata(value: Record<string, unknown> | undefined, keys: string[]): Record<string, string | string[]> {
+  const metadata: Record<string, string | string[]> = {};
+  if (!value) return metadata;
+  for (const key of keys) {
+    const entry = value[key];
+    if (typeof entry === 'string') metadata[key] = entry;
+    if (Array.isArray(entry) && entry.every((item) => typeof item === 'string')) metadata[key] = entry;
+  }
+  return metadata;
+}
+
+function semanticErrorText(result: CallToolResult): string | undefined {
+  const text = extractToolText(result);
+  return text.startsWith('Error: ') ? text.slice('Error: '.length, 180) : undefined;
 }
 
 function flattenRedactionEvents(
