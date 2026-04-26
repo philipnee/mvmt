@@ -19,7 +19,7 @@ import {
 } from './oauth.js';
 import { rateLimit } from './rate-limit.js';
 import { ClientConfig } from '../config/schema.js';
-import { attachClientIdentity, isQuarantined, resolveClientIdentity } from './client-identity.js';
+import { attachClientIdentity, ClientIdentity, isQuarantined, readClientIdentity, resolveClientIdentity } from './client-identity.js';
 
 // Rate limits are defense-in-depth against brute-force and DoS,
 // primarily meaningful when mvmt is exposed via a tunnel. Auth-gated
@@ -34,6 +34,7 @@ const DEFAULT_HEALTH_RATE_LIMIT = { windowMs: 60_000, max: 120 };
 type McpSession = {
   transport: StreamableHTTPServerTransport;
   server: Server;
+  clientIdentity?: ClientIdentity;
   lastActivity: number;
 };
 
@@ -79,14 +80,14 @@ export interface HttpRequestLogEntry {
   clientId?: string;
 }
 
-export function createMcpServer(router: ToolRouter): Server {
+export function createMcpServer(router: ToolRouter, clientIdentity?: ClientIdentity): Server {
   const server = new Server(
     { name: 'mvmt', version: '0.1.0' },
     { capabilities: { tools: {} } },
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: router.getAllTools().map((tool) => ({
+    tools: router.getAllTools(clientIdentity).map((tool) => ({
       name: tool.namespacedName,
       description: tool.description,
       inputSchema: tool.inputSchema as { type: 'object'; properties?: Record<string, object>; required?: string[] },
@@ -95,7 +96,7 @@ export function createMcpServer(router: ToolRouter): Server {
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     try {
-      const result = await router.callTool(request.params.name, request.params.arguments ?? {});
+      const result = await router.callTool(request.params.name, request.params.arguments ?? {}, clientIdentity);
       return result as any;
     } catch (err) {
       return {
@@ -571,7 +572,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     res.json({
       status: 'ok',
       uptime: Math.floor(process.uptime()),
-      tools: router.getAllTools().length,
+      tools: router.getAllTools(readClientIdentity(_req)).length,
       sessions: sessions.size,
     });
   });
@@ -621,6 +622,10 @@ async function handleMcpRequest(
 
   if (sessionId && sessions.has(sessionId)) {
     const session = sessions.get(sessionId)!;
+    if (!sameClientIdentity(session.clientIdentity, readClientIdentity(req))) {
+      res.status(403).json({ error: 'mcp_session_client_mismatch' });
+      return;
+    }
     session.lastActivity = Date.now();
     if (isStandaloneSseRequest(req)) {
       session.transport.closeStandaloneSSEStream();
@@ -637,7 +642,8 @@ async function handleMcpRequest(
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: () => randomUUID(),
   });
-  const server = createMcpServer(router);
+  const clientIdentity = readClientIdentity(req);
+  const server = createMcpServer(router, clientIdentity);
 
   transport.onerror = (error) => {
     if (isBenignDuplicateSseConflict(error)) {
@@ -656,7 +662,7 @@ async function handleMcpRequest(
   await transport.handleRequest(req, res, req.body);
 
   if (transport.sessionId) {
-    sessions.set(transport.sessionId, { transport, server, lastActivity: Date.now() });
+    sessions.set(transport.sessionId, { transport, server, clientIdentity, lastActivity: Date.now() });
   }
 }
 
@@ -664,7 +670,7 @@ async function handleStatelessMcpRequest(req: Request, res: Response, router: To
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
   });
-  const server = createMcpServer(router);
+  const server = createMcpServer(router, readClientIdentity(req));
 
   transport.onerror = (error) => {
     if (isBenignDuplicateSseConflict(error)) {
@@ -676,6 +682,10 @@ async function handleStatelessMcpRequest(req: Request, res: Response, router: To
 
   await server.connect(transport);
   await transport.handleRequest(req, res, req.body);
+}
+
+function sameClientIdentity(left: ClientIdentity | undefined, right: ClientIdentity | undefined): boolean {
+  return left?.id === right?.id;
 }
 
 function authLogKind(req: Request): string {

@@ -1281,6 +1281,46 @@ describe('startHttpServer lifecycle', () => {
     }
   });
 
+  it('filters MCP tools/list and denies tool calls by resolved client permissions', async () => {
+    const connector = new PolicyConnector();
+    const router = new ToolRouter([{ connector, sourceId: 'workspace' }]);
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const server = await startHttpServer(router, {
+      port: 0,
+      tokenPath,
+      clients: [
+        {
+          id: 'searcher',
+          name: 'Search-only client',
+          auth: { type: 'token', tokenHash: sha256Hex('search-token') },
+          rawToolsEnabled: true,
+          permissions: [{ sourceId: 'workspace', actions: ['search'] }],
+        },
+      ],
+    });
+
+    try {
+      const sessionId = await initializeMcpSession(server.port, 'search-token');
+      const listTools = await mcpJsonRequest(server.port, 'search-token', sessionId, 2, 'tools/list', {});
+      expect(listTools.result.tools.map((tool: { name: string }) => tool.name)).toEqual([
+        'proxy_filesystem__search_files',
+      ]);
+
+      const denied = await mcpJsonRequest(server.port, 'search-token', sessionId, 3, 'tools/call', {
+        name: 'proxy_filesystem__read_file',
+        arguments: { path: '/tmp/a' },
+      });
+      expect(denied.result.isError).toBe(true);
+      expect(denied.result.content[0].text).toContain('missing_permission source=workspace action=read');
+      expect(connector.calls).toEqual([]);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('revokes outstanding OAuth access tokens the moment the signing key file is rewritten', async () => {
     const router = new ToolRouter([new EmptyConnector()]);
     await router.initialize();
@@ -1413,6 +1453,28 @@ class EmptyConnector implements Connector {
   async shutdown(): Promise<void> {}
 }
 
+class PolicyConnector implements Connector {
+  readonly id = 'proxy_filesystem';
+  readonly displayName = 'filesystem';
+  readonly calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+
+  async initialize(): Promise<void> {}
+
+  async listTools() {
+    return [
+      { name: 'search_files', description: 'Search files', inputSchema: { type: 'object', properties: {} } },
+      { name: 'read_file', description: 'Read a file', inputSchema: { type: 'object', properties: {} } },
+    ];
+  }
+
+  async callTool(name: string, args: Record<string, unknown>) {
+    this.calls.push({ name, args });
+    return { content: [{ type: 'text' as const, text: 'ok' }] };
+  }
+
+  async shutdown(): Promise<void> {}
+}
+
 function canListenOn(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const server = createServer();
@@ -1517,4 +1579,60 @@ function expectAccessTokenAudience(accessToken: string, signingKeyPath: string, 
 
 function sha256Hex(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+async function initializeMcpSession(port: number, token: string): Promise<string> {
+  const response = await fetch(`http://127.0.0.1:${port}/mcp`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/json, text/event-stream',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-03-26',
+        capabilities: {},
+        clientInfo: { name: 'mvmt-policy-test', version: '0.0.0' },
+      },
+    }),
+  });
+  expect(response.status).toBe(200);
+  const sessionId = response.headers.get('mcp-session-id');
+  expect(sessionId).toBeTruthy();
+  await response.text();
+  return sessionId!;
+}
+
+async function mcpJsonRequest(
+  port: number,
+  token: string,
+  sessionId: string,
+  id: number,
+  method: string,
+  params: Record<string, unknown>,
+): Promise<any> {
+  const response = await fetch(`http://127.0.0.1:${port}/mcp`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/json, text/event-stream',
+      'Content-Type': 'application/json',
+      'Mcp-Protocol-Version': '2025-03-26',
+      'Mcp-Session-Id': sessionId,
+    },
+    body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
+  });
+  expect(response.status).toBe(200);
+  return parseMcpResponse(await response.text());
+}
+
+function parseMcpResponse(text: string): any {
+  if (text.trimStart().startsWith('{')) return JSON.parse(text);
+  const dataLine = text.split('\n').find((line) => line.startsWith('data: '));
+  if (!dataLine) throw new Error(`Could not parse MCP response: ${text}`);
+  return JSON.parse(dataLine.slice('data: '.length));
 }
