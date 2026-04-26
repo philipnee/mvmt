@@ -15,8 +15,8 @@ server:
   access: local
 
 proxy:
-  - name: filesystem
-    source: manual
+  - id: workspace
+    name: filesystem
     transport: stdio
     command: npx
     args:
@@ -27,8 +27,8 @@ proxy:
     writeAccess: false
     enabled: true
 
-  - name: mempalace
-    source: mempalace
+  - id: mempalace
+    name: mempalace
     transport: stdio
     command: /Users/you/.local/pipx/venvs/mempalace/bin/python
     args:
@@ -44,6 +44,37 @@ obsidian:
   path: /Users/you/Documents/ObsidianVault
   enabled: true
   writeAccess: false
+
+clients:
+  - id: codex
+    name: Codex CLI
+    auth:
+      type: token
+      tokenHash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    rawToolsEnabled: true
+    permissions:
+      - sourceId: workspace
+        actions: [search, read, write]
+      - sourceId: obsidian
+        actions: [search, read]
+
+  - id: chatgpt
+    name: ChatGPT
+    auth:
+      type: oauth
+      oauthClientIds: ["chatgpt-mvmt"]
+    rawToolsEnabled: false
+    permissions:
+      - sourceId: obsidian
+        actions: [search, read]
+
+semanticTools:
+  searchPersonalContext:
+    enabled: true
+    sourceIds: [workspace, obsidian]
+  readContextItem:
+    enabled: true
+    sourceIds: [workspace, obsidian]
 
 plugins:
   - name: pattern-redactor
@@ -143,8 +174,9 @@ A list of external MCP servers that mvmt proxies. Each entry launches a child pr
 
 | Field | Default | Description |
 | --- | --- | --- |
+| `id` | `name` | Stable source ID used by client permissions and semantic tools. |
 | `name` | — | Identifier used in tool namespacing (e.g. `proxy_filesystem__read_file`). |
-| `source` | — | Optional label for where this entry came from (e.g. `manual`). |
+| `source` | — | Legacy setup-provenance label. Accepted for old configs but ignored at runtime. |
 | `transport` | `stdio` | `stdio` spawns a child process. `http` connects to an existing HTTP MCP server. |
 | `command` | — | Required for `stdio`. The command to run. |
 | `args` | `[]` | Arguments passed to the command. |
@@ -168,6 +200,32 @@ Configures the native Obsidian vault connector. This connector reads markdown fi
 | `path` | — | Absolute path to your Obsidian vault. |
 | `enabled` | `true` | Set to `false` to disable the connector. |
 | `writeAccess` | `false` | When `true`, exposes `append_to_daily` for writing to daily notes. |
+
+The native Obsidian source ID is always `obsidian`.
+
+### `clients`
+
+Optional per-client policy. When omitted, mvmt preserves legacy single-token behavior: the owner/session token can use the configured tool surface. When present, `/mcp` requires a configured client token or mapped OAuth client ID, and the owner/session token is no longer a data-plane credential.
+
+| Field | Description |
+| --- | --- |
+| `id` | Stable client ID used in audit and policy. Lowercase letters, numbers, `_`, and `-`. |
+| `name` | Human-readable client name. |
+| `auth.type` | `token` for local bearer-token clients, or `oauth` for web clients. |
+| `auth.tokenHash` | SHA-256 hex hash of the client bearer token. Plaintext tokens are not stored. |
+| `auth.oauthClientIds` | OAuth `client_id` values mapped to this client. Unknown OAuth client IDs are quarantined when clients are configured. |
+| `rawToolsEnabled` | Whether raw connector tools are listed and callable for this client. |
+| `permissions` | Source/action grants. Actions are `search`, `read`, `write`, and `memory_write`. |
+
+### `semanticTools`
+
+Optional high-level tools backed by configured sources. These tools are useful for clients that should search/read context without seeing raw connector tools.
+
+| Field | Description |
+| --- | --- |
+| `searchPersonalContext` | Exposes `search_personal_context` for sources where the client has `search`. Retrieval is keyword union, not embedding ranking. |
+| `readContextItem` | Exposes `read_context_item` for sources where the client has `read`. |
+| `sourceIds` | Source IDs the semantic tool may use. The client must also have the matching source/action permission. |
 
 ### `plugins`
 

@@ -16,6 +16,8 @@ Most MCP clients let you add servers through their settings UI. You only need tw
 
 Stdio mode (Claude Desktop) is the exception — it launches mvmt directly and does not need a token.
 
+If `clients[]` is configured in `~/.mvmt/config.yaml`, HTTP clients should use their configured client token instead of the owner/session token. The owner/session token remains the legacy data-plane credential only when no `clients[]` policy exists.
+
 ## Remote OAuth clients
 
 Web clients that connect through a public HTTPS tunnel use OAuth/PKCE instead of a bearer token. mvmt will only authorize a client if its exact callback URL is registered first.
@@ -38,7 +40,7 @@ curl -X POST https://your-public-mvmt-host/register \
   }'
 ```
 
-Use the same `client_id` and exact `redirect_uri` during `/authorize`.
+Use the same `client_id` and exact `redirect_uri` during `/authorize`. When `clients[]` is configured, map that OAuth `client_id` to a named client before expecting access to tools; unknown OAuth client IDs are rejected as quarantined.
 
 ## Claude Desktop
 

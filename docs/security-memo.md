@@ -22,7 +22,7 @@ Future connectors should follow the same pattern: exact scope first, read-only d
 
 ## Token Handling
 
-HTTP auth uses a 256-bit bearer token stored at `~/.mvmt/.session-token` with mode `600` on non-Windows systems.
+HTTP auth uses a 256-bit owner/session bearer token stored at `~/.mvmt/.session-token` with mode `600` on non-Windows systems.
 
 - `mvmt start` generates a fresh token.
 - `mvmt show` prints the current token without changing it.
@@ -30,11 +30,23 @@ HTTP auth uses a 256-bit bearer token stored at `~/.mvmt/.session-token` with mo
 
 The HTTP server validates against the token file on each request. This makes token rotation effective without restarting the server, but clients that cached the old token still need to be updated or restarted.
 
+When `clients[]` is configured, `/mcp` requests resolve to a named client identity instead of the owner/session token. A client can authenticate with a configured token hash or with an OAuth access token whose `client_id` is mapped to that client. Unknown OAuth client IDs are rejected as quarantined until the operator explicitly maps them.
+
+Client policy controls:
+
+- whether raw connector tools are visible at all,
+- which source IDs the client can use,
+- which actions are allowed for each source (`search`, `read`, `write`, `memory_write`).
+
+The owner/session token remains the compatibility credential when no `clients[]` policy exists. Once policy is configured, it is no longer accepted as a `/mcp` data-plane credential.
+
 ## Known Limits
 
 Localhost traffic is plaintext. A process running as the same OS user can usually read local files and process state anyway, so the OS user remains the main trust boundary.
 
-There is no per-client permission model yet. Any authenticated HTTP client can see the same configured connectors.
+The per-client permission model is enforced for raw tool listing and raw tool calls. It is configured in YAML today; there is not yet an admin UI or token issuance CLI.
+
+The high-level `search_personal_context` and `read_context_item` tools are available only when configured under `semanticTools`. Retrieval is keyword-union across supported adapters, not embedding search or semantic ranking.
 
 There is no managed remote relay yet. For remote access, use a narrow config and read-only scopes where possible. Quick tunnels are temporary; use a named tunnel or reserved domain for a stable URL.
 
@@ -54,8 +66,9 @@ When the redactor matches, audit entries include the matched pattern name and co
 
 ## Near-Term Security Priorities
 
-- Per-client connector scopes.
-- Rate limiting for HTTP mode.
+- Admin UI for client keys, permissions, and semantic tool mappings.
+- Token issuance/revocation CLI for `clients[]`.
+- `save_personal_memory` with explicit `memory_write` permission and clear audit behavior.
 - Clear remote relay design before marketing internet access.
 - Audit log rotation.
 - Stronger write policies for future native connectors such as Postgres.
