@@ -78,9 +78,10 @@ Proxy connectors still need mvmt-side guardrails:
 
 - Stdio children get scrubbed environment variables.
 - Known write tools are hidden and rejected when `writeAccess: false`.
+- Raw tool visibility and calls are filtered by per-client source/action policy when `clients[]` is configured.
 - Tool calls still go through plugins and audit logging.
 
-HTTP proxy write gates are not complete in v0. Treat HTTP proxy connectors as advanced/manual configuration.
+HTTP proxy connectors use the same write-tool policy as stdio proxy connectors.
 
 ### MemPalace proxy setup
 

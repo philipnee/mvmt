@@ -19,12 +19,15 @@ This project follows the spirit of Keep a Changelog and uses semantic versioning
 - Build specs and `rules.md` removed from the public tracked surface.
 - `mvmt start -i` interactive control prompt with token, status, URL, and live-log controls.
 - Typed connector setup registry (`src/connectors/setup-registry.ts`) so each connector owns its own detection, prompting, and config application.
+- Optional `clients[]` policy with per-client auth bindings, raw-tool visibility, and source/action permissions.
+- Optional `semanticTools` config for `search_personal_context` and `read_context_item`.
 
 ### Changed
 
 - Internal refactor: `src/cli/start.ts` split into focused modules (`connector-loader`, `interactive`, `tunnel-controller`). Per-connector setup extracted into `src/connectors/{filesystem,obsidian,mempalace}-setup.ts`. Shared `saveConfig()` consolidated on `src/config/loader.ts`.
 - `PluginSchema` is now a single-variant `z.discriminatedUnion('name', ...)` so adding a second plugin is a schema addition rather than a structural refactor.
 - OAuth `/authorize` now defaults a missing `resource` parameter to the instance's canonical `/mcp` resource for client compatibility, while preserving token audience binding and still rejecting explicit wrong resources.
+- Tool listing, tool calls, health tool counts, and audit entries are now client-identity aware when `clients[]` is configured.
 
 ### Deprecated
 
@@ -58,5 +61,5 @@ This project follows the spirit of Keep a Changelog and uses semantic versioning
 
 - Tunnel mode is experimental.
 - OAuth/tunnel auth is not production-ready.
-- No per-client connector scoping yet.
+- No admin UI or token issuance CLI yet.
 - No native Postgres, SQLite, or Git connector yet.

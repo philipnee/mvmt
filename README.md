@@ -44,8 +44,10 @@ For source installs, connector setup, client tokens, and troubleshooting, see th
 | Interactive start mode | supported |
 | Built-in pattern-based redactor plugin | supported, opt-in during `mvmt config setup` or first `mvmt serve` |
 | Tunnel mode | supported for personal remote access; quick tunnel URLs are temporary |
-| Managed remote relay / per-client remote access | not in v0 |
-| HTTP proxy write gates | incomplete; advanced/manual config only |
+| Per-client tool scopes | supported via config; admin UI and token issuance CLI are not yet shipped |
+| High-level context tools | supported for configured search/read sources with keyword-union retrieval |
+| Managed remote relay | not in v0 |
+| HTTP proxy write gates | supported |
 
 ## Client Compatibility
 
@@ -66,13 +68,16 @@ Every file and data access in mvmt is gated. There is no open mode.
 - HTTP mode binds to `127.0.0.1`, not `0.0.0.0`.
 - HTTP requests to `/mcp` and `/health` require a bearer token.
 - The bearer token is stored at `~/.mvmt/.session-token`, reused across restarts, and rotated explicitly with `mvmt token rotate`.
+- Optional `clients[]` entries map local bearer tokens or OAuth client IDs to per-client tool permissions.
 - Browser requests from non-localhost origins are rejected unless allowlisted.
 - Write access is opt-in per connector.
+- Raw tool visibility and calls are filtered by client/source/action policy when `clients[]` is configured.
+- High-level `search_personal_context` and `read_context_item` tools can expose configured read/search sources without exposing raw connector tools.
 - Stdio child processes receive a scrubbed environment.
 - Optional pattern-based redactor can warn, redact, or block configured regex matches in tool results.
 - Tool calls are appended to `~/.mvmt/audit.log`.
 
-Not yet enforced: TLS on localhost, per-client tokens, rate limiting, and full write gates for HTTP proxy connectors.
+Not yet shipped: admin UI, token issuance CLI, memory-write semantic tool, managed relay, and TLS on localhost.
 
 ## Project Docs
 
@@ -113,6 +118,8 @@ See [Client Setup](docs/client-setup.md) for step-by-step instructions for Claud
 - **`server`** — port, allowed origins, and whether to start a tunnel for public access.
 - **`proxy`** — external MCP servers that mvmt proxies (e.g. filesystem and MemPalace).
 - **`obsidian`** — the native Obsidian vault connector.
+- **`clients`** — optional per-client auth bindings and source/action permissions.
+- **`semanticTools`** — optional high-level context tools backed by allowed sources.
 - **`plugins`** — security plugins that inspect tool results before they reach clients (e.g. the pattern-based redactor).
 
 You should not need to write this file by hand. To re-run setup, use `mvmt config setup`. To inspect it, run `mvmt config`. To validate it, run `mvmt doctor`.
@@ -322,10 +329,12 @@ Every file and data access in mvmt is gated. There is no open mode.
 - **Origin allowlist** — browser requests from non-localhost origins are rejected unless explicitly allowed.
 - **Environment scrubbing** — stdio child processes receive only an allowlist of env vars.
 - **Write gates** — read-only by default per connector; write tools are hidden and rejected unless enabled.
+- **Per-client policy** — optional `clients[]` entries filter raw tool visibility and calls by source/action permission. Unknown OAuth client IDs are rejected as quarantined when policy is configured.
+- **Semantic context tools** — optional `search_personal_context` and `read_context_item` tools provide a smaller read/search surface for clients that should not see raw connector tools.
 - **Pattern redactor** — opt-in regex scrubbing of tool results before they reach clients.
 - **Audit log** — every tool call appended to `~/.mvmt/audit.log` as JSONL with mode `600`.
 
-Not yet enforced: TLS on localhost, per-client connector scoping, and write gates for HTTP proxy connectors.
+Not yet shipped: admin UI, token issuance CLI, memory-write semantic tool, managed relay, and TLS on localhost.
 
 See [Security Memo](docs/security-memo.md) for design notes and [Audit Log](docs/audit-log.md) for log format and queries.
 
@@ -364,7 +373,8 @@ Planned work is focused on safer long-running use and better local data coverage
 
 - Fast file indexer with Chroma's embedded JS/TS version.
 - Full key management: named keys, rotation, revocation, expiration.
-- Per-client permissions and connector scoping.
+- Admin UI for client keys, permissions, and semantic tool mappings.
+- `save_personal_memory` with explicit memory-write permission and audit visibility.
 - Runtime permission changes for folders, vaults, and connector write access.
 - Remote access hardening guides for Cloudflare Named Tunnels, Cloudflare Access, and rate limiting.
 - SQLite connector with per-table read/write permissions.

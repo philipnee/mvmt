@@ -53,6 +53,7 @@ It is not a connector registry, marketplace, or bundled catalog of third-party s
 |  |  | - bearer token       |                                                 ||
 |  |  | - origin check       |                                                 ||
 |  |  | - OAuth/PKCE bridge  |                                                 ||
+|  |  | - client identity    |                                                 ||
 |  |  +----------+-----------+                                                 ||
 |  |             |                                                             ||
 |  |             v                                                             ||
@@ -60,6 +61,8 @@ It is not a connector registry, marketplace, or bundled catalog of third-party s
 |  |  | Tool router          |                                                 ||
 |  |  |                      |                                                 ||
 |  |  | namespaces tools     |                                                 ||
+|  |  | filters by policy    |                                                 ||
+|  |  | semantic tools       |                                                 ||
 |  |  | routes calls         |                                                 ||
 |  |  | applies plugins      |                                                 ||
 |  |  | writes audit log     |                                                 ||
@@ -144,29 +147,29 @@ Tunnel mode provides public HTTPS access for cloud and web MCP clients. Quick tu
 
 ## Request Pipeline
 
-Every tool call follows the same path.
+Every tool list and tool call follows the same path.
 
 ```text
-+---------+     +--------------+     +------------+     +-------------+     +----------+
-| client  | --> | auth/origin  | --> | write gate | --> | tool router | --> | connector|
-+---------+     +--------------+     +------------+     +------+------+     +----+-----+
-                                                                        ^          |
-                                                                        |          v
-                                                                        |   +-------------+
-                                                                        |   | raw result  |
-                                                                        |   +-------------+
-                                                                        |          |
-                                                                        |          v
-                                                                        |   +-------------+
-                                                                        +-- | plugins     |
-                                                                            | redactor    |
-                                                                            +------+------+
-                                                                                   |
-                                                                                   v
-                                                                            +-------------+
-                                                                            | audit log   |
-                                                                            | ~/.mvmt/    |
-                                                                            +-------------+
++---------+     +--------------+     +----------------+     +-------------+     +----------+
+| client  | --> | auth/origin  | --> | client policy  | --> | tool router | --> | connector|
++---------+     +--------------+     +----------------+     +------+------+     +----+-----+
+                                                                              ^          |
+                                                                              |          v
+                                                                              |   +-------------+
+                                                                              |   | raw result  |
+                                                                              |   +-------------+
+                                                                              |          |
+                                                                              |          v
+                                                                              |   +-------------+
+                                                                              +-- | plugins     |
+                                                                                  | redactor    |
+                                                                                  +------+------+
+                                                                                         |
+                                                                                         v
+                                                                                  +-------------+
+                                                                                  | audit log   |
+                                                                                  | ~/.mvmt/    |
+                                                                                  +-------------+
 ```
 
 ## Tool Names
@@ -183,6 +186,19 @@ mvmt namespaces tools by connector ID so different connectors can expose tools w
 | obsidian           | read_note            | obsidian__read_note            |
 +--------------------+----------------------+--------------------------------+
 ```
+
+When `semanticTools` is configured, mvmt also exposes high-level tools without connector prefixes:
+
+```text
++-------------------------+------------------------------------------------+
+| Tool                    | Purpose                                        |
++-------------------------+------------------------------------------------+
+| search_personal_context | Keyword-union retrieval across allowed sources |
+| read_context_item       | Read an item returned by search                |
++-------------------------+------------------------------------------------+
+```
+
+These tools are policy-aware. A client can see and call them only for configured sources where its permissions include the required action.
 
 ## Shutdown
 
