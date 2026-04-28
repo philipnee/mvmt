@@ -217,6 +217,7 @@ export const ConfigSchema = z
   })
   .superRefine((data, ctx) => {
     const knownSourceIds = collectKnownSourceIds(data);
+    validateUniqueSourceIds(data, ctx);
     const seenClientIds = new Set<string>();
     // Track auth bindings across clients so config order does not silently
     // become an authorization decision when two clients share the same
@@ -288,6 +289,35 @@ export const ConfigSchema = z
       }
     }
   });
+
+function validateUniqueSourceIds(
+  data: { proxy: ProxyConfig[]; sources: FolderSourceConfig[]; obsidian?: ObsidianConfig },
+  ctx: z.RefinementCtx,
+): void {
+  const seen = new Map<string, { path: (string | number)[] }>();
+  const track = (sourceId: string, issuePath: (string | number)[]) => {
+    const previous = seen.get(sourceId);
+    if (previous) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `duplicate sourceId "${sourceId}"; first seen at ${previous.path.join('.')}`,
+        path: issuePath,
+      });
+      return;
+    }
+    seen.set(sourceId, { path: issuePath });
+  };
+
+  for (const [index, proxy] of data.proxy.entries()) {
+    track(resolveProxySourceId(proxy), ['proxy', index, proxy.id ? 'id' : 'name']);
+  }
+  for (const [index, source] of data.sources.entries()) {
+    track(source.id, ['sources', index, 'id']);
+  }
+  if (data.obsidian) {
+    track(OBSIDIAN_SOURCE_ID, ['obsidian']);
+  }
+}
 
 // resolveProxySourceId returns the policy-stable source id for a proxy
 // entry (id when set, otherwise name). Exported so policy enforcement

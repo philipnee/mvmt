@@ -6,6 +6,7 @@ import { runConfigSetup, showConfig } from '../src/cli/config.js';
 import { doctor } from '../src/cli/doctor.js';
 import { init } from '../src/cli/init.js';
 import { reindex } from '../src/cli/reindex.js';
+import { addSource, editSource, listSources, removeSource } from '../src/cli/sources.js';
 import { start } from '../src/cli/start.js';
 import {
   configureTunnel,
@@ -81,6 +82,58 @@ program
   .option('-c, --config <path>', 'Config file path')
   .action(async (options: { config?: string }) => {
     await reindex(options);
+  });
+
+const sourcesCommand = program
+  .command('sources')
+  .description('Manage prototype text-index folder sources')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (options: { config?: string }) => {
+    await listSources(options);
+  });
+
+sourcesCommand
+  .command('list')
+  .description('List configured folder sources')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (options: { config?: string }) => {
+    await listSources(options);
+  });
+
+sourcesCommand
+  .command('add [id] [path]')
+  .description('Add a folder source')
+  .option('-c, --config <path>', 'Config file path')
+  .option('--write', 'Allow write/delete tools for this folder')
+  .option('--read-only', 'Keep this folder read-only')
+  .option('--exclude <pattern>', 'Exclude glob pattern (repeatable)', collectValues)
+  .option('--protect <pattern>', 'Protected write/delete glob pattern (repeatable)', collectValues)
+  .option('--disabled', 'Add the source disabled')
+  .action(async (id: string | undefined, folderPath: string | undefined, options: { config?: string; write?: boolean; readOnly?: boolean; exclude?: string[]; protect?: string[]; disabled?: boolean }) => {
+    await addSource(id, folderPath, options);
+  });
+
+sourcesCommand
+  .command('edit [id]')
+  .description('Edit a folder source')
+  .option('-c, --config <path>', 'Config file path')
+  .option('--path <path>', 'New folder path')
+  .option('--write', 'Allow write/delete tools for this folder')
+  .option('--read-only', 'Make this folder read-only')
+  .option('--exclude <pattern>', 'Replace exclude glob patterns (repeatable)', collectValues)
+  .option('--protect <pattern>', 'Replace protected write/delete glob patterns (repeatable)', collectValues)
+  .option('--enable', 'Enable this source')
+  .option('--disable', 'Disable this source')
+  .action(async (id: string | undefined, options: { config?: string; path?: string; write?: boolean; readOnly?: boolean; exclude?: string[]; protect?: string[]; enable?: boolean; disable?: boolean }) => {
+    await editSource(id, options);
+  });
+
+sourcesCommand
+  .command('remove [id]')
+  .description('Remove a folder source')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (id: string | undefined, options: { config?: string }) => {
+    await removeSource(id, options);
   });
 
 const configCommand = program

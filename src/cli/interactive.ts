@@ -7,6 +7,7 @@ import { generateSessionToken, rotateSigningKey, TOKEN_PATH, defaultSigningKeyPa
 import { formatMcpPublicUrl } from '../utils/tunnel.js';
 import { printTokenSummary, readTokenSummary } from './token.js';
 import { printConfigSummary } from './config.js';
+import { printSources, promptAndAddSource, promptAndEditSource, promptAndRemoveSource } from './sources.js';
 import { promptForTunnelConfig } from './tunnel.js';
 import { LoadedConnector } from './connector-loader.js';
 import { TunnelController } from './tunnel-controller.js';
@@ -177,6 +178,18 @@ async function handleInteractiveCommand(
     case 'connectors':
       printConnectorSummary(state.loaded, state.totalTools);
       return;
+    case 'sources':
+      printSources(state.config);
+      return;
+    case 'sources add':
+      await handleSourcesAdd(state);
+      return;
+    case 'sources edit':
+      await handleSourcesEdit(state);
+      return;
+    case 'sources remove':
+      await handleSourcesRemove(state);
+      return;
     default:
       console.log(chalk.yellow(`Unknown command: ${command}`));
       console.log(chalk.dim('Type "help" for commands.'));
@@ -202,6 +215,8 @@ function printInteractiveHelp(): void {
   console.log('  status      show server, connector, token, and log status');
   console.log('  url         show local and public MCP URLs');
   console.log('  connectors  list loaded connectors');
+  console.log('  sources     list text-index folder sources');
+  console.log('  sources add/edit/remove');
   console.log('  clear       clear the terminal');
   console.log('  quit        stop mvmt');
   console.log('');
@@ -239,6 +254,7 @@ function printInteractiveStatus(state: InteractivePromptState): void {
   printTunnelStatus(state);
   printPluginSummary(state.plugins);
   printConnectorSummary(state.loaded, state.totalTools);
+  printSources(state.config);
 }
 
 function printInteractiveUrls(state: InteractivePromptState): void {
@@ -344,6 +360,36 @@ function printConnectorSummary(loaded: LoadedConnector[], totalTools: number): v
     console.log(`  ${chalk.green('ok')} ${entry.connector.id.padEnd(22)} ${String(entry.toolCount).padStart(3)} tools`);
   }
   console.log(`  ${chalk.dim('total'.padEnd(25))} ${String(totalTools).padStart(3)} tools`);
+}
+
+async function handleSourcesAdd(state: InteractivePromptState): Promise<void> {
+  const nextConfig = await promptAndAddSource(state.config);
+  if (!nextConfig) return;
+  state.config.sources = nextConfig.sources;
+  await state.persistConfig();
+  console.log(chalk.green(`Sources saved to ${state.configPath}`));
+  console.log(chalk.dim('Restart mvmt for the running server to load source changes. Run `mvmt reindex` to rebuild the index.'));
+}
+
+async function handleSourcesEdit(state: InteractivePromptState): Promise<void> {
+  const nextConfig = await promptAndEditSource(state.config);
+  if (!nextConfig) return;
+  state.config.sources = nextConfig.sources;
+  await state.persistConfig();
+  console.log(chalk.green(`Sources saved to ${state.configPath}`));
+  console.log(chalk.dim('Restart mvmt for the running server to load source changes. Run `mvmt reindex` to rebuild the index.'));
+}
+
+async function handleSourcesRemove(state: InteractivePromptState): Promise<void> {
+  const nextConfig = await promptAndRemoveSource(state.config);
+  if (!nextConfig) {
+    console.log(chalk.yellow('Source config unchanged.'));
+    return;
+  }
+  state.config.sources = nextConfig.sources;
+  await state.persistConfig();
+  console.log(chalk.green(`Sources saved to ${state.configPath}`));
+  console.log(chalk.dim('Restart mvmt for the running server to load source changes. Run `mvmt reindex` to rebuild the index.'));
 }
 
 function printPluginSummary(plugins: ToolResultPlugin[]): void {

@@ -92,6 +92,16 @@ describe('parseConfig', () => {
     });
   });
 
+  it('rejects duplicate source ids across folder sources and proxy sources', () => {
+    expect(() =>
+      parseConfig({
+        version: 1,
+        proxy: [{ id: 'workspace', name: 'filesystem', command: 'npx' }],
+        sources: [{ id: 'workspace', type: 'folder', path: '/workspace' }],
+      }),
+    ).toThrow(/duplicate sourceId "workspace"/);
+  });
+
   it('parses tunnel server access config', () => {
     const config = parseConfig({
       version: 1,

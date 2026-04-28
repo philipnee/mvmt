@@ -28,6 +28,32 @@ sources:
     enabled: true
 ```
 
+Or use the source commands:
+
+```bash
+mvmt sources add workspace /Users/you/code/mvmt --write \
+  --exclude '.git/**' \
+  --exclude 'node_modules/**' \
+  --exclude '.claude/**' \
+  --protect '.env' \
+  --protect '.env.*' \
+  --protect '.claude/**'
+
+mvmt sources list
+mvmt sources edit workspace --read-only
+mvmt sources edit workspace --path /Users/you/code/other --write
+mvmt sources remove workspace
+```
+
+In interactive mode (`mvmt serve -i`), use:
+
+```text
+sources
+sources add
+sources edit
+sources remove
+```
+
 Client policy uses the same `clients[]` model:
 
 ```yaml
