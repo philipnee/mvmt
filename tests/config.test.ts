@@ -72,6 +72,24 @@ describe('parseConfig', () => {
     expect(config.server.port).toBe(4141);
     expect(config.server.access).toBe('local');
     expect(config.proxy).toEqual([]);
+    expect(config.sources).toEqual([]);
+  });
+
+  it('parses folder sources for the prototype text index', () => {
+    const config = parseConfig({
+      version: 1,
+      sources: [{ id: 'workspace', type: 'folder', path: '~/code/mvmt', writeAccess: true }],
+    });
+
+    expect(config.sources[0]).toMatchObject({
+      id: 'workspace',
+      type: 'folder',
+      path: '~/code/mvmt',
+      exclude: ['.git/**', 'node_modules/**', '.claude/**'],
+      protect: ['.env', '.env.*', '.claude/**'],
+      writeAccess: true,
+      enabled: true,
+    });
   });
 
   it('parses tunnel server access config', () => {

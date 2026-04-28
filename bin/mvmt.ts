@@ -5,6 +5,7 @@ import { addConnector, listConnectors } from '../src/cli/connectors.js';
 import { runConfigSetup, showConfig } from '../src/cli/config.js';
 import { doctor } from '../src/cli/doctor.js';
 import { init } from '../src/cli/init.js';
+import { reindex } from '../src/cli/reindex.js';
 import { start } from '../src/cli/start.js';
 import {
   configureTunnel,
@@ -72,6 +73,14 @@ program
   .action(async (options: { config?: string; json?: boolean; timeoutMs?: string }) => {
     const globalOptions = program.opts<{ updateCheck?: boolean }>();
     await doctor({ ...options, updateCheck: globalOptions.updateCheck !== false });
+  });
+
+program
+  .command('reindex')
+  .description('Rebuild the prototype text context index')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (options: { config?: string }) => {
+    await reindex(options);
   });
 
 const configCommand = program

@@ -129,6 +129,16 @@ export const PluginSchema = z.discriminatedUnion('name', [
 // connector. Used by client permissions and semantic tool source lists.
 export const OBSIDIAN_SOURCE_ID = 'obsidian';
 
+export const FolderSourceSchema = z.object({
+  id: z.string().min(1).regex(/^[a-z0-9][a-z0-9_-]*$/, 'source id must be lowercase alphanum/dash/underscore'),
+  type: z.literal('folder').default('folder'),
+  path: z.string().min(1),
+  exclude: z.array(z.string().min(1)).default(['.git/**', 'node_modules/**', '.claude/**']),
+  protect: z.array(z.string().min(1)).default(['.env', '.env.*', '.claude/**']),
+  writeAccess: z.boolean().default(false),
+  enabled: z.boolean().default(true),
+});
+
 export const PermissionAction = z.enum(['search', 'read', 'write', 'memory_write']);
 
 export const PermissionSchema = z.object({
@@ -196,6 +206,7 @@ export const ConfigSchema = z
       })
       .default({}),
     proxy: z.array(ProxySchema).default([]),
+    sources: z.array(FolderSourceSchema).default([]),
     obsidian: ObsidianSchema.optional(),
     plugins: z.array(PluginSchema).default([]),
     // clients and semanticTools are additive to the v1 schema. When
@@ -285,10 +296,13 @@ export function resolveProxySourceId(proxy: ProxyConfig): string {
   return proxy.id ?? proxy.name;
 }
 
-function collectKnownSourceIds(data: { proxy: ProxyConfig[]; obsidian?: ObsidianConfig }): Set<string> {
+function collectKnownSourceIds(data: { proxy: ProxyConfig[]; sources: FolderSourceConfig[]; obsidian?: ObsidianConfig }): Set<string> {
   const ids = new Set<string>();
   for (const proxy of data.proxy) {
     ids.add(resolveProxySourceId(proxy));
+  }
+  for (const source of data.sources) {
+    ids.add(source.id);
   }
   if (data.obsidian) {
     ids.add(OBSIDIAN_SOURCE_ID);
@@ -298,6 +312,7 @@ function collectKnownSourceIds(data: { proxy: ProxyConfig[]; obsidian?: Obsidian
 
 export type TunnelConfig = z.infer<typeof TunnelSchema>;
 export type ProxyConfig = z.infer<typeof ProxySchema>;
+export type FolderSourceConfig = z.infer<typeof FolderSourceSchema>;
 export type ObsidianConfig = z.infer<typeof ObsidianSchema>;
 export type PatternRedactorPatternConfig = z.infer<typeof PatternRedactorPatternSchema>;
 export type PatternRedactorPluginConfig = z.infer<typeof PatternRedactorPluginSchema>;

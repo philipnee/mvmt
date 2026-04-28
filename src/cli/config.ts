@@ -114,9 +114,23 @@ export function printConfigSummary(
   }
 
   printFilesystemSummary(config.proxy);
+  printTextSourceSummary(config);
   printObsidianSummary(config);
   printMemPalaceSummary(config.proxy);
   printPluginSummary(config);
+}
+
+function printTextSourceSummary(config: MvmtConfig): void {
+  console.log('\nText sources');
+  const sources = config.sources.filter((source) => source.enabled !== false);
+  if (sources.length === 0) {
+    console.log(`  ${chalk.dim('not configured')}`);
+    return;
+  }
+
+  for (const source of sources) {
+    console.log(`  ${source.id}: ${source.path}  ${source.writeAccess ? 'writable' : 'read-only'}`);
+  }
 }
 
 function printFilesystemSummary(proxy: ProxyConfig[]): void {
@@ -187,4 +201,3 @@ function readArgValue(args: string[] = [], name: string): string | undefined {
   if (index === -1) return undefined;
   return args[index + 1];
 }
-

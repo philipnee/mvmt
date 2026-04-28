@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import { TextContextIndex, defaultTextIndexPath } from '../context/text-index.js';
 import { configExists, loadConfig, resolveConfigPath, saveConfig } from '../config/loader.js';
 import { MvmtConfig, TunnelSchema } from '../config/schema.js';
 import { createTemporaryFilesystemConfig, readFilesystemPaths } from './config.js';
@@ -77,13 +78,16 @@ export async function start(options: StartOptions = {}): Promise<void> {
   const config = loadConfig(configPath);
   const port = parsePort(options.port) ?? config.server.port;
   const loaded = await initializeConnectors(config, stdioMode, logger);
+  const textIndex = config.sources.some((source) => source.enabled !== false)
+    ? new TextContextIndex({ sources: config.sources, indexPath: defaultTextIndexPath(configPath) })
+    : undefined;
   const plugins = createPlugins(config.plugins);
   for (const plugin of plugins) {
     emit(`Loaded plugin:${plugin.id}`, stdioMode, logger);
   }
 
-  if (loaded.length === 0) {
-    emit('No connectors loaded. Nothing to serve.', stdioMode, logger, 'error');
+  if (loaded.length === 0 && !textIndex) {
+    emit('No connectors or text sources loaded. Nothing to serve.', stdioMode, logger, 'error');
     emit('Check your config with `mvmt config` or rerun `mvmt config setup`.', stdioMode, logger, 'error');
     process.exit(1);
   }
@@ -95,9 +99,16 @@ export async function start(options: StartOptions = {}): Promise<void> {
     loaded.map((entry) => ({ connector: entry.connector, sourceId: entry.sourceId })),
     audit,
     plugins,
-    { semanticTools: config.semanticTools },
+    { semanticTools: config.semanticTools, contextIndex: textIndex },
   );
   await router.initialize();
+  if (textIndex) {
+    void textIndex.rebuild().then((stats) => {
+      emit(`Text index ready: ${stats.files} files, ${stats.chunks} chunks`, stdioMode, logger);
+    }).catch((err) => {
+      emit(`Text index failed: ${err instanceof Error ? err.message : 'unknown error'}`, stdioMode, logger, 'warn');
+    });
+  }
 
   // Cleanup tasks run on SIGINT/SIGTERM and on startup failure.
   // Tasks are appended as resources are acquired so only initialized
@@ -192,7 +203,15 @@ export async function start(options: StartOptions = {}): Promise<void> {
       verifyToken: (token) => verifySessionTokenValue(token),
     });
     cleanupTasks.push(() => controlServer.close());
-    printStartupBanner(port, loaded, plugins, router.getAllTools().length, tunnel?.url, interactiveMode);
+    printStartupBanner(
+      port,
+      loaded,
+      plugins,
+      router.getAllTools().length,
+      tunnel?.url,
+      interactiveMode,
+      textIndex?.sourceIds().length ?? 0,
+    );
     if (interactiveMode) {
       startInteractivePrompt({
         config,
@@ -259,6 +278,7 @@ function printStartupBanner(
   totalTools: number,
   publicUrl?: string,
   interactiveMode = false,
+  textSourceCount = 0,
 ): void {
   console.log('');
   console.log(chalk.cyan(MVMT_LOGO));
@@ -270,6 +290,9 @@ function printStartupBanner(
   console.log(chalk.bold('Connectors:'));
   for (const entry of loaded) {
     console.log(`  ${chalk.green('ok')} ${entry.connector.id.padEnd(22)} ${String(entry.toolCount).padStart(3)} tools`);
+  }
+  if (textSourceCount > 0) {
+    console.log(`  ${chalk.green('ok')} ${'text-index'.padEnd(22)} ${String(textSourceCount).padStart(3)} sources`);
   }
   console.log(`  ${chalk.dim('total'.padEnd(25))} ${String(totalTools).padStart(3)} tools\n`);
   if (plugins.length > 0) {
