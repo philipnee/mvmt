@@ -1,7 +1,7 @@
 {
   "name": "mvmt",
   "version": "0.1.0",
-  "description": "Expose personal local data through one MCP endpoint",
+  "description": "Mount selected local folders and serve them over MCP",
   "license": "MIT",
   "type": "module",
   "main": "./dist/src/index.js",

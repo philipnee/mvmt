@@ -415,9 +415,11 @@ manual config feature.
 | `mvmt serve --path <dir>` | Temporarily serve one read-only folder |
 | `mvmt reindex` | Rebuild the text index |
 | `mvmt mounts` | List configured mounts |
+| `mvmt mounts --json` | List configured mounts as JSON |
 | `mvmt mounts add [name] [root]` | Add a local folder mount |
 | `mvmt mounts edit [name]` | Edit a mount |
 | `mvmt mounts remove [name]` | Remove a mount |
+| `mvmt mounts remove [name] --yes` | Remove a mount without an interactive confirmation |
 | `mvmt config` | Show the saved config summary |
 | `mvmt config setup` | Rerun guided setup |
 | `mvmt doctor` | Validate config and startup prerequisites |

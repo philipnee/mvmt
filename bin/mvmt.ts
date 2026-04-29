@@ -35,10 +35,17 @@ const program = new Command();
 
 program
   .name('mvmt')
-  .description('Expose personal local data through one MCP endpoint')
+  .description('Mount selected local folders and serve them over MCP')
   .option('-V, --version', 'Print mvmt version and check for updates')
   .option('--no-update-check', 'Skip automatic npm update checks');
 program.showHelpAfterError();
+program.showSuggestionAfterError();
+program.addHelpText('after', examples([
+  ['mvmt serve -i', 'start locally with the interactive prompt'],
+  ['mvmt serve --path ~/Documents', 'serve one read-only folder for this run'],
+  ['mvmt mounts add notes ~/notes --mount-path /notes --read-only', 'add a read-only mount'],
+  ['mvmt doctor', 'validate config and mount roots'],
+]));
 
 program.hook('preAction', async (thisCommand, actionCommand) => {
   const globalOptions = thisCommand.opts<{ updateCheck?: boolean }>();
@@ -61,6 +68,11 @@ program
   .option('--stdio', 'Use stdio transport')
   .option('-i, --interactive', 'Start an interactive control prompt')
   .option('-v, --verbose', 'Verbose logging')
+  .addHelpText('after', examples([
+    ['mvmt serve -i', 'start HTTP mode with the interactive prompt'],
+    ['mvmt serve --stdio', 'start stdio mode for a client that launches mvmt'],
+    ['mvmt serve --path ~/Documents', 'temporarily serve one folder as read-only'],
+  ]))
   .action(async (options: { port?: string; config?: string; path?: string[]; stdio?: boolean; interactive?: boolean; verbose?: boolean }) => {
     await start(options);
   });
@@ -88,7 +100,8 @@ const mountsCommand = program
   .command('mounts')
   .description('Manage local folder mounts')
   .option('-c, --config <path>', 'Config file path')
-  .action(async (options: { config?: string }) => {
+  .option('--json', 'Output as JSON')
+  .action(async (options: { config?: string; json?: boolean }) => {
     await listMounts(options);
   });
 
@@ -96,8 +109,9 @@ mountsCommand
   .command('list')
   .description('List configured mounts')
   .option('-c, --config <path>', 'Config file path')
-  .action(async (options: { config?: string }) => {
-    await listMounts(options);
+  .option('--json', 'Output as JSON')
+  .action(async (options: { config?: string; json?: boolean }, command: Command) => {
+    await listMounts(withInheritedConfig(options, command));
   });
 
 mountsCommand
@@ -107,13 +121,17 @@ mountsCommand
   .option('--mount-path <path>', 'Virtual mount path, such as /notes')
   .option('--write', 'Allow write/remove tools for this mount')
   .option('--read-only', 'Keep this mount read-only')
-  .option('--description <text>', 'Short description shown to agents when listing mounts')
-  .option('--guidance <text>', 'Mount-specific instructions shown to agents when listing mounts')
+  .option('--description <text>', 'Short description shown to clients when listing mounts')
+  .option('--guidance <text>', 'Mount-specific instructions shown to clients when listing mounts')
   .option('--exclude <pattern>', 'Exclude glob pattern (repeatable)', collectValues)
   .option('--protect <pattern>', 'Protected write/remove glob pattern (repeatable)', collectValues)
   .option('--disabled', 'Add the mount disabled')
-  .action(async (name: string | undefined, root: string | undefined, options: { config?: string; mountPath?: string; write?: boolean; readOnly?: boolean; description?: string; guidance?: string; exclude?: string[]; protect?: string[]; disabled?: boolean }) => {
-    await addMount(name, root, options);
+  .addHelpText('after', examples([
+    ['mvmt mounts add notes ~/notes --mount-path /notes --read-only', 'add a read-only notes mount'],
+    ['mvmt mounts add workspace ~/code/mvmt --mount-path /workspace --write', 'add a writable project mount'],
+  ]))
+  .action(async (name: string | undefined, root: string | undefined, options: { config?: string; mountPath?: string; write?: boolean; readOnly?: boolean; description?: string; guidance?: string; exclude?: string[]; protect?: string[]; disabled?: boolean }, command: Command) => {
+    await addMount(name, root, withInheritedConfig(options, command));
   });
 
 mountsCommand
@@ -124,22 +142,27 @@ mountsCommand
   .option('--mount-path <path>', 'New virtual mount path, such as /notes')
   .option('--write', 'Allow write/remove tools for this mount')
   .option('--read-only', 'Make this mount read-only')
-  .option('--description <text>', 'Replace the mount description shown to agents')
-  .option('--guidance <text>', 'Replace the mount-specific instructions shown to agents')
+  .option('--description <text>', 'Replace the mount description shown to clients')
+  .option('--guidance <text>', 'Replace the mount-specific instructions shown to clients')
   .option('--exclude <pattern>', 'Replace exclude glob patterns (repeatable)', collectValues)
   .option('--protect <pattern>', 'Replace protected write/remove glob patterns (repeatable)', collectValues)
   .option('--enable', 'Enable this mount')
   .option('--disable', 'Disable this mount')
-  .action(async (name: string | undefined, options: { config?: string; root?: string; mountPath?: string; write?: boolean; readOnly?: boolean; description?: string; guidance?: string; exclude?: string[]; protect?: string[]; enable?: boolean; disable?: boolean }) => {
-    await editMount(name, options);
+  .action(async (name: string | undefined, options: { config?: string; root?: string; mountPath?: string; write?: boolean; readOnly?: boolean; description?: string; guidance?: string; exclude?: string[]; protect?: string[]; enable?: boolean; disable?: boolean }, command: Command) => {
+    await editMount(name, withInheritedConfig(options, command));
   });
 
 mountsCommand
   .command('remove [name]')
   .description('Remove a mount')
   .option('-c, --config <path>', 'Config file path')
-  .action(async (name: string | undefined, options: { config?: string }) => {
-    await removeMount(name, options);
+  .option('-y, --yes', 'Remove without prompting for confirmation')
+  .addHelpText('after', examples([
+    ['mvmt mounts remove notes', 'prompt before removing the notes mount'],
+    ['mvmt mounts remove notes --yes', 'remove the notes mount without an interactive prompt'],
+  ]))
+  .action(async (name: string | undefined, options: { config?: string; yes?: boolean }, command: Command) => {
+    await removeMount(name, withInheritedConfig(options, command));
   });
 
 const configCommand = program
@@ -154,8 +177,8 @@ configCommand
   .command('setup')
   .description('Run guided setup and save mvmt config')
   .option('-c, --config <path>', 'Config file path')
-  .action(async (options: { config?: string }) => {
-    await runConfigSetup({ config: options.config });
+  .action(async (options: { config?: string }, command: Command) => {
+    await runConfigSetup({ config: withInheritedConfig(options, command).config });
   });
 
 const tokenCommand = program
@@ -191,48 +214,48 @@ tunnelCommand
   .command('config')
   .description('Choose a different tunnel and save it to config')
   .option('-c, --config <path>', 'Config file path')
-  .action(async (options: { config?: string }) => {
-    await configureTunnel(options);
+  .action(async (options: { config?: string }, command: Command) => {
+    await configureTunnel(withInheritedConfig(options, command));
   });
 
 tunnelCommand
   .command('start')
   .description('Start the configured tunnel for the running mvmt process')
   .option('-c, --config <path>', 'Config file path')
-  .action(async (options: { config?: string }) => {
-    await startTunnelCommand(options);
+  .action(async (options: { config?: string }, command: Command) => {
+    await startTunnelCommand(withInheritedConfig(options, command));
   });
 
 tunnelCommand
   .command('refresh')
   .description('Restart the configured tunnel and print the new URL')
   .option('-c, --config <path>', 'Config file path')
-  .action(async (options: { config?: string }) => {
-    await refreshTunnelCommand(options);
+  .action(async (options: { config?: string }, command: Command) => {
+    await refreshTunnelCommand(withInheritedConfig(options, command));
   });
 
 tunnelCommand
   .command('stop')
   .description('Stop public tunnel exposure without stopping mvmt')
   .option('-c, --config <path>', 'Config file path')
-  .action(async (options: { config?: string }) => {
-    await stopTunnelCommand(options);
+  .action(async (options: { config?: string }, command: Command) => {
+    await stopTunnelCommand(withInheritedConfig(options, command));
   });
 
 const tunnelLogsCommand = tunnelCommand
   .command('logs')
   .description('Show recent tunnel output')
   .option('-c, --config <path>', 'Config file path')
-  .action(async (options: { config?: string }) => {
-    await showTunnelLogs(options);
+  .action(async (options: { config?: string }, command: Command) => {
+    await showTunnelLogs(withInheritedConfig(options, command));
   });
 
 tunnelLogsCommand
   .command('stream')
   .description('Stream live tunnel output from the running mvmt process')
   .option('-c, --config <path>', 'Config file path')
-  .action(async (options: { config?: string }) => {
-    await streamTunnelLogs(options);
+  .action(async (options: { config?: string }, command: Command) => {
+    await streamTunnelLogs(withInheritedConfig(options, command));
   });
 
 const connectorsCommand = program
@@ -243,16 +266,16 @@ connectorsCommand
   .command('list')
   .description('Show supported connector setup status')
   .option('-c, --config <path>', 'Config file path')
-  .action(async (options: { config?: string }) => {
-    await listConnectors(options);
+  .action(async (options: { config?: string }, command: Command) => {
+    await listConnectors(withInheritedConfig(options, command));
   });
 
 connectorsCommand
   .command('add [name]')
   .description('Add a supported connector setup to config')
   .option('-c, --config <path>', 'Config file path')
-  .action(async (name: string | undefined, options: { config?: string }) => {
-    await addConnector(name, options);
+  .action(async (name: string | undefined, options: { config?: string }, command: Command) => {
+    await addConnector(name, withInheritedConfig(options, command));
   });
 
 program
@@ -313,4 +336,18 @@ function normalizeHelpArgs(args: string[]): string[] {
 
 function collectValues(value: string, previous?: string[]): string[] {
   return [...(previous ?? []), value];
+}
+
+function withInheritedConfig<T extends { config?: string }>(options: T, command: Command): T {
+  const parentConfig = command.parent?.opts<{ config?: string }>().config;
+  const config = options.config ?? parentConfig;
+  return config ? { ...options, config } : options;
+}
+
+function examples(rows: Array<[command: string, description: string]>): string {
+  return [
+    '',
+    'Examples:',
+    ...rows.flatMap(([command, description]) => [`  ${command}`, `      ${description}`]),
+  ].join('\n');
 }

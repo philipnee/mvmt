@@ -18,6 +18,7 @@ export async function reindex(options: ReindexOptions = {}): Promise<void> {
   const config = loadConfig(configPath);
   if (config.mounts.length === 0) {
     console.error('No mounts configured.');
+    console.error('Run `mvmt mounts add <name> <folder>` or `mvmt config setup` first.');
     process.exitCode = 1;
     return;
   }
