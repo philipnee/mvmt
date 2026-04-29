@@ -8,7 +8,6 @@ import {
   PluginConfig,
   TunnelConfig,
 } from '../config/schema.js';
-import type { DetectedMemPalace } from '../connectors/mempalace-setup.js';
 import { getSetupRegistry } from '../connectors/setup-registry.js';
 import { pathExists, resolveSetupPath } from '../connectors/setup-paths.js';
 import {
@@ -52,8 +51,7 @@ export async function setupConfig(
     ),
   );
 
-  const detectedMemPalace = (detections.get('mempalace') as DetectedMemPalace | undefined) ?? {};
-  printAvailableConnectors(detectedMemPalace);
+  printAvailableConnectors();
 
   const applySelections: Array<(config: MvmtConfig) => MvmtConfig> = [];
   for (const definition of setupRegistry) {
@@ -283,17 +281,8 @@ function printBanner(): void {
   console.log(`\n${chalk.bold('mvmt')} - local MCP hub\n`);
 }
 
-function printAvailableConnectors(memPalace: DetectedMemPalace): void {
+function printAvailableConnectors(): void {
   console.log('Available connectors:');
   console.log('  - Filesystem manual folder access');
-  const memPalaceStatus =
-    memPalace.command && memPalace.palacePath
-      ? 'detected MCP command and palace path'
-      : memPalace.command
-        ? 'detected MCP command; palace path required'
-        : memPalace.palacePath
-          ? 'detected palace path; MCP command required'
-          : 'not detected; manual path and command supported';
-  console.log(`  - MemPalace ${chalk.dim(memPalaceStatus)}`);
   console.log('');
 }

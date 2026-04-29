@@ -132,7 +132,7 @@ export const LocalFolderMountSchema = z.object({
   enabled: z.boolean().default(true),
 });
 
-export const PermissionAction = z.enum(['search', 'read', 'write', 'memory_write']);
+export const PermissionAction = z.enum(['search', 'read', 'write']);
 
 export const PermissionSchema = z.object({
   path: z.string().min(1).regex(/^\/(?!$)/, 'permission path must be absolute and cannot be /'),

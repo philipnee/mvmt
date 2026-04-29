@@ -20,7 +20,6 @@ describe('connector setup helpers', () => {
 
     expect(statuses.map((status) => [status.name, status.configured, status.addable])).toEqual([
       ['filesystem', false, false],
-      ['mempalace', false, true],
     ]);
   });
 
@@ -36,21 +35,11 @@ describe('connector setup helpers', () => {
           env: {},
           enabled: true,
         },
-        {
-          name: 'mempalace',
-          transport: 'stdio',
-          command: '/venv/bin/python',
-          args: ['-m', 'mempalace.mcp_server'],
-          env: {},
-          writeAccess: false,
-          enabled: true,
-        },
       ],
     });
 
     expect(statuses.map((status) => [status.name, status.configured])).toEqual([
       ['filesystem', true],
-      ['mempalace', true],
     ]);
   });
 
@@ -60,7 +49,7 @@ describe('connector setup helpers', () => {
         ...baseConfig,
         proxy: [
           {
-            name: 'MemPalace',
+            name: 'Search',
             transport: 'stdio',
             command: '/old/python',
             args: [],
@@ -71,10 +60,10 @@ describe('connector setup helpers', () => {
         ],
       },
       {
-        name: 'mempalace',
+        name: 'search',
         transport: 'stdio',
         command: '/new/python',
-        args: ['-m', 'mempalace.mcp_server'],
+        args: ['server'],
         env: {},
         writeAccess: true,
         enabled: true,
@@ -83,10 +72,10 @@ describe('connector setup helpers', () => {
 
     expect(config.proxy).toEqual([
       {
-        name: 'mempalace',
+        name: 'search',
         transport: 'stdio',
         command: '/new/python',
-        args: ['-m', 'mempalace.mcp_server'],
+        args: ['server'],
         env: {},
         writeAccess: true,
         enabled: true,

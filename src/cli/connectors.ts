@@ -11,7 +11,7 @@ export interface ConnectorCommandOptions {
 }
 
 export interface ConnectorSetupStatus {
-  name: 'filesystem' | 'mempalace';
+  name: 'filesystem';
   displayName: string;
   configured: boolean;
   addable: boolean;

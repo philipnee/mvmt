@@ -35,7 +35,7 @@ vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', () => ({
 const { StdioProxyConnector, sanitizeName, buildChildEnv } = await import('../src/connectors/proxy-stdio.js');
 const { HttpProxyConnector } = await import('../src/connectors/proxy-http.js');
 const { createProxyConnector } = await import('../src/connectors/factory.js');
-const { isLikelyWriteTool, isMemPalaceWriteTool } = await import('../src/connectors/write-policy.js');
+const { isLikelyWriteTool } = await import('../src/connectors/write-policy.js');
 
 describe('sanitizeName', () => {
   it('normalizes connector names for namespace prefixes', () => {
@@ -76,18 +76,6 @@ describe('isLikelyWriteTool', () => {
     expect(isLikelyWriteTool('read_file')).toBe(false);
     expect(isLikelyWriteTool('search_notes')).toBe(false);
     expect(isLikelyWriteTool('list_tags')).toBe(false);
-  });
-});
-
-describe('isMemPalaceWriteTool', () => {
-  it('flags known MemPalace write tools and leaves reads alone', () => {
-    expect(isMemPalaceWriteTool('mempalace_kg_add')).toBe(true);
-    expect(isMemPalaceWriteTool('mempalace_add_drawer')).toBe(true);
-    expect(isMemPalaceWriteTool('mempalace_diary_write')).toBe(true);
-    expect(isMemPalaceWriteTool('mempalace_hook_settings')).toBe(true);
-    expect(isMemPalaceWriteTool('mempalace_search')).toBe(false);
-    expect(isMemPalaceWriteTool('mempalace_diary_read')).toBe(false);
-    expect(isMemPalaceWriteTool('mempalace_list_rooms')).toBe(false);
   });
 });
 
@@ -221,62 +209,6 @@ describe('StdioProxyConnector', () => {
     await expect(connector.callTool('create_issue', {})).resolves.toMatchObject({
       isError: true,
       content: [{ type: 'text', text: expect.stringContaining('write access is disabled') }],
-    });
-  });
-
-  it('filters and blocks MemPalace write tools unless write access is explicit', async () => {
-    mocks.connect.mockResolvedValue(undefined);
-    mocks.listTools.mockResolvedValue({
-      tools: [
-        { name: 'mempalace_search', description: '', inputSchema: { type: 'object', properties: {} } },
-        { name: 'mempalace_diary_read', description: '', inputSchema: { type: 'object', properties: {} } },
-        { name: 'mempalace_add_drawer', description: '', inputSchema: { type: 'object', properties: {} } },
-        { name: 'mempalace_kg_add', description: '', inputSchema: { type: 'object', properties: {} } },
-      ],
-    });
-
-    const connector = new StdioProxyConnector({
-      name: 'mempalace',
-      command: '/venv/bin/python',
-      args: ['-m', 'mempalace.mcp_server', '--palace', '/tmp/palace'],
-      env: {},
-      writeAccess: false,
-    });
-
-    await connector.initialize();
-
-    await expect(connector.listTools()).resolves.toEqual([
-      { name: 'mempalace_search', description: '', inputSchema: { type: 'object', properties: {} } },
-      { name: 'mempalace_diary_read', description: '', inputSchema: { type: 'object', properties: {} } },
-    ]);
-    await expect(connector.callTool('mempalace_add_drawer', {})).resolves.toMatchObject({
-      isError: true,
-      content: [{ type: 'text', text: expect.stringContaining('write access is disabled') }],
-    });
-  });
-
-  it('allows MemPalace write tools when write access is explicit', async () => {
-    mocks.connect.mockResolvedValue(undefined);
-    mocks.listTools.mockResolvedValue({
-      tools: [
-        { name: 'mempalace_add_drawer', description: '', inputSchema: { type: 'object', properties: {} } },
-      ],
-    });
-    mocks.callTool.mockResolvedValue({ content: [{ type: 'text', text: 'stored' }] });
-
-    const connector = new StdioProxyConnector({
-      name: 'mempalace',
-      command: '/venv/bin/python',
-      args: ['-m', 'mempalace.mcp_server', '--palace', '/tmp/palace'],
-      env: {},
-      writeAccess: true,
-    });
-
-    await connector.initialize();
-
-    await expect(connector.listTools()).resolves.toHaveLength(1);
-    await expect(connector.callTool('mempalace_add_drawer', {})).resolves.toEqual({
-      content: [{ type: 'text', text: 'stored' }],
     });
   });
 
