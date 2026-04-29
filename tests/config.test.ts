@@ -72,19 +72,22 @@ describe('parseConfig', () => {
     expect(config.server.port).toBe(4141);
     expect(config.server.access).toBe('local');
     expect(config.proxy).toEqual([]);
-    expect(config.sources).toEqual([]);
+    expect(config.mounts).toEqual([]);
   });
 
-  it('parses folder sources for the prototype text index', () => {
+  it('parses local folder mounts for the prototype text index', () => {
     const config = parseConfig({
       version: 1,
-      sources: [{ id: 'workspace', type: 'folder', path: '~/code/mvmt', writeAccess: true }],
+      mounts: [{ name: 'workspace', type: 'local_folder', path: '/workspace', root: '~/code/mvmt', writeAccess: true }],
     });
 
-    expect(config.sources[0]).toMatchObject({
-      id: 'workspace',
-      type: 'folder',
-      path: '~/code/mvmt',
+    expect(config.mounts[0]).toMatchObject({
+      name: 'workspace',
+      type: 'local_folder',
+      path: '/workspace',
+      root: '~/code/mvmt',
+      description: '',
+      guidance: '',
       exclude: ['.git/**', 'node_modules/**', '.claude/**'],
       protect: ['.env', '.env.*', '.claude/**'],
       writeAccess: true,
@@ -92,14 +95,47 @@ describe('parseConfig', () => {
     });
   });
 
-  it('rejects duplicate source ids across folder sources and proxy sources', () => {
+  it('parses mount descriptions and guidance', () => {
+    const config = parseConfig({
+      version: 1,
+      mounts: [
+        {
+          name: 'notes',
+          type: 'local_folder',
+          path: '/notes',
+          root: '~/notes',
+          description: 'Personal notes vault.',
+          guidance: 'Use for reference. Do not write unless asked.',
+        },
+      ],
+    });
+
+    expect(config.mounts[0]).toMatchObject({
+      description: 'Personal notes vault.',
+      guidance: 'Use for reference. Do not write unless asked.',
+    });
+  });
+
+  it('rejects duplicate source ids across mounts and proxy sources', () => {
     expect(() =>
       parseConfig({
         version: 1,
         proxy: [{ id: 'workspace', name: 'filesystem', command: 'npx' }],
-        sources: [{ id: 'workspace', type: 'folder', path: '/workspace' }],
+        mounts: [{ name: 'workspace', type: 'local_folder', path: '/workspace', root: '/workspace' }],
       }),
     ).toThrow(/duplicate sourceId "workspace"/);
+  });
+
+  it('rejects duplicate mount paths', () => {
+    expect(() =>
+      parseConfig({
+        version: 1,
+        mounts: [
+          { name: 'notes', type: 'local_folder', path: '/data', root: '/notes' },
+          { name: 'archive', type: 'local_folder', path: '/data', root: '/archive' },
+        ],
+      }),
+    ).toThrow(/duplicate mount path "\/data"/);
   });
 
   it('parses tunnel server access config', () => {

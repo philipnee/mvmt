@@ -78,8 +78,8 @@ export async function start(options: StartOptions = {}): Promise<void> {
   const config = loadConfig(configPath);
   const port = parsePort(options.port) ?? config.server.port;
   const loaded = await initializeConnectors(config, stdioMode, logger);
-  const textIndex = config.sources.some((source) => source.enabled !== false)
-    ? new TextContextIndex({ sources: config.sources, indexPath: defaultTextIndexPath(configPath) })
+  const textIndex = config.mounts.some((mount) => mount.enabled !== false)
+    ? new TextContextIndex({ mounts: config.mounts, indexPath: defaultTextIndexPath(configPath) })
     : undefined;
   const plugins = createPlugins(config.plugins);
   for (const plugin of plugins) {
@@ -87,7 +87,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
   }
 
   if (loaded.length === 0 && !textIndex) {
-    emit('No connectors or text sources loaded. Nothing to serve.', stdioMode, logger, 'error');
+    emit('No connectors or mounts loaded. Nothing to serve.', stdioMode, logger, 'error');
     emit('Check your config with `mvmt config` or rerun `mvmt config setup`.', stdioMode, logger, 'error');
     process.exit(1);
   }
@@ -115,7 +115,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
   // resources are cleaned up. See registerShutdown for the 5-second
   // force-exit timeout that guards against hung cleanup.
   const cleanupTasks: CleanupTask[] = [...temporaryCleanupTasks, ...loaded.map((entry) => () => entry.connector.shutdown())];
-  const shutdown = registerShutdown(cleanupTasks, stdioMode, logger);
+  const shutdown = registerShutdown(cleanupTasks, stdioMode, logger, { handleSigint: !interactiveMode });
 
   if (stdioMode) {
     const stdio = await startStdioServer(router);
@@ -210,7 +210,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
       router.getAllTools().length,
       tunnel?.url,
       interactiveMode,
-      textIndex?.sourceIds().length ?? 0,
+      textIndex?.mountNames().length ?? 0,
     );
     if (interactiveMode) {
       startInteractivePrompt({
@@ -248,6 +248,7 @@ function registerShutdown(
   cleanupTasks: CleanupTask[],
   stdioMode: boolean,
   logger: Logger,
+  options: { handleSigint?: boolean } = {},
 ): () => Promise<void> {
   let shuttingDown = false;
   const shutdown = async () => {
@@ -266,7 +267,9 @@ function registerShutdown(
     process.exit(0);
   };
 
-  process.once('SIGINT', shutdown);
+  if (options.handleSigint !== false) {
+    process.once('SIGINT', shutdown);
+  }
   process.once('SIGTERM', shutdown);
   return shutdown;
 }
@@ -278,7 +281,7 @@ function printStartupBanner(
   totalTools: number,
   publicUrl?: string,
   interactiveMode = false,
-  textSourceCount = 0,
+  mountCount = 0,
 ): void {
   console.log('');
   console.log(chalk.cyan(MVMT_LOGO));
@@ -291,8 +294,8 @@ function printStartupBanner(
   for (const entry of loaded) {
     console.log(`  ${chalk.green('ok')} ${entry.connector.id.padEnd(22)} ${String(entry.toolCount).padStart(3)} tools`);
   }
-  if (textSourceCount > 0) {
-    console.log(`  ${chalk.green('ok')} ${'text-index'.padEnd(22)} ${String(textSourceCount).padStart(3)} sources`);
+  if (mountCount > 0) {
+    console.log(`  ${chalk.green('ok')} ${'text-index'.padEnd(22)} ${String(mountCount).padStart(3)} mounts`);
   }
   console.log(`  ${chalk.dim('total'.padEnd(25))} ${String(totalTools).padStart(3)} tools\n`);
   if (plugins.length > 0) {

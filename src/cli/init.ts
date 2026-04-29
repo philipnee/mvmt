@@ -116,7 +116,7 @@ export function buildConfig(input: BuildConfigInput): MvmtConfig {
       ...(access.tunnel ? { tunnel: access.tunnel } : {}),
     },
     proxy: [],
-    sources: [],
+    mounts: [],
     plugins: input.plugins ?? [],
   };
 }

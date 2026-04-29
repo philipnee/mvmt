@@ -359,7 +359,7 @@ describe('ToolRouter', () => {
         { sourceId: 'workspace', actions: ['search', 'read'] },
       ]));
       const parsed = JSON.parse(result.content[0].type === 'text' ? result.content[0].text : '{}');
-      expect(parsed.results[0]).toMatchObject({ path: '/workspace/note.md' });
+      expect(parsed.results[0]).toMatchObject({ mount: 'workspace', path: '/workspace/note.md' });
     } finally {
       await fs.rm(tmp, { recursive: true, force: true });
     }
@@ -380,7 +380,7 @@ describe('ToolRouter', () => {
       expect(audit.record).toHaveBeenCalledWith(
         expect.objectContaining({
           clientId: 'chatgpt',
-          deniedReason: 'missing_permission source=workspace action=write',
+          deniedReason: 'missing_permission mount=workspace action=write',
           isError: true,
         }),
       );
@@ -446,10 +446,10 @@ async function createTextIndexFixture(): Promise<{ index: TextContextIndex; tmp:
   await fs.writeFile(path.join(sourceRoot, 'note.md'), 'alpha note', 'utf-8');
   const config = parseConfig({
     version: 1,
-    sources: [{ id: 'workspace', type: 'folder', path: sourceRoot, writeAccess: true }],
+    mounts: [{ name: 'workspace', type: 'local_folder', path: '/workspace', root: sourceRoot, writeAccess: true }],
   });
   const index = new TextContextIndex({
-    sources: config.sources,
+    mounts: config.mounts,
     indexPath: path.join(tmp, 'index.json'),
   });
   await index.rebuild();

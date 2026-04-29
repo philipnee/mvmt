@@ -4,7 +4,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { expandHome } from '../config/loader.js';
-import { FolderSourceConfig } from '../config/schema.js';
+import { LocalFolderMountConfig } from '../config/schema.js';
 
 const TEXT_EXTENSIONS = new Set([
   '.md',
@@ -48,7 +48,7 @@ const CHUNK_SIZE = 1600;
 const CHUNK_OVERLAP = 200;
 
 export interface TextContextIndexOptions {
-  sources: FolderSourceConfig[];
+  mounts: LocalFolderMountConfig[];
   indexPath: string;
 }
 
@@ -58,7 +58,7 @@ export interface TextIndexStats {
 }
 
 export interface TextSearchResult {
-  source_id: string;
+  mount: string;
   path: string;
   chunk_id: string;
   score: number;
@@ -68,15 +68,18 @@ export interface TextSearchResult {
 }
 
 export interface TextListEntry {
-  source_id: string;
+  mount: string;
   path: string;
   type: 'file' | 'directory';
   size: number;
   mtime_ms: number;
+  description?: string;
+  guidance?: string;
+  write_access?: boolean;
 }
 
 export interface TextReadResult {
-  source_id: string;
+  mount: string;
   path: string;
   content: string;
   mime_type: 'text/plain';
@@ -86,7 +89,7 @@ export interface TextReadResult {
 }
 
 interface IndexedFile {
-  source_id: string;
+  mount: string;
   path: string;
   hash: string;
   size: number;
@@ -94,7 +97,7 @@ interface IndexedFile {
 }
 
 interface IndexedChunk {
-  source_id: string;
+  mount: string;
   path: string;
   chunk_id: string;
   text: string;
@@ -109,8 +112,8 @@ interface TextIndexSnapshot {
   chunks: IndexedChunk[];
 }
 
-interface ResolvedSource {
-  config: FolderSourceConfig;
+interface ResolvedMount {
+  config: LocalFolderMountConfig;
   root: string;
 }
 
@@ -119,54 +122,60 @@ export function defaultTextIndexPath(configPath: string): string {
 }
 
 export class TextContextIndex {
-  private readonly sources: ResolvedSource[];
+  private readonly mounts: ResolvedMount[];
 
   constructor(private readonly options: TextContextIndexOptions) {
-    this.sources = options.sources
-      .filter((source) => source.enabled !== false)
-      .map((source) => ({
-        config: source,
-        root: path.resolve(expandHome(source.path)),
-      }));
+    this.mounts = options.mounts
+      .filter((mount) => mount.enabled !== false)
+      .map((mount) => ({
+        config: mount,
+        root: path.resolve(expandHome(mount.root)),
+      }))
+      .sort((a, b) => b.config.path.length - a.config.path.length);
   }
 
-  sourceIds(): string[] {
-    return this.sources.map((source) => source.config.id);
+  mountNames(): string[] {
+    return this.mounts.map((mount) => mount.config.name);
   }
 
-  writableSourceIds(): string[] {
-    return this.sources
-      .filter((source) => source.config.writeAccess)
-      .map((source) => source.config.id);
+  writableMountNames(): string[] {
+    return this.mounts
+      .filter((mount) => mount.config.writeAccess)
+      .map((mount) => mount.config.name);
+  }
+
+  mountNameForPath(inputPath: string): string | undefined {
+    const normalized = normalizeVirtualPath(inputPath);
+    return this.findMount(normalized)?.config.name;
   }
 
   async rebuild(): Promise<TextIndexStats> {
     const files: IndexedFile[] = [];
     const chunks: IndexedChunk[] = [];
 
-    for (const source of this.sources) {
-      await this.indexDirectory(source, source.root, files, chunks);
+    for (const mount of this.mounts) {
+      await this.indexDirectory(mount, mount.root, files, chunks);
     }
 
     await this.writeSnapshot({ version: 1, indexed_at: new Date().toISOString(), files, chunks });
     return { files: files.length, chunks: chunks.length };
   }
 
-  async search(query: string, sourceIds?: string[], limit = 8): Promise<TextSearchResult[]> {
+  async search(query: string, mountNames?: string[], limit = 8): Promise<TextSearchResult[]> {
     const terms = tokenize(query);
     if (terms.length === 0) return [];
 
-    const allowedSources = new Set(sourceIds ?? this.sourceIds());
+    const allowedMounts = new Set(mountNames ?? this.mountNames());
     const snapshot = await this.readSnapshot();
     const ranked = snapshot.chunks
-      .filter((chunk) => allowedSources.has(chunk.source_id))
+      .filter((chunk) => allowedMounts.has(chunk.mount))
       .map((chunk) => ({ chunk, score: scoreText(chunk.text, terms) }))
       .filter((entry) => entry.score > 0)
       .sort((a, b) => b.score - a.score || a.chunk.path.localeCompare(b.chunk.path))
       .slice(0, Math.max(1, Math.min(20, limit)));
 
     return ranked.map(({ chunk, score }) => ({
-      source_id: chunk.source_id,
+      mount: chunk.mount,
       path: chunk.path,
       chunk_id: chunk.chunk_id,
       score,
@@ -178,12 +187,15 @@ export class TextContextIndex {
 
   async list(inputPath = '/'): Promise<TextListEntry[]> {
     if (inputPath === '/' || inputPath.trim() === '') {
-      return this.sources.map((source) => ({
-        source_id: source.config.id,
-        path: `/${source.config.id}`,
+      return this.mounts.map((mount) => ({
+        mount: mount.config.name,
+        path: mount.config.path,
         type: 'directory',
         size: 0,
         mtime_ms: 0,
+        description: mount.config.description,
+        guidance: mount.config.guidance,
+        write_access: mount.config.writeAccess,
       }));
     }
 
@@ -191,7 +203,7 @@ export class TextContextIndex {
     const stat = await fsp.stat(resolved.realPath);
     if (!stat.isDirectory()) {
       return [{
-        source_id: resolved.source.config.id,
+        mount: resolved.mount.config.name,
         path: resolved.virtualPath,
         type: 'file',
         size: stat.size,
@@ -203,13 +215,13 @@ export class TextContextIndex {
     const result: TextListEntry[] = [];
     for (const entry of entries) {
       const relative = joinVirtualRelative(resolved.relativePath, entry.name);
-      if (this.isExcluded(resolved.source, relative)) continue;
+      if (this.isExcluded(resolved.mount, relative)) continue;
       if (!entry.isDirectory() && !isTextPath(entry.name)) continue;
       const realPath = path.join(resolved.realPath, entry.name);
       const itemStat = await fsp.stat(realPath);
       result.push({
-        source_id: resolved.source.config.id,
-        path: `/${resolved.source.config.id}/${relative}`,
+        mount: resolved.mount.config.name,
+        path: joinVirtualPath(resolved.mount.config.path, relative),
         type: entry.isDirectory() ? 'directory' : 'file',
         size: itemStat.size,
         mtime_ms: itemStat.mtimeMs,
@@ -226,7 +238,7 @@ export class TextContextIndex {
     if (stat.size > MAX_TEXT_BYTES) throw new Error(`${resolved.virtualPath} is too large to read as text`);
     const content = await fsp.readFile(resolved.realPath, 'utf-8');
     return {
-      source_id: resolved.source.config.id,
+      mount: resolved.mount.config.name,
       path: resolved.virtualPath,
       content,
       mime_type: 'text/plain',
@@ -259,18 +271,18 @@ export class TextContextIndex {
     return read;
   }
 
-  async delete(inputPath: string): Promise<{ source_id: string; path: string; deleted: true }> {
+  async delete(inputPath: string): Promise<{ mount: string; path: string; deleted: true }> {
     const resolved = this.resolvePath(inputPath);
     this.assertWritable(resolved);
     const stat = await fsp.stat(resolved.realPath);
     if (!stat.isFile()) throw new Error(`${resolved.virtualPath} is not a file`);
     await fsp.unlink(resolved.realPath);
     await this.rebuild();
-    return { source_id: resolved.source.config.id, path: resolved.virtualPath, deleted: true };
+    return { mount: resolved.mount.config.name, path: resolved.virtualPath, deleted: true };
   }
 
   private async indexDirectory(
-    source: ResolvedSource,
+    mount: ResolvedMount,
     directory: string,
     files: IndexedFile[],
     chunks: IndexedChunk[],
@@ -284,10 +296,10 @@ export class TextContextIndex {
 
     for (const entry of entries) {
       const realPath = path.join(directory, entry.name);
-      const relative = toVirtualRelative(path.relative(source.root, realPath));
-      if (this.isExcluded(source, relative)) continue;
+      const relative = toVirtualRelative(path.relative(mount.root, realPath));
+      if (this.isExcluded(mount, relative)) continue;
       if (entry.isDirectory()) {
-        await this.indexDirectory(source, realPath, files, chunks);
+        await this.indexDirectory(mount, realPath, files, chunks);
         continue;
       }
       if (!entry.isFile() || !isTextPath(entry.name)) continue;
@@ -296,46 +308,44 @@ export class TextContextIndex {
       if (stat.size > MAX_TEXT_BYTES) continue;
       const text = await fsp.readFile(realPath, 'utf-8');
       const hash = sha256(text);
-      const virtualPath = `/${source.config.id}/${relative}`;
+      const virtualPath = joinVirtualPath(mount.config.path, relative);
       files.push({
-        source_id: source.config.id,
+        mount: mount.config.name,
         path: virtualPath,
         hash,
         size: stat.size,
         mtime_ms: stat.mtimeMs,
       });
-      chunks.push(...chunkText(source.config.id, virtualPath, text, hash, stat.mtimeMs));
+      chunks.push(...chunkText(mount.config.name, virtualPath, text, hash, stat.mtimeMs));
     }
   }
 
   private resolvePath(inputPath: string): {
-    source: ResolvedSource;
+    mount: ResolvedMount;
     relativePath: string;
     realPath: string;
     virtualPath: string;
   } {
     const normalized = normalizeVirtualPath(inputPath);
-    const [sourceId, ...rest] = normalized.split('/').filter(Boolean);
-    if (!sourceId) throw new Error('path must include a source id, such as /workspace/file.md');
-    const source = this.sources.find((candidate) => candidate.config.id === sourceId);
-    if (!source) throw new Error(`unknown source: ${sourceId}`);
-    const relativePath = toVirtualRelative(rest.join('/'));
-    if (this.isExcluded(source, relativePath)) throw new Error(`${normalized} is excluded`);
-    const realPath = path.resolve(source.root, relativePath);
-    if (!isWithin(source.root, realPath)) throw new Error(`${normalized} escapes source root`);
+    const mount = this.findMount(normalized);
+    if (!mount) throw new Error(`unknown mount for path: ${normalized}`);
+    const relativePath = toVirtualRelative(normalized.slice(mount.config.path.length));
+    if (this.isExcluded(mount, relativePath)) throw new Error(`${normalized} is excluded`);
+    const realPath = path.resolve(mount.root, relativePath);
+    if (!isWithin(mount.root, realPath)) throw new Error(`${normalized} escapes mount root`);
     return {
-      source,
+      mount,
       relativePath,
       realPath,
-      virtualPath: relativePath ? `/${sourceId}/${relativePath}` : `/${sourceId}`,
+      virtualPath: relativePath ? joinVirtualPath(mount.config.path, relativePath) : mount.config.path,
     };
   }
 
-  private assertWritable(resolved: { source: ResolvedSource; relativePath: string; virtualPath: string }): void {
-    if (!resolved.source.config.writeAccess) {
-      throw new Error(`${resolved.source.config.id} is read-only`);
+  private assertWritable(resolved: { mount: ResolvedMount; relativePath: string; virtualPath: string }): void {
+    if (!resolved.mount.config.writeAccess) {
+      throw new Error(`${resolved.mount.config.name} is read-only`);
     }
-    if (this.isProtected(resolved.source, resolved.relativePath)) {
+    if (this.isProtected(resolved.mount, resolved.relativePath)) {
       throw new Error(`${resolved.virtualPath} is protected`);
     }
   }
@@ -346,12 +356,16 @@ export class TextContextIndex {
     }
   }
 
-  private isExcluded(source: ResolvedSource, relativePath: string): boolean {
-    return matchesAny(relativePath, source.config.exclude);
+  private isExcluded(mount: ResolvedMount, relativePath: string): boolean {
+    return matchesAny(relativePath, mount.config.exclude);
   }
 
-  private isProtected(source: ResolvedSource, relativePath: string): boolean {
-    return matchesAny(relativePath, source.config.protect);
+  private isProtected(mount: ResolvedMount, relativePath: string): boolean {
+    return matchesAny(relativePath, mount.config.protect);
+  }
+
+  private findMount(normalizedPath: string): ResolvedMount | undefined {
+    return this.mounts.find((candidate) => pathMatchesMount(normalizedPath, candidate.config.path));
   }
 
   private async readSnapshot(): Promise<TextIndexSnapshot> {
@@ -371,13 +385,13 @@ export class TextContextIndex {
   }
 }
 
-function chunkText(sourceId: string, virtualPath: string, text: string, hash: string, mtimeMs: number): IndexedChunk[] {
+function chunkText(mountName: string, virtualPath: string, text: string, hash: string, mtimeMs: number): IndexedChunk[] {
   const chunks: IndexedChunk[] = [];
   for (let offset = 0; offset < text.length; offset += CHUNK_SIZE - CHUNK_OVERLAP) {
     const chunk = text.slice(offset, offset + CHUNK_SIZE);
     if (chunk.trim().length === 0) continue;
     chunks.push({
-      source_id: sourceId,
+      mount: mountName,
       path: virtualPath,
       chunk_id: `${virtualPath}#${offset}`,
       text: chunk,
@@ -429,6 +443,14 @@ function toVirtualRelative(inputPath: string): string {
 
 function joinVirtualRelative(base: string, leaf: string): string {
   return [base, leaf].filter(Boolean).join('/').replace(/\\/g, '/');
+}
+
+function joinVirtualPath(mountPath: string, relativePath: string): string {
+  return [mountPath.replace(/\/+$/, ''), toVirtualRelative(relativePath)].filter(Boolean).join('/');
+}
+
+function pathMatchesMount(inputPath: string, mountPath: string): boolean {
+  return inputPath === mountPath || inputPath.startsWith(`${mountPath.replace(/\/+$/, '')}/`);
 }
 
 function matchesAny(relativePath: string, patterns: string[]): boolean {

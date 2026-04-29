@@ -288,34 +288,34 @@ export class ToolRouter {
     if (!this.contextIndex) return accessDeniedResult('text_index_disabled');
     if (name === 'search') {
       const query = requireString(args.query, 'query');
-      const requested = optionalStringArray(args.sources);
-      const sourceIds = this.allowedContextSources('search', identity, requested);
+      const requested = optionalStringArray(args.mounts);
+      const mountNames = this.allowedContextMounts('search', identity, requested);
       const limit = normalizeLimit(args.limit);
       return jsonResult({
         query,
         ranking: 'prototype_keyword_count',
-        results: await this.contextIndex.search(query, sourceIds, limit),
+        results: await this.contextIndex.search(query, mountNames, limit),
       });
     }
 
     if (name === 'list') {
       const inputPath = optionalString(args.path) ?? '/';
-      const sourceId = sourceIdFromPath(inputPath);
-      if (sourceId && !contextSourceAllowed(sourceId, 'read', identity)) {
-        return accessDeniedResult(`missing_permission source=${sourceId} action=read`);
+      const mountName = inputPath === '/' ? undefined : this.contextIndex.mountNameForPath(inputPath);
+      if (mountName && !contextSourceAllowed(mountName, 'read', identity)) {
+        return accessDeniedResult(`missing_permission mount=${mountName} action=read`);
       }
       const entries = await this.contextIndex.list(inputPath);
       return jsonResult({
         path: inputPath,
-        entries: entries.filter((entry) => contextSourceAllowed(entry.source_id, 'read', identity)),
+        entries: entries.filter((entry) => contextSourceAllowed(entry.mount, 'read', identity)),
       });
     }
 
     if (name === 'read') {
       const inputPath = requireString(args.path, 'path');
-      const sourceId = sourceIdFromPath(inputPath);
-      if (!sourceId || !contextSourceAllowed(sourceId, 'read', identity)) {
-        return accessDeniedResult(`missing_permission source=${sourceId ?? '(unknown)'} action=read`);
+      const mountName = this.contextIndex.mountNameForPath(inputPath);
+      if (!mountName || !contextSourceAllowed(mountName, 'read', identity)) {
+        return accessDeniedResult(`missing_permission mount=${mountName ?? '(unknown)'} action=read`);
       }
       return jsonResult(await this.contextIndex.read(inputPath));
     }
@@ -324,17 +324,17 @@ export class ToolRouter {
       const inputPath = requireString(args.path, 'path');
       const content = requireText(args.content, 'content');
       const expectedHash = optionalString(args.expected_hash);
-      const sourceId = sourceIdFromPath(inputPath);
-      if (!sourceId || !contextSourceAllowed(sourceId, 'write', identity)) {
-        return accessDeniedResult(`missing_permission source=${sourceId ?? '(unknown)'} action=write`);
+      const mountName = this.contextIndex.mountNameForPath(inputPath);
+      if (!mountName || !contextSourceAllowed(mountName, 'write', identity)) {
+        return accessDeniedResult(`missing_permission mount=${mountName ?? '(unknown)'} action=write`);
       }
       return jsonResult(await this.contextIndex.write(inputPath, content, expectedHash));
     }
 
     const inputPath = requireString(args.path, 'path');
-    const sourceId = sourceIdFromPath(inputPath);
-    if (!sourceId || !contextSourceAllowed(sourceId, 'write', identity)) {
-      return accessDeniedResult(`missing_permission source=${sourceId ?? '(unknown)'} action=write`);
+    const mountName = this.contextIndex.mountNameForPath(inputPath);
+    if (!mountName || !contextSourceAllowed(mountName, 'write', identity)) {
+      return accessDeniedResult(`missing_permission mount=${mountName ?? '(unknown)'} action=write`);
     }
     return jsonResult(await this.contextIndex.delete(inputPath));
   }
@@ -413,7 +413,7 @@ export class ToolRouter {
     if (isSemanticToolName(name)) return this.isSemanticToolVisible(name, identity);
     if (isContextToolName(name)) {
       const action: PermissionAction = name === 'search' ? 'search' : name === 'write' || name === 'delete' ? 'write' : 'read';
-      return this.allowedContextSources(action, identity).length > 0;
+      return this.allowedContextMounts(action, identity).length > 0;
     }
     return false;
   }
@@ -446,15 +446,15 @@ export class ToolRouter {
       .find((tool): tool is ToolEntry => Boolean(tool));
   }
 
-  private allowedContextSources(
+  private allowedContextMounts(
     action: PermissionAction,
     identity?: ClientIdentity,
-    requestedSourceIds?: string[],
+    requestedMountNames?: string[],
   ): string[] {
     if (!this.contextIndex) return [];
-    const requested = requestedSourceIds ? new Set(requestedSourceIds) : undefined;
-    return this.contextIndex.sourceIds().filter((sourceId) => (
-      (!requested || requested.has(sourceId)) && contextSourceAllowed(sourceId, action, identity)
+    const requested = requestedMountNames ? new Set(requestedMountNames) : undefined;
+    return this.contextIndex.mountNames().filter((mountName) => (
+      (!requested || requested.has(mountName)) && contextSourceAllowed(mountName, action, identity)
     ));
   }
 
@@ -568,12 +568,12 @@ function buildContextToolDefinitions(): NamespacedTool[] {
       sourceId: 'mvmt',
       requiredAction: 'search',
       toolKind: 'semantic',
-      description: 'Search permitted text-file sources and return ranked chunks from the local index.',
+      description: 'Search permitted text-file mounts and return ranked chunks from the local index.',
       inputSchema: {
         type: 'object',
         properties: {
           query: { type: 'string', description: 'Keyword or phrase to search for' },
-          sources: { type: 'array', items: { type: 'string' }, description: 'Optional source IDs to search' },
+          mounts: { type: 'array', items: { type: 'string' }, description: 'Optional mount names to search' },
           limit: { type: 'number', description: 'Maximum total results. Default 8, max 20' },
         },
         required: ['query'],
@@ -586,7 +586,7 @@ function buildContextToolDefinitions(): NamespacedTool[] {
       sourceId: 'mvmt',
       requiredAction: 'read',
       toolKind: 'semantic',
-      description: 'List permitted text sources or a directory within one source.',
+      description: 'List permitted mounts or a directory within one mount.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -687,11 +687,6 @@ function optionalString(value: unknown): string | undefined {
 function optionalStringArray(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
   return value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0);
-}
-
-function sourceIdFromPath(inputPath: string): string | undefined {
-  const normalized = inputPath.trim().replace(/^\/+/, '').replace(/\\/g, '/');
-  return normalized.length > 0 ? normalized.split('/')[0] : undefined;
 }
 
 function normalizeLimit(value: unknown): number {

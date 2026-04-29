@@ -114,22 +114,24 @@ export function printConfigSummary(
   }
 
   printFilesystemSummary(config.proxy);
-  printTextSourceSummary(config);
+  printMountSummary(config);
   printObsidianSummary(config);
   printMemPalaceSummary(config.proxy);
   printPluginSummary(config);
 }
 
-function printTextSourceSummary(config: MvmtConfig): void {
-  console.log('\nText sources');
-  const sources = config.sources.filter((source) => source.enabled !== false);
-  if (sources.length === 0) {
+function printMountSummary(config: MvmtConfig): void {
+  console.log('\nMounts');
+  const mounts = config.mounts.filter((mount) => mount.enabled !== false);
+  if (mounts.length === 0) {
     console.log(`  ${chalk.dim('not configured')}`);
     return;
   }
 
-  for (const source of sources) {
-    console.log(`  ${source.id}: ${source.path}  ${source.writeAccess ? 'writable' : 'read-only'}`);
+  for (const mount of mounts) {
+    console.log(`  ${mount.name}: ${mount.path} -> ${mount.root}  ${mount.writeAccess ? 'writable' : 'read-only'}`);
+    if (mount.description) console.log(`    description: ${mount.description}`);
+    if (mount.guidance) console.log(`    guidance: ${mount.guidance}`);
   }
 }
 

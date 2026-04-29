@@ -45,17 +45,24 @@ describe('TextContextIndex', () => {
     await index.rebuild();
 
     await expect(index.list('/')).resolves.toEqual([
-      expect.objectContaining({ path: '/workspace', type: 'directory' }),
+      expect.objectContaining({
+        path: '/workspace',
+        type: 'directory',
+        mount: 'workspace',
+        description: 'Workspace mount',
+        guidance: 'Use for tests.',
+        write_access: true,
+      }),
     ]);
     await expect(index.list('/workspace/docs')).resolves.toEqual([
       expect.objectContaining({ path: '/workspace/docs/guide.md', type: 'file' }),
     ]);
     await expect(index.read('/workspace/docs/guide.md')).resolves.toMatchObject({
-      source_id: 'workspace',
+      mount: 'workspace',
       path: '/workspace/docs/guide.md',
       content: 'setup guide',
     });
-    await expect(index.read('/workspace/../secret.md')).rejects.toThrow(/escapes source root|unknown source/);
+    await expect(index.read('/workspace/../secret.md')).rejects.toThrow(/escapes mount root|unknown mount/);
   });
 
   it('enforces write access, protected paths, and expected hashes', async () => {
@@ -72,20 +79,20 @@ describe('TextContextIndex', () => {
     expect(written.content).toBe('new');
 
     await expect(index.delete('/workspace/draft.md')).resolves.toMatchObject({
-      source_id: 'workspace',
+      mount: 'workspace',
       path: '/workspace/draft.md',
       deleted: true,
     });
     await expect(index.read('/workspace/draft.md')).rejects.toThrow();
   });
 
-  it('rejects writes to read-only sources', async () => {
+  it('rejects writes to read-only mounts', async () => {
     const config = parseConfig({
       version: 1,
-      sources: [{ id: 'workspace', type: 'folder', path: tmp, writeAccess: false }],
+      mounts: [{ name: 'workspace', type: 'local_folder', path: '/workspace', root: tmp, writeAccess: false }],
     });
     const index = new TextContextIndex({
-      sources: config.sources,
+      mounts: config.mounts,
       indexPath: path.join(tmp, 'index.json'),
     });
 
@@ -96,11 +103,14 @@ describe('TextContextIndex', () => {
 function createIndex(root: string): TextContextIndex {
   const config = parseConfig({
     version: 1,
-    sources: [
+    mounts: [
       {
-        id: 'workspace',
-        type: 'folder',
-        path: root,
+        name: 'workspace',
+        type: 'local_folder',
+        path: '/workspace',
+        root,
+        description: 'Workspace mount',
+        guidance: 'Use for tests.',
         exclude: ['.git/**', 'node_modules/**'],
         protect: ['protected/**'],
         writeAccess: true,
@@ -108,7 +118,7 @@ function createIndex(root: string): TextContextIndex {
     ],
   });
   return new TextContextIndex({
-    sources: config.sources,
+    mounts: config.mounts,
     indexPath: path.join(root, 'index.json'),
   });
 }

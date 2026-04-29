@@ -129,10 +129,13 @@ export const PluginSchema = z.discriminatedUnion('name', [
 // connector. Used by client permissions and semantic tool source lists.
 export const OBSIDIAN_SOURCE_ID = 'obsidian';
 
-export const FolderSourceSchema = z.object({
-  id: z.string().min(1).regex(/^[a-z0-9][a-z0-9_-]*$/, 'source id must be lowercase alphanum/dash/underscore'),
-  type: z.literal('folder').default('folder'),
-  path: z.string().min(1),
+export const LocalFolderMountSchema = z.object({
+  name: z.string().min(1).regex(/^[a-z0-9][a-z0-9_-]*$/, 'mount name must be lowercase alphanum/dash/underscore'),
+  type: z.literal('local_folder').default('local_folder'),
+  path: z.string().min(1).regex(/^\/(?!$)/, 'mount path must be absolute and cannot be /'),
+  root: z.string().min(1),
+  description: z.string().default(''),
+  guidance: z.string().default(''),
   exclude: z.array(z.string().min(1)).default(['.git/**', 'node_modules/**', '.claude/**']),
   protect: z.array(z.string().min(1)).default(['.env', '.env.*', '.claude/**']),
   writeAccess: z.boolean().default(false),
@@ -206,7 +209,7 @@ export const ConfigSchema = z
       })
       .default({}),
     proxy: z.array(ProxySchema).default([]),
-    sources: z.array(FolderSourceSchema).default([]),
+    mounts: z.array(LocalFolderMountSchema).default([]),
     obsidian: ObsidianSchema.optional(),
     plugins: z.array(PluginSchema).default([]),
     // clients and semanticTools are additive to the v1 schema. When
@@ -291,7 +294,7 @@ export const ConfigSchema = z
   });
 
 function validateUniqueSourceIds(
-  data: { proxy: ProxyConfig[]; sources: FolderSourceConfig[]; obsidian?: ObsidianConfig },
+  data: { proxy: ProxyConfig[]; mounts: LocalFolderMountConfig[]; obsidian?: ObsidianConfig },
   ctx: z.RefinementCtx,
 ): void {
   const seen = new Map<string, { path: (string | number)[] }>();
@@ -311,8 +314,19 @@ function validateUniqueSourceIds(
   for (const [index, proxy] of data.proxy.entries()) {
     track(resolveProxySourceId(proxy), ['proxy', index, proxy.id ? 'id' : 'name']);
   }
-  for (const [index, source] of data.sources.entries()) {
-    track(source.id, ['sources', index, 'id']);
+  const seenMountPaths = new Map<string, number>();
+  for (const [index, mount] of data.mounts.entries()) {
+    track(mount.name, ['mounts', index, 'name']);
+    const firstMountPath = seenMountPaths.get(mount.path);
+    if (firstMountPath !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `duplicate mount path "${mount.path}"; first seen at mounts.${firstMountPath}.path`,
+        path: ['mounts', index, 'path'],
+      });
+    } else {
+      seenMountPaths.set(mount.path, index);
+    }
   }
   if (data.obsidian) {
     track(OBSIDIAN_SOURCE_ID, ['obsidian']);
@@ -326,13 +340,13 @@ export function resolveProxySourceId(proxy: ProxyConfig): string {
   return proxy.id ?? proxy.name;
 }
 
-function collectKnownSourceIds(data: { proxy: ProxyConfig[]; sources: FolderSourceConfig[]; obsidian?: ObsidianConfig }): Set<string> {
+function collectKnownSourceIds(data: { proxy: ProxyConfig[]; mounts: LocalFolderMountConfig[]; obsidian?: ObsidianConfig }): Set<string> {
   const ids = new Set<string>();
   for (const proxy of data.proxy) {
     ids.add(resolveProxySourceId(proxy));
   }
-  for (const source of data.sources) {
-    ids.add(source.id);
+  for (const mount of data.mounts) {
+    ids.add(mount.name);
   }
   if (data.obsidian) {
     ids.add(OBSIDIAN_SOURCE_ID);
@@ -342,7 +356,7 @@ function collectKnownSourceIds(data: { proxy: ProxyConfig[]; sources: FolderSour
 
 export type TunnelConfig = z.infer<typeof TunnelSchema>;
 export type ProxyConfig = z.infer<typeof ProxySchema>;
-export type FolderSourceConfig = z.infer<typeof FolderSourceSchema>;
+export type LocalFolderMountConfig = z.infer<typeof LocalFolderMountSchema>;
 export type ObsidianConfig = z.infer<typeof ObsidianSchema>;
 export type PatternRedactorPatternConfig = z.infer<typeof PatternRedactorPatternSchema>;
 export type PatternRedactorPluginConfig = z.infer<typeof PatternRedactorPluginSchema>;

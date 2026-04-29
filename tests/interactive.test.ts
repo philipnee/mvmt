@@ -2,7 +2,9 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { 
   InteractiveAuditLogger, 
   formatAuditEntry, 
-  formatHttpRequestEntry 
+  formatHttpRequestEntry,
+  isPromptCancelError,
+  shouldShutdownOnSigint,
 } from '../src/cli/interactive.js';
 import { AuditLogger } from '../src/utils/audit.js';
 
@@ -78,5 +80,21 @@ describe('Formatting helpers', () => {
     expect(formatted).toContain('mcp.request POST /mcp');
     expect(formatted).toContain('client=test-client');
     expect(formatted).toContain('test-detail');
+  });
+});
+
+describe('Interactive prompt control helpers', () => {
+  it('requires a second Ctrl-C within the exit window', () => {
+    expect(shouldShutdownOnSigint(0, 1000)).toBe(false);
+    expect(shouldShutdownOnSigint(1000, 2500)).toBe(true);
+    expect(shouldShutdownOnSigint(1000, 4001)).toBe(false);
+  });
+
+  it('detects Inquirer prompt cancellation errors', () => {
+    const err = new Error('User force closed the prompt with SIGINT');
+    err.name = 'ExitPromptError';
+
+    expect(isPromptCancelError(err)).toBe(true);
+    expect(isPromptCancelError(new Error('regular failure'))).toBe(false);
   });
 });

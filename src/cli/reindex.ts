@@ -16,14 +16,14 @@ export async function reindex(options: ReindexOptions = {}): Promise<void> {
   }
 
   const config = loadConfig(configPath);
-  if (config.sources.length === 0) {
-    console.error('No text sources configured.');
+  if (config.mounts.length === 0) {
+    console.error('No mounts configured.');
     process.exitCode = 1;
     return;
   }
 
   const index = new TextContextIndex({
-    sources: config.sources,
+    mounts: config.mounts,
     indexPath: defaultTextIndexPath(configPath),
   });
   const stats = await index.rebuild();
