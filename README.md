@@ -1,17 +1,29 @@
 # mvmt
 
-**A local-first MCP layer for scoped access to files, vaults, and tools.**
+**Multi-Volume Mount Transport for AI agents.**
 
-mvmt runs as a local MCP server between your data sources and your clients. You choose which folders, vaults, memory palaces, and tools are exposed, with read/write access controlled per source.
+mvmt is a local-first MCP server that exposes selected local folders through one
+permissioned endpoint. Agents see a virtual namespace such as `/notes` and
+`/workspace`; they do not get your whole computer.
 
-- **One server, every client** — Claude, Cursor, Codex, VS Code, and any MCP-compatible tool connect to a single local endpoint.
-- **Read-only by default** — write access is opt-in per connector. Nothing writes unless you said so.
-- **Scoped, not open** — choose exact folders, Obsidian vaults, and MemPalace paths. No full-disk access, no guessing.
-- **Secure out of the box** — bearer-token auth, origin checks, environment scrubbing, audit log, and an optional pattern-based redactor for configured patterns.
-- **Tunnel-ready** — expose mvmt to cloud clients like claude.ai over public HTTPS, with OAuth/PKCE for web clients.
+mvmt is not file sync, cloud storage, or a memory system. Data stays where it
+lives. mvmt decides which mounted paths each client can search, read, and write.
+
+- **Mounts, not full disk access** - add only the folders you want agents to see.
+- **Five stable tools** - `search`, `list`, `read`, `write`, and `remove`.
+- **Read-only by default** - writes require both mount-level write access and
+  client-level `write` permission.
+- **Per-client policy** - bind different API keys or OAuth clients to different
+  path/action permissions.
+- **Agent context per mount** - descriptions and guidance are returned from
+  `list("/")` so agents know what each mounted folder is for.
+- **Tunnel-ready** - expose the same endpoint to web clients over HTTPS with
+  OAuth/PKCE.
 
 > [!WARNING]
-> Remote access is authenticated, but it still exposes your configured local tools beyond your machine. Keep connector scopes narrow before exposing mvmt over a tunnel.
+> Tunnel mode exposes your configured mvmt endpoint beyond your machine. Keep
+> mounts narrow, keep writes disabled unless needed, and use per-client policy
+> before giving remote clients access.
 
 ![mvmt running in interactive mode](docs/assets/mvmt-start-interactive.png)
 
@@ -22,122 +34,253 @@ npm install -g mvmt
 mvmt serve -i
 ```
 
-On first run, `mvmt serve` walks you through folders, connectors, plugins, and local-only vs tunnel access, then starts mvmt in the foreground.
+On first run, `mvmt serve` creates `~/.mvmt/config.yaml`, asks which local
+folders to mount, optionally enables the pattern redactor, then starts the MCP
+server.
 
-For a one-off read-only folder without touching your saved config:
+For a one-off read-only folder without changing the saved config:
 
 ```bash
 mvmt serve --path ~/Documents -i
 ```
 
-For source installs, connector setup, client tokens, and troubleshooting, see the [Setup Guide](docs/setup.md).
+For an existing config, add or edit mounts directly:
+
+```bash
+mvmt mounts add notes ~/Documents/Obsidian --mount-path /notes --read-only \
+  --description "Personal notes and project journals" \
+  --guidance "Search first. Read specific files before answering."
+
+mvmt mounts add workspace ~/code/mvmt --mount-path /workspace --write \
+  --protect ".env" \
+  --protect ".env.*" \
+  --protect ".claude/**"
+
+mvmt mounts list
+mvmt reindex
+mvmt serve -i
+```
+
+At least one enabled mount is required. If no mounts are configured, mvmt has no
+data to serve.
 
 ## Status
 
 | Area | Status |
 | --- | --- |
-| Local filesystem folders | supported, read-only by default |
-| Native Obsidian connector | supported, read-only by default |
-| MemPalace connector setup | supported as stdio proxy, read-only by default |
-| Local Streamable HTTP | supported |
-| Stdio mode | supported |
-| Interactive start mode | supported |
-| Built-in pattern-based redactor plugin | supported, opt-in during `mvmt config setup` or first `mvmt serve` |
-| Tunnel mode | supported for personal remote access; quick tunnel URLs are temporary |
-| Per-client tool scopes | supported via config; admin UI and token issuance CLI are not yet shipped |
-| High-level context tools | supported for configured search/read sources with keyword-union retrieval |
-| Managed remote relay | not in v0 |
-| HTTP proxy write gates | supported |
+| Local folder mounts | supported |
+| Text index | supported as a JSON prototype index beside the config file |
+| MCP tools | `search`, `list`, `read`, `write`, `remove` |
+| Mount management CLI | `mvmt mounts add/edit/remove/list` |
+| Per-client path permissions | supported via `clients[]` config |
+| Local Streamable HTTP | supported on `127.0.0.1` |
+| Stdio mode | supported for clients that launch mvmt directly |
+| OAuth/PKCE for web clients | supported, including Dynamic Client Registration |
+| Tunnel mode | supported for personal remote access |
+| Pattern redactor plugin | supported and opt-in during setup |
+| Legacy proxy connectors | accepted by the schema for compatibility, ignored by the mount-only CLI runtime |
+| Admin UI and managed key issuance | not shipped |
+| Remote/federated mvmt mounts | not shipped |
+| Binary/PDF/image indexing | not shipped |
 
 ## Client Compatibility
 
-| Client | Transport | Status | Auth method | Known issues |
+| Client | Transport | Status | Auth method | Notes |
 | --- | --- | --- | --- | --- |
-| Claude Desktop | stdio | supported | process launch, no HTTP bearer token | Runs its own mvmt process per config |
-| Claude Code | Streamable HTTP | supported | bearer token header | Refresh only after `mvmt token rotate` |
-| Codex CLI | Streamable HTTP | supported | bearer token env var | Start Codex from a shell where the token env var is set |
-| Cursor | Streamable HTTP | expected | bearer token header | Client behavior may vary by Cursor MCP version |
-| VS Code / Copilot | Streamable HTTP | expected | bearer token header | Client behavior may vary by MCP extension/version |
-| claude.ai / ChatGPT web | public HTTPS tunnel | supported remote mode | OAuth/PKCE over tunnel | Requires a public HTTPS URL; the client must either use dynamic client registration or have its exact `redirect_uri` pre-registered |
-| Raw HTTP/curl | Streamable HTTP | debug only | bearer token header | Must follow MCP session initialization rules |
+| Claude Desktop | stdio | supported | process launch | Runs its own mvmt process from the client config |
+| Claude Code | Streamable HTTP | supported | bearer token | Update the client after `mvmt token rotate` |
+| Codex CLI | Streamable HTTP | supported | bearer token | Start Codex with the token available to the client |
+| Cursor | Streamable HTTP | expected | bearer token | Behavior depends on Cursor's MCP implementation |
+| VS Code / Copilot | Streamable HTTP | expected | bearer token | Behavior depends on the MCP extension |
+| claude.ai / ChatGPT web | public HTTPS tunnel | supported remote mode | OAuth/PKCE | Requires a reachable tunnel URL |
+| Raw HTTP/curl | Streamable HTTP | debug only | bearer token | Must follow MCP session initialization rules |
 
-## Security At A Glance
-
-Every file and data access in mvmt is gated. There is no open mode.
-
-- HTTP mode binds to `127.0.0.1`, not `0.0.0.0`.
-- HTTP requests to `/mcp` and `/health` require a bearer token.
-- The bearer token is stored at `~/.mvmt/.session-token`, reused across restarts, and rotated explicitly with `mvmt token rotate`.
-- Optional `clients[]` entries map local bearer tokens or OAuth client IDs to per-client tool permissions.
-- Browser requests from non-localhost origins are rejected unless allowlisted.
-- Write access is opt-in per connector.
-- Raw tool visibility and calls are filtered by client/source/action policy when `clients[]` is configured.
-- High-level `search_personal_context` and `read_context_item` tools can expose configured read/search sources without exposing raw connector tools.
-- Stdio child processes receive a scrubbed environment.
-- Optional pattern-based redactor can warn, redact, or block configured regex matches in tool results.
-- Tool calls are appended to `~/.mvmt/audit.log`.
-
-Not yet shipped: admin UI, token issuance CLI, memory-write semantic tool, managed relay, and TLS on localhost.
-
-## Project Docs
-
-- [Setup guide](docs/setup.md)
-- [Client setup](docs/client-setup.md)
-- [Configuration](docs/configuration.md)
-- [Connectors](docs/connectors.md)
-- [Plugins](docs/plugins.md)
-- [Remote access](docs/remote-access.md)
-- [Audit log](docs/audit-log.md)
-- [Troubleshooting](docs/troubleshooting.md)
-- [Architecture](docs/architecture.md)
-- [Security policy](SECURITY.md)
-- [Security memo](docs/security-memo.md)
-- [Personal memo](docs/personal-memo.md)
-- [Contributing](CONTRIBUTING.md)
-- [Changelog](CHANGELOG.md)
-
-## Client Setup
-
-Most MCP clients let you add servers through their settings UI. You need two things:
+Most HTTP clients need:
 
 - **URL**: `http://127.0.0.1:4141/mcp`
 - **Authorization header**: `Bearer <token from mvmt token>`
 
-Claude Desktop is the exception — it uses stdio mode and launches mvmt directly, so no token is needed.
+Remote web clients use the tunnel URL, usually ending in `/mcp`, and authorize
+through OAuth 2.1 + PKCE. mvmt supports RFC 7591 Dynamic Client Registration.
+Issued OAuth access tokens are audience-bound to the current mvmt resource, so a
+token minted for one mvmt instance cannot be replayed against another.
 
-Remote web clients (ChatGPT, claude.ai) authenticate with OAuth 2.1 + PKCE. mvmt implements RFC 7591 Dynamic Client Registration as the primary path, and OpenAI's auth guide says ChatGPT supports it. In practice, if a web client does not call `/register`, you can still pre-register its exact `redirect_uri` manually. mvmt persists registrations to `~/.mvmt/.clients.json`. The issued access token is bound to the resource via the `aud` claim, so a token minted for one mvmt instance cannot be replayed against another.
+Claude Desktop is different: it launches mvmt over stdio, so there is no HTTP
+listener and no bearer token header.
 
-If your web client does not support DCR, pre-register it manually by POSTing to `/register` once (see [Client Setup](docs/client-setup.md#remote-oauth-clients) for the curl example). Either way, an `/authorize` request with an unknown `redirect_uri` is rejected.
+## Tool Surface
 
-See [Client Setup](docs/client-setup.md) for step-by-step instructions for Claude Desktop, Claude Code, Codex CLI, Cursor, VS Code, and raw HTTP.
+When `mounts[]` is configured, mvmt exposes these MCP tools:
+
+| Tool | Purpose | Permission |
+| --- | --- | --- |
+| `search` | Search indexed text chunks across permitted mounts | `search` |
+| `list` | List permitted mount roots or a directory within one mount | `read` |
+| `read` | Read one text file by virtual path | `read` |
+| `write` | Create or overwrite one text file | `write` |
+| `remove` | Delete one text file | `write` |
+
+Important behavior:
+
+- `list("/")` returns each visible mount root with its description, guidance,
+  and write-access flag.
+- `search` uses keyword scoring over indexed text chunks. It is intentionally
+  simple today.
+- `read` and `write` are text-only.
+- `write` accepts `expected_hash` so clients can reject stale writes after a
+  previous `read`.
+- `remove` deletes files permanently. It does not remove directories.
+- Non-text files are hidden from `list`, skipped by indexing, and rejected by
+  `read`/`write`.
+
+Supported text-like files include Markdown, plain text, JSON, YAML, TOML, CSV,
+logs, shell scripts, HTML/CSS/XML, and common source-code extensions. Files over
+2 MiB are skipped by the index and rejected as direct text reads.
 
 ## Configuration
 
-`mvmt config setup` writes `~/.mvmt/config.yaml`, and the first `mvmt serve` run creates it automatically if it does not exist yet. The config controls four things:
+The saved config lives at `~/.mvmt/config.yaml`. You can inspect it with
+`mvmt config`, validate it with `mvmt doctor`, and update mounts with
+`mvmt mounts ...`.
 
-- **`server`** — port, allowed origins, and whether to start a tunnel for public access.
-- **`proxy`** — external MCP servers that mvmt proxies (e.g. filesystem and MemPalace).
-- **`obsidian`** — the native Obsidian vault connector.
-- **`clients`** — optional per-client auth bindings and source/action permissions.
-- **`semanticTools`** — optional high-level context tools backed by allowed sources.
-- **`plugins`** — security plugins that inspect tool results before they reach clients (e.g. the pattern-based redactor).
+Minimal mount-based config:
 
-You should not need to write this file by hand. To re-run setup, use `mvmt config setup`. To inspect it, run `mvmt config`. To validate it, run `mvmt doctor`.
+```yaml
+version: 1
 
-See [Configuration](docs/configuration.md) for the full schema reference, field descriptions, and editing instructions.
+server:
+  port: 4141
+  allowedOrigins: []
+  access: local
+
+proxy: []
+
+mounts:
+  - name: notes
+    type: local_folder
+    path: /notes
+    root: /Users/you/Documents/Obsidian
+    description: Personal notes and project journals.
+    guidance: Search first. Read specific files before answering.
+    exclude:
+      - .git/**
+      - node_modules/**
+      - .claude/**
+    protect:
+      - .env
+      - .env.*
+      - .claude/**
+    writeAccess: false
+    enabled: true
+
+  - name: workspace
+    type: local_folder
+    path: /workspace
+    root: /Users/you/code/mvmt
+    description: mvmt project source and design docs.
+    guidance: Read README.md and docs before changing code.
+    exclude:
+      - .git/**
+      - node_modules/**
+      - dist/**
+    protect:
+      - .env
+      - .env.*
+      - .claude/**
+    writeAccess: true
+    enabled: true
+
+plugins:
+  - name: pattern-redactor
+    enabled: true
+    mode: redact
+```
+
+Mount fields:
+
+| Field | Meaning |
+| --- | --- |
+| `name` | Stable lowercase mount id, such as `notes` |
+| `path` | Virtual path visible to agents, such as `/notes` |
+| `root` | Local folder on disk |
+| `description` | Short summary returned from `list("/")` |
+| `guidance` | Human-authored instructions returned from `list("/")` |
+| `exclude` | Glob-like paths hidden from listing, reads, writes, and indexing |
+| `protect` | Glob-like paths that cannot be written or removed |
+| `writeAccess` | Mount-level write gate; defaults to `false` |
+| `enabled` | Whether the mount is active |
+
+An Obsidian vault is just a local folder mount. There is no special Obsidian
+runtime connector in the current mount-only shape.
+
+## Per-Client Policy
+
+If `clients[]` is absent, mvmt keeps legacy behavior: the session bearer token
+from `mvmt token` can access all configured mounts.
+
+Once `clients[]` is present, `/mcp` becomes strict:
+
+- bearer tokens must match a configured client `tokenHash`;
+- OAuth access tokens must map to a configured OAuth client id;
+- the session token no longer grants data-plane access;
+- unknown OAuth clients are quarantined with zero permissions.
+
+Client permissions are written against virtual mount paths, not local disk
+paths:
+
+```yaml
+clients:
+  - id: codex
+    name: Codex CLI
+    auth:
+      type: token
+      # SHA-256 hex of the client API key. Do not store the plaintext key.
+      tokenHash: "0000000000000000000000000000000000000000000000000000000000000000"
+    rawToolsEnabled: false
+    permissions:
+      - path: /workspace/**
+        actions: [search, read, write]
+      - path: /notes/**
+        actions: [search, read]
+
+  - id: chatgpt
+    name: ChatGPT
+    auth:
+      type: oauth
+      oauthClientIds:
+        - chatgpt-mvmt
+    rawToolsEnabled: false
+    permissions:
+      - path: /notes/**
+        actions: [search, read]
+```
+
+Policy is additive. A call succeeds only when the resolved client has the
+required action for the target virtual path. For writes, the mount itself must
+also have `writeAccess: true`, and the target must not match `protect`.
+
+Managed client-token creation is not shipped yet, so `clients[]` is currently a
+manual config feature.
 
 ## Commands
 
 | Command | Description |
 | --- | --- |
 | `mvmt serve` | Configure mvmt if needed, then start the MCP server |
-| `mvmt doctor` | Validate config and check connector health |
-| `mvmt config` | Show the saved mvmt config |
-| `mvmt config setup` | Run guided setup and save mvmt config |
-| `mvmt token` | Show the current bearer token and age |
-| `mvmt token rotate` | Generate a new bearer token and print it |
+| `mvmt serve -i` | Start with an interactive control prompt |
+| `mvmt serve --path <dir>` | Temporarily serve one read-only folder without changing saved config |
+| `mvmt reindex` | Force a full rebuild of the text index |
+| `mvmt mounts` | List configured mounts |
+| `mvmt mounts add [name] [root]` | Add a local folder mount |
+| `mvmt mounts edit [name]` | Edit a mount |
+| `mvmt mounts remove [name]` | Remove a mount |
+| `mvmt config` | Show the saved config summary |
+| `mvmt config setup` | Rerun guided setup and save config |
+| `mvmt doctor` | Validate config and startup prerequisites |
+| `mvmt token` | Show the current session bearer token and age |
+| `mvmt token rotate` | Regenerate the session bearer token |
 | `mvmt tunnel` | Show tunnel status |
-| `mvmt tunnel config` | Choose a different tunnel and save it to config |
+| `mvmt tunnel config` | Choose a tunnel command and save it |
 | `mvmt tunnel start` | Start the configured tunnel for the running mvmt process |
 | `mvmt tunnel refresh` | Restart the configured tunnel and print the new URL |
 | `mvmt tunnel stop` | Stop public tunnel exposure without stopping mvmt |
@@ -145,70 +288,14 @@ See [Configuration](docs/configuration.md) for the full schema reference, field 
 | `mvmt tunnel logs stream` | Stream live tunnel output |
 | `mvmt --version` | Print version and check for updates |
 
-### `mvmt --version`
-
-Prints the installed version and runs a best-effort npm update check.
-
-```bash
-mvmt --version
-mvmt --version --no-update-check
-```
-
-Update checks never install anything. They are skipped when `MVMT_NO_UPDATE_CHECK=1` or `CI` is set. Notices are written to stderr so JSON stdout stays usable.
-
-### `mvmt serve`
-
-Starts the hub.
-
-```bash
-mvmt serve
-mvmt serve -i
-mvmt serve --path ~/Documents
-mvmt serve --port 4142
-mvmt serve --config ~/.mvmt/config.yaml
-mvmt serve --stdio
-```
-
-Options:
-
-| Flag | Description |
-| --- | --- |
-| `--port <n>` | Override `config.server.port` |
-| `--config <p>` | Use a specific config file |
-| `--path <dir>` | Temporarily expose a filesystem folder as read-only for this run only (repeatable) |
-| `--stdio` | Serve MCP over stdio instead of HTTP |
-| `--interactive`, `-i` | Start an interactive control prompt |
-| `--verbose` | Print more startup details |
-
-Behavior:
-
-- If no saved config exists, `mvmt serve` runs guided setup first, saves config, then starts.
-- If a saved config exists, `mvmt serve` starts immediately.
-- `mvmt serve --path ...` uses a temporary read-only filesystem config for that run only and does not modify the saved config.
-
-HTTP mode:
-
-- Binds to `127.0.0.1`.
-- Reuses the existing bearer token if one already exists.
-- Writes the token to `~/.mvmt/.session-token` with mode `600`.
-- Requires the token for `/mcp` and `/health`.
-
-Stdio mode:
-
-- Used by clients that launch mvmt directly.
-- Does not use bearer-token auth because there is no HTTP listener.
-- Skips update checks because stdout is reserved for MCP protocol messages.
-
-Interactive mode:
-
-- Run `mvmt serve -i`.
-- Keeps mvmt in the foreground with a prompt at the bottom.
-- Uses the same grouped commands as the top-level CLI for config, token, and tunnel operations.
-- Live logs show connector, tool name, argument keys, duration, and error state without printing full argument values.
-
-Interactive command shape:
+Interactive mode (`mvmt serve -i`) accepts the same command groups:
 
 ```text
+> mounts
+> mounts add
+> mounts edit
+> mounts remove
+
 > config
 > config setup
 
@@ -216,174 +303,101 @@ Interactive command shape:
 > token rotate
 
 > tunnel
-> tunnel config
-> tunnel start
 > tunnel refresh
-> tunnel stop
-> tunnel logs
-> tunnel logs stream
-
-> logs
-> logs on
-> logs off
 ```
 
-### `mvmt config`
+## Index Lifecycle
 
-Shows the saved mvmt config in a readable summary.
+On `mvmt serve`, mvmt starts serving immediately and rebuilds the text index in
+the background. Calls may return fewer search results until that rebuild
+finishes.
 
-```bash
-mvmt config
-mvmt config --config ~/.mvmt/config.yaml
-```
+Use `mvmt reindex` after changing files outside mvmt or after editing mount
+configuration. Writes and removes performed through mvmt rebuild the index
+automatically.
 
-Use `mvmt config setup` to rerun guided setup and overwrite the saved config explicitly.
-
-### `mvmt doctor`
-
-Validates the local install, config, and enabled connectors.
-
-```bash
-mvmt doctor
-mvmt doctor --json
-mvmt doctor --config ~/.mvmt/config.yaml
-mvmt doctor --timeout-ms 20000
-```
-
-Checks include:
-
-- Package version and update availability.
-- Config file existence.
-- Config schema validation.
-- Config file permissions.
-- Server port and allowed origins.
-- Enabled filesystem connector startup and tool listing.
-- Enabled Obsidian connector startup and tool listing.
-
-`mvmt doctor` exits with status `0` when config is valid and all enabled connectors are healthy. It exits with status `1` when config is missing, invalid, or any enabled connector fails health checks.
-
-### `mvmt token` / `mvmt token rotate`
-
-Manages the HTTP bearer token used by `/mcp` and `/health`.
-
-```bash
-mvmt token
-mvmt token rotate
-```
-
-`mvmt token` prints the current token, age, and file path. `mvmt token rotate` writes a new token to `~/.mvmt/.session-token` and prints it. Running HTTP servers validate against the token file on each request, so rotation takes effect immediately. Any connected client that stored the old token must be updated, and existing OAuth access tokens are revoked immediately.
-
-Normal `mvmt serve` restarts reuse the same root token. OAuth access tokens minted from that root token remain valid across restart as long as the advertised resource URL stays the same; they still expire normally, and `mvmt token rotate` revokes them immediately.
-
-`mvmt token show` remains a hidden compatibility alias for raw token output.
-
-### `mvmt tunnel`
-
-Shows tunnel config and live runtime status.
-
-```bash
-mvmt tunnel
-mvmt tunnel config
-mvmt tunnel start
-mvmt tunnel refresh
-mvmt tunnel stop
-mvmt tunnel logs
-mvmt tunnel logs stream
-```
-
-`mvmt tunnel config` updates the saved tunnel config and, if mvmt is already running, applies it immediately. `mvmt tunnel logs` prints recent buffered tunnel output. `mvmt tunnel logs stream` follows live tunnel output from the running mvmt process.
-
-## Connectors
-
-A connector is the code that gives mvmt access to one local data source or tool surface. It owns discovery, permissions, tool definitions, tool execution, and cleanup for that source.
-
-mvmt currently supports three connector setups. All are read-only by default with opt-in write access.
-
-**Obsidian** — native connector that reads markdown files directly from a vault. Tools: `search_notes`, `read_note`, `list_notes`, `list_tags`, and `append_to_daily` (write, opt-in). Path traversal is blocked; symlinks are skipped.
-
-**Filesystem** — proxies the official `@modelcontextprotocol/server-filesystem` MCP server as a stdio child process. When `writeAccess: false`, mvmt hides write tools from `listTools` and rejects them at `callTool`.
-
-**MemPalace** — proxies the local MemPalace MCP server as a stdio child process. Guided setup tries to detect your `mempalace` command and palace path. When `writeAccess: false`, mvmt hides known MemPalace write tools such as drawer creation, tunnel deletion, KG mutation, hook settings, and diary writes.
-
-Tools from all connectors are prefixed with the connector ID (e.g. `obsidian__search_notes`, `proxy_filesystem__read_file`, `proxy_mempalace__mempalace_search`) to avoid name collisions.
-
-To add a native connector in v0, implement the `Connector` interface, add config schema for its scope, wire it into startup, and add tests for path/scope/write behavior. See [Connectors](docs/connectors.md) for the implementation checklist.
-
-## Plugins
-
-A plugin is a post-processing hook that runs after a connector returns a tool result and before that result is sent back to the MCP client. Plugins can inspect, annotate, transform, or block outbound tool results.
-
-The built-in `pattern-redactor` plugin scans text tool results with regex patterns and can `warn`, `redact`, or `block` matches. Default patterns cover common API keys (OpenAI, Anthropic, AWS, GitHub, Slack) and JWT-looking strings.
-
-> [!WARNING]
-> This is a best-effort pattern matcher, not a security control. If data must not reach AI tools, scope the connector to exclude it.
-
-To add a plugin in v0, implement the `ToolResultPlugin` interface, add config schema, register it in the plugin factory, and make audit events explicit when it changes output. See [Plugins](docs/plugins.md) for the implementation checklist.
+The current index is a JSON file beside the config file. SQLite and incremental
+watching are planned, but not shipped.
 
 ## Security Model
 
-Every file and data access in mvmt is gated. There is no open mode.
+Every data operation is gated by path and action.
 
-- **Localhost bind** — HTTP listens on `127.0.0.1` only.
-- **Bearer token** — 256-bit, stored at `~/.mvmt/.session-token`, reused across restart, constant-time validation, rotatable without restart.
-- **Origin allowlist** — browser requests from non-localhost origins are rejected unless explicitly allowed.
-- **Environment scrubbing** — stdio child processes receive only an allowlist of env vars.
-- **Write gates** — read-only by default per connector; write tools are hidden and rejected unless enabled.
-- **Per-client policy** — optional `clients[]` entries filter raw tool visibility and calls by source/action permission. Unknown OAuth client IDs are rejected as quarantined when policy is configured.
-- **Semantic context tools** — optional `search_personal_context` and `read_context_item` tools provide a smaller read/search surface for clients that should not see raw connector tools.
-- **Pattern redactor** — opt-in regex scrubbing of tool results before they reach clients.
-- **Audit log** — every tool call appended to `~/.mvmt/audit.log` as JSONL with mode `600`.
+- HTTP mode binds to `127.0.0.1`, not `0.0.0.0`.
+- HTTP `/mcp` and `/health` require authentication.
+- The session token is stored at `~/.mvmt/.session-token` with mode `600` and
+  rotates with `mvmt token rotate`.
+- Mount roots are resolved before access, and path traversal outside the mount
+  root is rejected.
+- `exclude` hides paths from listing, reading, writing, removal, and indexing.
+- `protect` blocks write/remove for sensitive paths such as `.env` and
+  `.claude/**`.
+- Write operations require client `write` permission and mount `writeAccess`.
+- Per-client policy quarantines unknown OAuth clients once `clients[]` exists.
+- Browser-origin checks block drive-by browser requests from non-local origins.
+- Optional pattern redactor can warn, redact, or block configured regex matches
+  before tool output reaches clients.
+- Tool calls are appended to `~/.mvmt/audit.log`.
 
-Not yet shipped: admin UI, token issuance CLI, memory-write semantic tool, managed relay, and TLS on localhost.
-
-See [Security Memo](docs/security-memo.md) for design notes and [Audit Log](docs/audit-log.md) for log format and queries.
+Authentication controls who connects. Mounts and client policy control what they
+can access.
 
 ## Remote Access
 
-mvmt is local-first. Cloud clients like claude.ai cannot reach `127.0.0.1` directly. `mvmt config setup` and `mvmt tunnel config` can configure a tunnel that gives you a public HTTPS URL.
-
-Quick tunnels are temporary, which means you lose the URL when mvmt is shut down. Use a named tunnel or reserved domain to keep the same URL.
-
-Recommended quick tunnel: Cloudflare. For stable hostnames such as `pnee.example.com`, use a Cloudflare named tunnel; `mvmt tunnel config` and interactive `tunnel config` can save that custom command and public URL.
-
-> [!WARNING]
-> Remote web clients authorize with OAuth/PKCE. Direct HTTP clients use bearer tokens. Auth controls who connects; connector scope controls what they can access.
-
-> [!IMPORTANT]
-> mvmt only redirects OAuth authorization codes to registered callback URLs and binds issued tokens to the requested `resource` via the `aud` claim. Dynamic Client Registration is the preferred path; if a web client does not call `/register` in practice, pre-register its exact `redirect_uri` first.
+mvmt is local-first. Cloud clients such as ChatGPT and claude.ai cannot reach
+`127.0.0.1` directly, so tunnel mode can publish a public HTTPS URL.
 
 Remote access checklist:
 
-- Use Cloudflare Tunnel when possible.
-- Expose the smallest useful folder, vault, or connector scope.
-- Keep write access disabled unless you explicitly need it.
-- Do not expose secrets, credential folders, home directories, production databases, or browser profiles.
-- Watch the audit log when using remote clients.
-- Stop the tunnel when you are done with remote access.
+1. Mount only the folders the remote client needs.
+2. Prefer read-only mounts.
+3. Configure `clients[]` before exposing a tunnel.
+4. Use `protect` for secrets and agent-private folders.
+5. Watch `~/.mvmt/audit.log` when testing a new remote client.
 
-See [Remote Access](docs/remote-access.md) for tunnel providers, runtime management, and safety guidelines.
+Quick tunnels are convenient but temporary. For repeatable remote OAuth flows,
+use a stable tunnel URL.
 
-## Troubleshooting
+## Current Limits
 
-See [Troubleshooting](docs/troubleshooting.md) for common issues: port conflicts, connector failures, missing tools, vault detection, and token rejection.
+- The active CLI runtime is mount-only. Legacy proxy connector config still
+  parses, but proxy connectors are not loaded as runtime tools.
+- Local folders are the only shipped mount provider.
+- The index supports text-like files only. PDFs, images, archives, and other
+  binary files are skipped.
+- Search is prototype keyword scoring, not semantic embedding search.
+- There is no file watcher yet.
+- Managed client-key issuance and an admin UI are not shipped.
+- Remote/federated mvmt mounts are planned, but not shipped.
+- mvmt does not sync, replicate, or resolve conflicts across machines.
 
 ## Coming Next
 
-Planned work is focused on safer long-running use and better local data coverage:
+- SQLite-backed text index with incremental updates.
+- Better mount and client management commands.
+- Admin UI for client keys, path permissions, audit, and mount visibility.
+- Remote mvmt mounts: one entrypoint namespace over multiple mvmt instances.
+- More storage providers behind the same `search`/`list`/`read`/`write`/`remove`
+  surface.
 
-- Fast file indexer with Chroma's embedded JS/TS version.
-- Full key management: named keys, rotation, revocation, expiration.
-- Admin UI for client keys, permissions, and semantic tool mappings.
-- `save_personal_memory` with explicit memory-write permission and audit visibility.
-- Runtime permission changes for folders, vaults, and connector write access.
-- Remote access hardening guides for Cloudflare Named Tunnels, Cloudflare Access, and rate limiting.
-- SQLite connector with per-table read/write permissions.
-- Atomic writes and optional `--preview` mode.
-- Git connector for local history, diffs, blame, and branch-aware search.
+## Project Docs
+
+- [Setup guide](docs/setup.md)
+- [Client setup](docs/client-setup.md)
+- [Text index prototype](docs/text-index-prototype.md)
+- [Remote access](docs/remote-access.md)
+- [Audit log](docs/audit-log.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Architecture](docs/architecture.md)
+- [Security policy](SECURITY.md)
+- [Contributing](CONTRIBUTING.md)
+- [Changelog](CHANGELOG.md)
 
 ## Contributing
 
-Contributions are welcome while the project is early. Keep changes focused and security-conscious. Read [CONTRIBUTING.md](CONTRIBUTING.md) and report vulnerabilities through [SECURITY.md](SECURITY.md).
+Contributions are welcome while the project is early. Keep changes focused and
+security-conscious. Read [CONTRIBUTING.md](CONTRIBUTING.md) and report
+vulnerabilities through [SECURITY.md](SECURITY.md).
 
 ## License
 
