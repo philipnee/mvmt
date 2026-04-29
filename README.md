@@ -96,7 +96,10 @@ A write requires both:
 2. the mount has `writeAccess: true`.
 
 Protected paths such as `.env`, `.claude/**`, or other configured patterns
-cannot be written or removed.
+cannot be written or removed. mvmt also has a global secret-path deny list
+for paths such as `.mvmt/**`, `.ssh/**`, `.aws/**`, `.kube/**`, and common
+cloud/dev credential files. Those paths are blocked even if an older config
+does not list them.
 
 ## Quick start
 
@@ -293,10 +296,16 @@ mounts:
       - .git/**
       - node_modules/**
       - .claude/**
+      - .mvmt/**
+      - .ssh/**
+      - .aws/**
     protect:
       - .env
       - .env.*
       - .claude/**
+      - .mvmt/**
+      - .ssh/**
+      - .aws/**
     writeAccess: false
     enabled: true
 
@@ -314,6 +323,9 @@ mounts:
       - .env
       - .env.*
       - .claude/**
+      - .mvmt/**
+      - .ssh/**
+      - .aws/**
     writeAccess: true
     enabled: true
 
@@ -351,6 +363,10 @@ Once `clients[]` is present, `/mcp` becomes strict:
 - OAuth access tokens must map to a configured OAuth client id;
 - the session token no longer grants data-plane access;
 - unknown OAuth clients are quarantined with zero permissions.
+
+Tunnel mode requires `clients[]`. This prevents a public tunnel from falling
+back to the legacy all-mount session-token identity. For temporary debugging
+only, set `MVMT_ALLOW_LEGACY_TUNNEL=1` to bypass this startup guard.
 
 Client permissions are written against virtual paths, not local disk paths.
 
@@ -463,6 +479,8 @@ Every data operation is gated by path and action.
 - `exclude` hides paths from listing, reading, writing, removal, and indexing.
 - `protect` blocks write/remove for sensitive paths such as `.env` and
   `.claude/**`.
+- Global secret paths such as `.mvmt/**`, `.ssh/**`, `.aws/**`, `.kube/**`,
+  and common credential files are denied regardless of per-mount config.
 - Write operations require both client `write` permission and mount
   `writeAccess`.
 - Unknown OAuth clients are quarantined once `clients[]` exists.
@@ -485,7 +503,8 @@ Remote access checklist:
 
 1. Mount only the folders the remote client needs.
 2. Prefer read-only mounts.
-3. Configure `clients[]` before exposing a tunnel.
+3. Configure `clients[]` before exposing a tunnel. mvmt refuses tunnel startup
+   without client policy unless `MVMT_ALLOW_LEGACY_TUNNEL=1` is set.
 4. Use `protect` for secrets and private folders.
 5. Watch `~/.mvmt/audit.log` when testing a new remote client.
 6. Use a stable tunnel URL for repeatable OAuth flows.

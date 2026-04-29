@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { OAuthError, OAuthStore, verifyPkce } from '../src/server/oauth.js';
+import { OAuthClientRegistryLimitError, OAuthError, OAuthStore, verifyPkce } from '../src/server/oauth.js';
 
 function pkcePair(verifier = crypto.randomBytes(32).toString('base64url')): {
   verifier: string;
@@ -80,6 +80,36 @@ describe('OAuthStore client registration', () => {
       fs.chmodSync(lockedDir, 0o700);
       fs.rmSync(tmp, { recursive: true, force: true });
     }
+  });
+
+  it('limits registered clients and redirect URI fan-out', () => {
+    const store = new OAuthStore({
+      signingKey: 'k',
+      maxRegisteredClients: 1,
+      maxRedirectUrisPerClient: 1,
+    });
+    store.registerClient({
+      clientId: 'first',
+      redirectUris: ['https://client.example/cb'],
+    });
+
+    expect(() =>
+      store.registerClient({
+        clientId: 'second',
+        redirectUris: ['https://client.example/cb'],
+      }),
+    ).toThrow(OAuthClientRegistryLimitError);
+
+    const fanoutStore = new OAuthStore({
+      signingKey: 'k',
+      maxRedirectUrisPerClient: 1,
+    });
+    expect(() =>
+      fanoutStore.registerClient({
+        clientId: 'fanout',
+        redirectUris: ['https://client.example/cb', 'https://client.example/other'],
+      }),
+    ).toThrow(OAuthClientRegistryLimitError);
   });
 });
 

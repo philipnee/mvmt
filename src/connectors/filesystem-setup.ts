@@ -1,7 +1,12 @@
 import { confirm, input } from '@inquirer/prompts';
 import fs from 'fs/promises';
 import path from 'path';
-import { LocalFolderMountConfig, MvmtConfig } from '../config/schema.js';
+import {
+  DEFAULT_MOUNT_EXCLUDE_PATTERNS,
+  DEFAULT_MOUNT_PROTECT_PATTERNS,
+  LocalFolderMountConfig,
+  MvmtConfig,
+} from '../config/schema.js';
 import type { ConnectorSetupDefinition } from './setup-registry.js';
 import { resolveSetupPath } from './setup-paths.js';
 
@@ -24,8 +29,8 @@ export function createFilesystemMountConfigs(filesystem: FilesystemConfigInput):
       root,
       description: '',
       guidance: '',
-      exclude: ['.git/**', 'node_modules/**', '.claude/**'],
-      protect: ['.env', '.env.*', '.claude/**'],
+      exclude: [...DEFAULT_MOUNT_EXCLUDE_PATTERNS],
+      protect: [...DEFAULT_MOUNT_PROTECT_PATTERNS],
       writeAccess: filesystem.writeAccess,
       enabled: true,
     };

@@ -882,6 +882,31 @@ describe('startHttpServer lifecycle', () => {
     }
   });
 
+  it('limits OAuth dynamic client registration fan-out', async () => {
+    const router = new ToolRouter();
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const server = await startHttpServer(router, { port: 0, tokenPath });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${server.port}/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          redirect_uris: Array.from({ length: 11 }, (_, index) => `https://client.example/cb/${index}`),
+        }),
+      });
+      expect(response.status).toBe(429);
+      const body = await response.json();
+      expect(body.error).toBe('invalid_client_metadata');
+      expect(body.error_description).toContain('redirect_uris exceeds');
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('returns 500 from /register when the client registry cannot be persisted', async () => {
     const router = new ToolRouter();
     await router.initialize();

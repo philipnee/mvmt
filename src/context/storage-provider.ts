@@ -1,5 +1,6 @@
 import fsp from 'fs/promises';
 import path from 'path';
+import { GLOBAL_SECRET_PATH_PATTERNS } from '../config/schema.js';
 import { joinVirtualPath, normalizePathSeparators, RegisteredMount, toVirtualRelative } from './mount-registry.js';
 
 export interface StorageProviderFile {
@@ -108,6 +109,9 @@ export class LocalFolderStorageProvider implements StorageProvider {
     const target = this.resolve(relativePath);
     this.assertWritable(target);
     this.assertTextPath(target.virtualPath);
+    if (Buffer.byteLength(content, 'utf-8') > this.options.maxTextBytes) {
+      throw new Error(`${target.virtualPath} is too large to write as text`);
+    }
     await this.assertRealPathWithinMount(target, { allowMissingLeaf: true });
     await fsp.mkdir(path.dirname(target.realPath), { recursive: true });
     await fsp.writeFile(target.realPath, content, 'utf-8');
@@ -160,6 +164,9 @@ export class LocalFolderStorageProvider implements StorageProvider {
     const realPath = this.realPath(normalized);
     if (!isWithin(this.mount.root, realPath)) {
       throw new Error(`${joinVirtualPath(this.mount.config.path, normalized)} escapes mount root`);
+    }
+    if (isGloballyDeniedPath(normalized, realPath)) {
+      throw new Error(`${joinVirtualPath(this.mount.config.path, normalized)} is globally denied`);
     }
     return {
       relativePath: normalized,
@@ -233,11 +240,11 @@ export class LocalFolderStorageProvider implements StorageProvider {
   }
 
   private isExcluded(relativePath: string): boolean {
-    return matchesAny(relativePath, this.mount.config.exclude);
+    return matchesAny(relativePath, [...GLOBAL_SECRET_PATH_PATTERNS, ...this.mount.config.exclude]);
   }
 
   private isProtected(relativePath: string): boolean {
-    return matchesAny(relativePath, this.mount.config.protect);
+    return matchesAny(relativePath, [...GLOBAL_SECRET_PATH_PATTERNS, ...this.mount.config.protect]);
   }
 }
 
@@ -261,6 +268,30 @@ function matchesAny(relativePath: string, patterns: string[]): boolean {
     }
     return globToRegExp(pattern).test(normalized);
   });
+}
+
+function isGloballyDeniedPath(relativePath: string, realPath: string): boolean {
+  return matchesAny(relativePath, [...GLOBAL_SECRET_PATH_PATTERNS]) || realPathHasSensitiveSegment(realPath);
+}
+
+const GLOBALLY_DENIED_SEGMENTS = new Set(['.mvmt', '.ssh', '.gnupg', '.aws', '.kube', '.docker']);
+const GLOBALLY_DENIED_SEGMENT_PATHS = [
+  ['.config', 'gh'],
+  ['.config', 'gcloud'],
+  ['.config', 'azure'],
+];
+
+function realPathHasSensitiveSegment(realPath: string): boolean {
+  const segments = normalizePathSeparators(realPath).split('/').filter(Boolean);
+  if (segments.some((segment) => GLOBALLY_DENIED_SEGMENTS.has(segment))) return true;
+  return GLOBALLY_DENIED_SEGMENT_PATHS.some((denied) => containsSegmentSequence(segments, denied));
+}
+
+function containsSegmentSequence(segments: string[], needle: string[]): boolean {
+  for (let start = 0; start <= segments.length - needle.length; start += 1) {
+    if (needle.every((segment, offset) => segments[start + offset] === segment)) return true;
+  }
+  return false;
 }
 
 function globToRegExp(pattern: string): RegExp {

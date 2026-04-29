@@ -40,6 +40,10 @@ Client policy controls:
 
 The owner/session token remains the compatibility credential when no `clients[]` policy exists. Once policy is configured, it is no longer accepted as a `/mcp` data-plane credential.
 
+Tunnel mode requires `clients[]` by default so public traffic cannot fall back to the legacy all-mount session-token identity. `MVMT_ALLOW_LEGACY_TUNNEL=1` exists only as a temporary debugging escape hatch.
+
+Mount access has two layers of path filtering: per-mount `exclude`/`protect` patterns and a global secret-path deny list. The global list blocks paths such as `.mvmt/**`, `.ssh/**`, `.aws/**`, `.kube/**`, and common credential files even when an older config omits those patterns.
+
 ## Known Limits
 
 Localhost traffic is plaintext. A process running as the same OS user can usually read local files and process state anyway, so the OS user remains the main trust boundary.

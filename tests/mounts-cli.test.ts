@@ -5,6 +5,7 @@ import {
   removeMountFromConfig,
 } from '../src/cli/mounts.js';
 import { parseConfig } from '../src/config/loader.js';
+import { DEFAULT_MOUNT_EXCLUDE_PATTERNS, DEFAULT_MOUNT_PROTECT_PATTERNS } from '../src/config/schema.js';
 
 describe('mount config helpers', () => {
   it('adds mounts with default protection', () => {
@@ -25,8 +26,8 @@ describe('mount config helpers', () => {
         root: expect.stringContaining('/code/mvmt'),
         description: 'Project mount',
         guidance: 'Repo-specific instructions.',
-        exclude: ['.git/**', 'node_modules/**', '.claude/**'],
-        protect: ['.env', '.env.*', '.claude/**'],
+        exclude: [...DEFAULT_MOUNT_EXCLUDE_PATTERNS],
+        protect: [...DEFAULT_MOUNT_PROTECT_PATTERNS],
         writeAccess: true,
         enabled: true,
       }),

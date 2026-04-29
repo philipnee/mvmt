@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ConfigSchema, MvmtConfig } from '../src/config/schema.js';
+import {
+  ConfigSchema,
+  DEFAULT_MOUNT_EXCLUDE_PATTERNS,
+  DEFAULT_MOUNT_PROTECT_PATTERNS,
+  MvmtConfig,
+} from '../src/config/schema.js';
 
 const mocks = vi.hoisted(() => ({
   expandHome: vi.fn((value: string) => value),
@@ -61,8 +66,8 @@ describe('addConnector', () => {
           root: '/Users/me/project',
           description: '',
           guidance: '',
-          exclude: ['.git/**', 'node_modules/**', '.claude/**'],
-          protect: ['.env', '.env.*', '.claude/**'],
+          exclude: [...DEFAULT_MOUNT_EXCLUDE_PATTERNS],
+          protect: [...DEFAULT_MOUNT_PROTECT_PATTERNS],
           writeAccess: false,
           enabled: true,
         },

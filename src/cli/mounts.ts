@@ -1,7 +1,13 @@
 import { confirm, input, select } from '@inquirer/prompts';
 import chalk from 'chalk';
 import { getConfigPath, loadConfig, saveConfig } from '../config/loader.js';
-import { LocalFolderMountConfig, LocalFolderMountSchema, MvmtConfig } from '../config/schema.js';
+import {
+  DEFAULT_MOUNT_EXCLUDE_PATTERNS,
+  DEFAULT_MOUNT_PROTECT_PATTERNS,
+  LocalFolderMountConfig,
+  LocalFolderMountSchema,
+  MvmtConfig,
+} from '../config/schema.js';
 import { resolveSetupPath } from '../connectors/setup-paths.js';
 import { normalizePathSeparators, stripTrailingSlashes } from '../context/mount-registry.js';
 
@@ -270,11 +276,11 @@ async function promptForMountInput(config: MvmtConfig): Promise<MountInput> {
   });
   const exclude = splitPatterns(await input({
     message: 'Exclude patterns (comma-separated):',
-    default: '.git/**, node_modules/**, .claude/**',
+    default: DEFAULT_MOUNT_EXCLUDE_PATTERNS.join(', '),
   }));
   const protect = splitPatterns(await input({
     message: 'Protected write/remove patterns (comma-separated):',
-    default: '.env, .env.*, .claude/**',
+    default: DEFAULT_MOUNT_PROTECT_PATTERNS.join(', '),
   }));
   return {
     name: name.trim(),

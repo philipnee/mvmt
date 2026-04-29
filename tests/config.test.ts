@@ -4,7 +4,12 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { expandHome, loadConfig, parseConfig, readConfig, saveConfig } from '../src/config/loader.js';
-import { MvmtConfig, resolveProxySourceId } from '../src/config/schema.js';
+import {
+  DEFAULT_MOUNT_EXCLUDE_PATTERNS,
+  DEFAULT_MOUNT_PROTECT_PATTERNS,
+  MvmtConfig,
+  resolveProxySourceId,
+} from '../src/config/schema.js';
 
 const SHA256_HEX_64 = 'a'.repeat(64);
 
@@ -88,8 +93,8 @@ describe('parseConfig', () => {
       root: '~/code/mvmt',
       description: '',
       guidance: '',
-      exclude: ['.git/**', 'node_modules/**', '.claude/**'],
-      protect: ['.env', '.env.*', '.claude/**'],
+      exclude: [...DEFAULT_MOUNT_EXCLUDE_PATTERNS],
+      protect: [...DEFAULT_MOUNT_PROTECT_PATTERNS],
       writeAccess: true,
       enabled: true,
     });

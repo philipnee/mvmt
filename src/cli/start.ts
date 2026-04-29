@@ -16,6 +16,7 @@ import { formatMcpPublicUrl } from '../utils/tunnel.js';
 import { initializeConnectors, LoadedConnector } from './connector-loader.js';
 import { TunnelController } from './tunnel-controller.js';
 import { InteractiveAuditLogger, startInteractivePrompt, formatHttpRequestEntry } from './interactive.js';
+import { LEGACY_TUNNEL_OVERRIDE_ENV, legacyTunnelOverrideEnabled, tunnelExposureError } from './tunnel-safety.js';
 
 export interface StartOptions {
   port?: string;
@@ -76,6 +77,16 @@ export async function start(options: StartOptions = {}): Promise<void> {
     });
   }
   const config = loadConfig(configPath);
+  if (!stdioMode) {
+    const tunnelError = tunnelExposureError(config);
+    if (tunnelError) {
+      logger.error(tunnelError);
+      process.exit(1);
+    }
+    if (config.server.access === 'tunnel' && legacyTunnelOverrideEnabled()) {
+      logger.warn(`${LEGACY_TUNNEL_OVERRIDE_ENV}=1 is allowing tunnel access without clients[]. Remote clients will use legacy default access.`);
+    }
+  }
   const port = parsePort(options.port) ?? config.server.port;
   const loaded = await initializeConnectors(config, stdioMode, logger);
   const textIndex = config.mounts.some((mount) => mount.enabled !== false)
@@ -172,6 +183,20 @@ export async function start(options: StartOptions = {}): Promise<void> {
             return;
           }
           const tunnelConfig = parsedTunnel.data;
+          const nextConfig = {
+            ...config,
+            server: {
+              ...config.server,
+              access: 'tunnel' as const,
+              tunnel: tunnelConfig,
+            },
+          };
+          const safetyError = tunnelExposureError(nextConfig);
+          if (safetyError) {
+            connection.send({ ok: false, error: safetyError });
+            connection.close();
+            return;
+          }
           config.server.access = 'tunnel';
           config.server.tunnel = tunnelConfig;
           await saveConfig(configPath, config);

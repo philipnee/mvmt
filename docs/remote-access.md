@@ -1,13 +1,15 @@
 # Remote Access
 
 > [!WARNING]
-> Remote access is authenticated, but it still exposes your configured local tools beyond your machine. Keep connector scopes narrow before exposing mvmt over a tunnel.
+> Remote access is authenticated, but it still exposes your configured local tools beyond your machine. Keep mounts narrow and configure per-client policy before exposing mvmt over a tunnel.
 
 mvmt is local-first and binds to `127.0.0.1`. Cloud clients such as claude.ai or ChatGPT web cannot reach your local machine directly.
 
 `mvmt init` can configure a tunnel. When `mvmt start` runs, mvmt starts the tunnel command, watches its output for a public URL, and prints the MCP URL.
 
 Quick tunnels are temporary. Use a named tunnel or reserved domain if you need the same URL across restarts.
+
+Tunnel mode requires `clients[]`. This prevents public tunnel traffic from using the legacy all-mount session-token identity. For temporary debugging only, set `MVMT_ALLOW_LEGACY_TUNNEL=1` to bypass this guard.
 
 ## Built-in tunnel providers
 
@@ -39,7 +41,9 @@ Use a narrow config before exposing mvmt:
 
 - Read-only filesystem access.
 - A low-risk folder or throwaway vault.
+- Per-client `clients[]` policy.
 - No production secrets in config.
+- No broad home-directory mounts.
 - Stop the tunnel when you are done using remote access.
 
 For a stable URL, use a named tunnel or reserved domain instead of a quick tunnel.

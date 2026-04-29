@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildConfig } from '../src/cli/init.js';
 import { filesystemSetupDefinition } from '../src/connectors/filesystem-setup.js';
+import { DEFAULT_MOUNT_EXCLUDE_PATTERNS, DEFAULT_MOUNT_PROTECT_PATTERNS } from '../src/config/schema.js';
 
 describe('init helpers', () => {
   it('adds local folder mounts for explicit folder access', () => {
@@ -18,8 +19,8 @@ describe('init helpers', () => {
         root: '/Users/me/project',
         description: '',
         guidance: '',
-        exclude: ['.git/**', 'node_modules/**', '.claude/**'],
-        protect: ['.env', '.env.*', '.claude/**'],
+        exclude: [...DEFAULT_MOUNT_EXCLUDE_PATTERNS],
+        protect: [...DEFAULT_MOUNT_PROTECT_PATTERNS],
         writeAccess: false,
         enabled: true,
       },
@@ -30,8 +31,8 @@ describe('init helpers', () => {
         root: '/Users/me/docs',
         description: '',
         guidance: '',
-        exclude: ['.git/**', 'node_modules/**', '.claude/**'],
-        protect: ['.env', '.env.*', '.claude/**'],
+        exclude: [...DEFAULT_MOUNT_EXCLUDE_PATTERNS],
+        protect: [...DEFAULT_MOUNT_PROTECT_PATTERNS],
         writeAccess: false,
         enabled: true,
       },
