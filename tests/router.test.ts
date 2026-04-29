@@ -411,6 +411,22 @@ describe('ToolRouter', () => {
       await fs.rm(tmp, { recursive: true, force: true });
     }
   });
+
+  it('exposes remove as the destructive prototype text index tool', async () => {
+    const { index, tmp } = await createTextIndexFixture();
+    try {
+      const router = new ToolRouter([], undefined, [], { contextIndex: index });
+      await router.initialize();
+      const identity = client('codex', false, [{ path: '/workspace/**', actions: ['write'] }]);
+
+      expect(router.getAllTools(identity).map((tool) => tool.namespacedName)).toEqual(['write', 'remove']);
+      const result = await router.callTool('remove', { path: '/workspace/note.md' }, identity);
+      const parsed = JSON.parse(result.content[0].type === 'text' ? result.content[0].text : '{}');
+      expect(parsed).toMatchObject({ path: '/workspace/note.md', removed: true });
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
 });
 
 function client(

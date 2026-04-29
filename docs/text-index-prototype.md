@@ -88,7 +88,7 @@ When `mounts[]` is configured, mvmt exposes:
 | `list` | List permitted mount roots or directories | `read` |
 | `read` | Read one text file | `read` |
 | `write` | Create or overwrite one text file | `write` |
-| `delete` | Delete one text file | `write` |
+| `remove` | Remove one text file | `write` |
 
 `write` accepts `expected_hash` to reject stale writes after a previous `read`.
 
@@ -116,5 +116,5 @@ a dependency.
 - No SQLite dependency yet.
 - No file watcher yet.
 - Text-like extensions only.
-- Deletes are permanent file deletes in this prototype.
+- Removes are permanent file deletes in this prototype.
 - Existing connector/raw-tool behavior remains available on this branch for comparison.
