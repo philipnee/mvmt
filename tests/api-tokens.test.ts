@@ -1,10 +1,10 @@
-import { createHash } from 'crypto';
 import { describe, expect, it } from 'vitest';
 import {
   addApiTokenToConfig,
   removeApiTokenFromConfig,
 } from '../src/cli/api-tokens.js';
 import { parseConfig } from '../src/config/loader.js';
+import { verifyApiToken } from '../src/utils/api-token-hash.js';
 
 describe('API token config helpers', () => {
   it('creates a token client with search/read permission for one mount', () => {
@@ -27,13 +27,15 @@ describe('API token config helpers', () => {
     expect(result.client).toMatchObject({
       id: 'codex',
       name: 'Codex CLI',
-      auth: {
-        type: 'token',
-        tokenHash: createHash('sha256').update('plain-token', 'utf8').digest('hex'),
-      },
+      auth: { type: 'token' },
       rawToolsEnabled: false,
       permissions: [{ path: '/document/**', actions: ['search', 'read'] }],
     });
+    expect(result.client.auth.type).toBe('token');
+    if (result.client.auth.type === 'token') {
+      expect(result.client.auth.tokenHash).toMatch(/^scrypt:v1:/);
+      expect(verifyApiToken('plain-token', result.client.auth.tokenHash)).toBe(true);
+    }
   });
 
   it('updates an existing token permission without rotating its secret', () => {

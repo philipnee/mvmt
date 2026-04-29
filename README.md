@@ -372,8 +372,8 @@ mvmt tokens add codex --read /notes
 mvmt tokens add codex --write /workspace
 ```
 
-`mvmt tokens add` prints the plaintext token once. mvmt stores only its
-SHA-256 hash in config.
+`mvmt tokens add` prints the plaintext token once. mvmt stores only a scrypt
+verifier in config.
 
 For Codex CLI, store that printed token in an environment variable and pass the
 variable name:
@@ -407,9 +407,9 @@ clients:
     name: Codex CLI
     auth:
       type: token
-      # SHA-256 hex of the client API key.
+      # Verifier for the client API key.
       # Do not store the plaintext key.
-      tokenHash: "0000000000000000000000000000000000000000000000000000000000000000"
+      tokenHash: "scrypt:v1:..."
     rawToolsEnabled: false
     permissions:
       - path: /workspace/**
@@ -421,7 +421,7 @@ clients:
     name: Read-only client
     auth:
       type: token
-      tokenHash: "1111111111111111111111111111111111111111111111111111111111111111"
+      tokenHash: "scrypt:v1:..."
     rawToolsEnabled: false
     permissions:
       - path: /notes/**

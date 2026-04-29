@@ -67,7 +67,7 @@ clients:
     name: Codex CLI
     auth:
       type: token
-      tokenHash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      tokenHash: "scrypt:v1:..."
     rawToolsEnabled: false
     permissions:
       - path: /workspace/**
@@ -159,7 +159,7 @@ If present, `/mcp` becomes strict:
 | `id` | Stable client id used in audit entries. Lowercase letters, numbers, `_`, and `-`. |
 | `name` | Human-readable client name. |
 | `auth.type` | `token` or `oauth`. |
-| `auth.tokenHash` | SHA-256 hex hash of the client bearer token. Plaintext tokens are not stored. |
+| `auth.tokenHash` | Verifier for the client bearer token. New tokens use scrypt. Plaintext tokens are not stored. |
 | `auth.oauthClientIds` | OAuth `client_id` values mapped to this client. |
 | `rawToolsEnabled` | Legacy field. The mount-only runtime ignores raw proxy tools. Keep `false`. |
 | `permissions` | Virtual path/action grants. |

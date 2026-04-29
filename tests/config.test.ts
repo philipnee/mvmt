@@ -12,6 +12,7 @@ import {
 } from '../src/config/schema.js';
 
 const SHA256_HEX_64 = 'a'.repeat(64);
+const SCRYPT_TOKEN_VERIFIER = 'scrypt:v1:AAAAAAAAAAAAAAAAAAAAAA:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 
 describe('saveConfig', () => {
   it('writes a config file that loadConfig can read back', async () => {
@@ -332,7 +333,7 @@ describe('client policy schema', () => {
         {
           id: 'codex',
           name: 'Codex CLI',
-          auth: { type: 'token', tokenHash: SHA256_HEX_64 },
+          auth: { type: 'token', tokenHash: SCRYPT_TOKEN_VERIFIER },
           rawToolsEnabled: true,
           permissions: [
             { path: '/workspace/**', actions: ['search', 'read', 'write'] },
@@ -346,9 +347,24 @@ describe('client policy schema', () => {
     expect(config.clients?.[0]).toMatchObject({
       id: 'codex',
       name: 'Codex CLI',
-      auth: { type: 'token', tokenHash: SHA256_HEX_64 },
+      auth: { type: 'token', tokenHash: SCRYPT_TOKEN_VERIFIER },
       rawToolsEnabled: true,
     });
+  });
+
+  it('parses a legacy SHA-256 token verifier for existing configs', () => {
+    const config = parseConfig({
+      version: 1,
+      clients: [
+        {
+          id: 'codex',
+          name: 'Codex CLI',
+          auth: { type: 'token', tokenHash: SHA256_HEX_64 },
+        },
+      ],
+    });
+
+    expect(config.clients?.[0].auth).toEqual({ type: 'token', tokenHash: SHA256_HEX_64 });
   });
 
   it('parses an oauth-auth client with mapped client ids', () => {
@@ -583,7 +599,7 @@ describe('client policy schema', () => {
           },
         ],
       }),
-    ).toThrow(/64-char hex SHA-256/);
+    ).toThrow(/scrypt verifier or legacy 64-char SHA-256/);
   });
 
   it('parses semanticTools and validates source references', () => {

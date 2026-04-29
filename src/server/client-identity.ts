@@ -1,6 +1,6 @@
-import crypto from 'crypto';
 import type { Request } from 'express';
 import { ClientConfig, PermissionConfig } from '../config/schema.js';
+import { verifyApiToken } from '../utils/api-token-hash.js';
 import { AccessToken } from './oauth.js';
 
 export type ClientIdentitySource = 'session' | 'token' | 'oauth' | 'quarantine';
@@ -92,15 +92,14 @@ export function resolveClientIdentity(input: ResolveClientIdentityInput): Client
     return quarantineIdentity(oauthClientId);
   }
 
-  // Client bearer token: hash the bearer and look for a matching client
-  // tokenHash. Compare uses timing-safe equality so the lookup does not
-  // leak hash data via response time differences.
+  // Client bearer token: verify the bearer against each configured
+  // token verifier. The verifier utility uses timing-safe equality for
+  // stored hashes.
   const bearer = extractBearer(input.authHeader);
   if (bearer) {
-    const incomingHash = sha256Hex(bearer);
     for (const client of input.clients) {
       if (client.auth.type !== 'token') continue;
-      if (timingSafeHexEqual(incomingHash, client.auth.tokenHash)) {
+      if (verifyApiToken(bearer, client.auth.tokenHash)) {
         return identityFromConfig(client, 'token');
       }
     }
@@ -152,19 +151,6 @@ function extractBearer(authHeader: string): string | undefined {
   if (!authHeader.startsWith('Bearer ')) return undefined;
   const token = authHeader.slice('Bearer '.length).trim();
   return token.length > 0 ? token : undefined;
-}
-
-function sha256Hex(value: string): string {
-  return crypto.createHash('sha256').update(value, 'utf8').digest('hex');
-}
-
-function timingSafeHexEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  try {
-    return crypto.timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
-  } catch {
-    return false;
-  }
 }
 
 function isClientIdentity(value: unknown): value is ClientIdentity {

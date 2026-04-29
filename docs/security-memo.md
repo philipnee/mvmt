@@ -65,7 +65,7 @@ mvmt tokens list
 mvmt tokens remove
 ```
 
-The plaintext API token is printed once. mvmt stores only its SHA-256 hash in
+The plaintext API token is printed once. mvmt stores only a scrypt verifier in
 config.
 
 ## Per-Client Policy
@@ -74,7 +74,7 @@ When `clients[]` is absent, mvmt preserves legacy behavior: the session token ca
 
 When `clients[]` exists, `/mcp` resolves every request to a configured client:
 
-- token clients match a stored SHA-256 `tokenHash`;
+- token clients match a stored `tokenHash` verifier;
 - OAuth clients match configured OAuth `client_id` values;
 - unknown OAuth clients are quarantined with zero permissions;
 - the session token no longer grants data-plane access.

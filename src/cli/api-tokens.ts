@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import { confirm, input, select } from '@inquirer/prompts';
 import chalk from 'chalk';
 import { getConfigPath, loadConfig, saveConfig } from '../config/loader.js';
+import { hashApiToken } from '../utils/api-token-hash.js';
 import {
   ClientConfig,
   ConfigSchema,
@@ -157,7 +158,7 @@ export function addApiTokenToConfig(config: MvmtConfig, inputValue: ApiTokenInpu
     name,
     auth: existing?.auth ?? {
       type: 'token',
-      tokenHash: sha256Hex(plaintextToken!),
+      tokenHash: hashApiToken(plaintextToken!),
     },
     rawToolsEnabled: existing?.rawToolsEnabled ?? false,
     permissions,
@@ -409,10 +410,6 @@ function validateApiTokenId(value: string): true | string {
 
 function generateApiToken(): string {
   return `mvmt_${crypto.randomBytes(32).toString('base64url')}`;
-}
-
-function sha256Hex(value: string): string {
-  return crypto.createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
 function resolveApiTokensConfigPath(configPath?: string): string {

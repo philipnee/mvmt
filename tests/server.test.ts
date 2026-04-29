@@ -15,6 +15,7 @@ import { parseConfig } from '../src/config/loader.js';
 import { TextContextIndex } from '../src/context/text-index.js';
 import { OAuthStore } from '../src/server/oauth.js';
 import { ToolRouter } from '../src/server/router.js';
+import { hashApiToken } from '../src/utils/api-token-hash.js';
 import { ensureSigningKey, generateSessionToken, rotateSigningKey } from '../src/utils/token.js';
 
 function req(origin?: string): Request {
@@ -1218,7 +1219,7 @@ describe('startHttpServer lifecycle', () => {
         {
           id: 'codex',
           name: 'Codex CLI',
-          auth: { type: 'token', tokenHash: sha256Hex('codex-local-token') },
+          auth: { type: 'token', tokenHash: hashApiToken('codex-local-token') },
           rawToolsEnabled: true,
           permissions: [],
         },
@@ -1268,7 +1269,7 @@ describe('startHttpServer lifecycle', () => {
         {
           id: 'codex',
           name: 'Codex CLI',
-          auth: { type: 'token', tokenHash: sha256Hex('codex-local-token') },
+          auth: { type: 'token', tokenHash: hashApiToken('codex-local-token') },
           rawToolsEnabled: true,
           permissions: [],
         },
@@ -1320,7 +1321,7 @@ describe('startHttpServer lifecycle', () => {
         {
           id: 'searcher',
           name: 'Search-only client',
-          auth: { type: 'token', tokenHash: sha256Hex('search-token') },
+          auth: { type: 'token', tokenHash: hashApiToken('search-token') },
           rawToolsEnabled: true,
           permissions: [{ path: '/workspace/**', actions: ['search'] }],
         },
@@ -1364,7 +1365,7 @@ describe('startHttpServer lifecycle', () => {
         {
           id: 'chatgpt',
           name: 'ChatGPT',
-          auth: { type: 'token', tokenHash: sha256Hex('chatgpt-token') },
+          auth: { type: 'token', tokenHash: hashApiToken('chatgpt-token') },
           rawToolsEnabled: false,
           permissions: [{ path: '/notes/**', actions: ['search', 'read'] }],
         },
@@ -1643,10 +1644,6 @@ function expectAccessTokenAudience(accessToken: string, signingKeyPath: string, 
     allowLegacyNoAudience: false,
   });
   expect(validated?.audience).toBe(expectedAudience);
-}
-
-function sha256Hex(value: string): string {
-  return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
 async function initializeMcpSession(port: number, token: string): Promise<string> {
