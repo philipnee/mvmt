@@ -1,5 +1,5 @@
 import { CallToolResult, Connector, ToolDefinition } from '../connectors/types.js';
-import { isLikelyWriteTool, isMemPalaceWriteTool } from '../connectors/write-policy.js';
+import { isLikelyWriteTool } from '../connectors/write-policy.js';
 import { TextContextIndex } from '../context/text-index.js';
 import { PermissionConfig, SemanticToolsConfig } from '../config/schema.js';
 import { PatternRedactorAuditEvent, ToolResultPlugin } from '../plugins/types.js';
@@ -440,7 +440,7 @@ export class ToolRouter {
   private findSemanticAdapter(sourceId: string, action: PermissionAction): ToolEntry | undefined {
     const tools = this.toolsBySource.get(sourceId) ?? [];
     const preferred = action === 'search'
-      ? ['search_personal_context', 'search_notes', 'search_files', 'mempalace_search', 'mempalace_kg_search']
+      ? ['search_personal_context', 'search_notes', 'search_files']
       : ['read_context_item', 'read_note', 'read_file', 'read_text_file'];
     return preferred
       .map((name) => tools.find((tool) => tool.originalName === name))
@@ -508,7 +508,6 @@ function toolDeniedReason(
 
 function inferRequiredAction(toolName: string): PermissionAction {
   const lower = toolName.toLowerCase();
-  if (isMemPalaceWriteTool(lower)) return 'memory_write';
   if (isLikelyWriteTool(lower)) return 'write';
   if (lower.includes('search') || lower.startsWith('find_') || lower.startsWith('query_')) return 'search';
   return 'read';
@@ -517,7 +516,7 @@ function inferRequiredAction(toolName: string): PermissionAction {
 interface PersonalContextSearchResult {
   item_id: string;
   source_id: string;
-  source_type: 'filesystem' | 'mempalace' | 'generic';
+  source_type: 'filesystem' | 'generic';
   title: string;
   snippet: string;
   locator: string;
@@ -807,7 +806,6 @@ function accessDeniedResult(reason: string): CallToolResult {
 
 function sourceTypeFor(entry: ToolEntry): PersonalContextSearchResult['source_type'] {
   const fingerprint = `${entry.sourceId} ${entry.connector.id} ${entry.connector.displayName} ${entry.originalName}`.toLowerCase();
-  if (fingerprint.includes('mempalace')) return 'mempalace';
   if (fingerprint.includes('file')) return 'filesystem';
   return 'generic';
 }

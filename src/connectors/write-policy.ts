@@ -10,14 +10,11 @@ export interface ProxyWritePolicyConfig {
 
 export function createProxyToolPolicy(config: ProxyWritePolicyConfig): (name: string) => boolean {
   const isFs = isFilesystemProxy(config);
-  const isMemPalace = isMemPalaceProxy(config);
   const readOnlyFilesystem = isFs && config.writeAccess !== true;
-  const readOnlyMemPalace = isMemPalace && config.writeAccess !== true;
-  const readOnlyGeneric = !isFs && !isMemPalace && config.writeAccess === false;
+  const readOnlyGeneric = !isFs && config.writeAccess === false;
 
   return (name) => {
     if (readOnlyFilesystem && !isReadOnlyFilesystemTool(name)) return false;
-    if (readOnlyMemPalace && isMemPalaceWriteTool(name)) return false;
     if (readOnlyGeneric && isLikelyWriteTool(name)) return false;
     return true;
   };
@@ -43,14 +40,6 @@ function isFilesystemProxy(config: ProxyWritePolicyConfig): boolean {
   return fingerprint.includes('filesystem');
 }
 
-function isMemPalaceProxy(config: ProxyWritePolicyConfig): boolean {
-  const fingerprint = [config.name, config.command, config.url, ...(config.args ?? [])]
-    .filter((value): value is string => typeof value === 'string')
-    .join(' ')
-    .toLowerCase();
-  return fingerprint.includes('mempalace');
-}
-
 function isReadOnlyFilesystemTool(name: string): boolean {
   return READ_ONLY_FILESYSTEM_TOOLS.has(name);
 }
@@ -66,22 +55,6 @@ const READ_ONLY_FILESYSTEM_TOOLS = new Set([
   'read_text_file',
   'search_files',
 ]);
-
-const MEMPALACE_WRITE_TOOLS = new Set([
-  'mempalace_kg_add',
-  'mempalace_kg_invalidate',
-  'mempalace_create_tunnel',
-  'mempalace_delete_tunnel',
-  'mempalace_add_drawer',
-  'mempalace_delete_drawer',
-  'mempalace_update_drawer',
-  'mempalace_diary_write',
-  'mempalace_hook_settings',
-]);
-
-export function isMemPalaceWriteTool(name: string): boolean {
-  return MEMPALACE_WRITE_TOOLS.has(name.toLowerCase());
-}
 
 const WRITE_TOOL_PREFIXES = [
   'write_',

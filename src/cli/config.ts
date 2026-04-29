@@ -115,7 +115,6 @@ export function printConfigSummary(
 
   printFilesystemSummary(config.proxy);
   printMountSummary(config);
-  printMemPalaceSummary(config.proxy);
   printPluginSummary(config);
 }
 
@@ -153,20 +152,6 @@ function printFilesystemSummary(proxy: ProxyConfig[]): void {
   }
 }
 
-function printMemPalaceSummary(proxy: ProxyConfig[]): void {
-  console.log('\nMemPalace');
-  const memPalace = proxy.find((entry) => entry.name.toLowerCase() === 'mempalace' && entry.enabled !== false);
-  if (!memPalace) {
-    console.log(`  ${chalk.dim('not configured')}`);
-    return;
-  }
-
-  console.log(`  command: ${memPalace.command ?? '(missing)'}`);
-  const palacePath = readArgValue(memPalace.args, '--palace');
-  if (palacePath) console.log(`  palace: ${palacePath}`);
-  console.log(`  write access: ${memPalace.writeAccess ? 'yes' : 'no'}`);
-}
-
 function printPluginSummary(config: MvmtConfig): void {
   console.log('\nPlugins');
   const enabled = config.plugins.filter((plugin) => plugin.enabled !== false);
@@ -185,10 +170,4 @@ export function readFilesystemPaths(proxy: ProxyConfig): string[] {
   const packageIndex = proxy.args.findIndex((arg) => arg === '@modelcontextprotocol/server-filesystem');
   if (packageIndex === -1) return [];
   return proxy.args.slice(packageIndex + 1);
-}
-
-function readArgValue(args: string[] = [], name: string): string | undefined {
-  const index = args.findIndex((arg) => arg === name);
-  if (index === -1) return undefined;
-  return args[index + 1];
 }

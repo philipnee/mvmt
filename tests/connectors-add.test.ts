@@ -47,17 +47,17 @@ describe('addConnector', () => {
     mocks.isConfigured.mockReturnValue(false);
   });
 
-  it('uses the setup registry to detect, prompt, apply, and save MemPalace config', async () => {
-    const detected = { command: '/venv/bin/python', palacePath: '/Users/me/.mempalace/palace' };
-    const input = { command: '/venv/bin/python', palacePath: '/Users/me/.mempalace/palace', writeAccess: false };
+  it('uses the setup registry to detect, prompt, apply, and save connector config', async () => {
+    const detected = { paths: ['/Users/me/project'] };
+    const input = { paths: ['/Users/me/project'], writeAccess: false };
     const nextConfig: MvmtConfig = {
       ...baseConfig,
       proxy: [
         {
-          name: 'mempalace',
+          name: 'filesystem',
           transport: 'stdio',
-          command: '/venv/bin/python',
-          args: ['-m', 'mempalace.mcp_server', '--palace', '/Users/me/.mempalace/palace'],
+          command: 'npx',
+          args: ['-y', '@modelcontextprotocol/server-filesystem', '/Users/me/project'],
           env: {},
           writeAccess: false,
           enabled: true,
@@ -69,8 +69,8 @@ describe('addConnector', () => {
     mocks.prompt.mockResolvedValue(input);
     mocks.apply.mockReturnValue(nextConfig);
     mocks.getConnectorSetupDefinition.mockReturnValue({
-      id: 'mempalace',
-      displayName: 'MemPalace',
+      id: 'filesystem',
+      displayName: 'Filesystem',
       isAddable: true,
       detect: mocks.detect,
       prompt: mocks.prompt,
@@ -78,7 +78,7 @@ describe('addConnector', () => {
       apply: mocks.apply,
     });
 
-    await addConnector('mempalace');
+    await addConnector('filesystem');
 
     expect(mocks.detect).toHaveBeenCalledTimes(1);
     expect(mocks.prompt).toHaveBeenCalledWith(detected);

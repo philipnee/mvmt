@@ -545,8 +545,8 @@ describe('client policy schema', () => {
   it('falls back to proxy.name when id is omitted', () => {
     const config = parseConfig({
       version: 1,
-      proxy: [{ name: 'mempalace', command: '/venv/bin/python' }],
+      proxy: [{ name: 'search', command: '/usr/bin/search-server' }],
     });
-    expect(resolveProxySourceId(config.proxy[0])).toBe('mempalace');
+    expect(resolveProxySourceId(config.proxy[0])).toBe('search');
   });
 });
