@@ -114,9 +114,25 @@ export function printConfigSummary(
   }
 
   printFilesystemSummary(config.proxy);
+  printMountSummary(config);
   printObsidianSummary(config);
   printMemPalaceSummary(config.proxy);
   printPluginSummary(config);
+}
+
+function printMountSummary(config: MvmtConfig): void {
+  console.log('\nMounts');
+  const mounts = config.mounts.filter((mount) => mount.enabled !== false);
+  if (mounts.length === 0) {
+    console.log(`  ${chalk.dim('not configured')}`);
+    return;
+  }
+
+  for (const mount of mounts) {
+    console.log(`  ${mount.name}: ${mount.path} -> ${mount.root}  ${mount.writeAccess ? 'writable' : 'read-only'}`);
+    if (mount.description) console.log(`    description: ${mount.description}`);
+    if (mount.guidance) console.log(`    guidance: ${mount.guidance}`);
+  }
 }
 
 function printFilesystemSummary(proxy: ProxyConfig[]): void {
@@ -187,4 +203,3 @@ function readArgValue(args: string[] = [], name: string): string | undefined {
   if (index === -1) return undefined;
   return args[index + 1];
 }
-

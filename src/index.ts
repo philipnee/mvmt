@@ -21,7 +21,7 @@ export {
 export type { TunnelCommandOptions, TunnelRuntimeStatus } from './cli/tunnel.js';
 export { printTokenSummary, readTokenSummary, rotateToken, showToken, showTokenSummary } from './cli/token.js';
 export type { TokenSummary } from './cli/token.js';
-export { ConfigSchema, ObsidianSchema, ProxySchema, TunnelSchema } from './config/schema.js';
+export { ConfigSchema, LocalFolderMountSchema, ObsidianSchema, ProxySchema, TunnelSchema } from './config/schema.js';
 export {
   DEFAULT_PATTERN_REDACTOR_PATTERNS,
   PatternRedactorPatternSchema,
@@ -30,6 +30,7 @@ export {
 } from './config/schema.js';
 export type {
   MvmtConfig,
+  LocalFolderMountConfig,
   ObsidianConfig,
   PatternRedactorPatternConfig,
   PatternRedactorPluginConfig,

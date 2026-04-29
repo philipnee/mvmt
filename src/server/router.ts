@@ -1,5 +1,6 @@
 import { CallToolResult, Connector, ToolDefinition } from '../connectors/types.js';
 import { isLikelyWriteTool, isMemPalaceWriteTool } from '../connectors/write-policy.js';
+import { TextContextIndex } from '../context/text-index.js';
 import { PermissionConfig, SemanticToolsConfig } from '../config/schema.js';
 import { PatternRedactorAuditEvent, ToolResultPlugin } from '../plugins/types.js';
 import { AuditLogger, summarizeArgs } from '../utils/audit.js';
@@ -8,6 +9,7 @@ import { ClientIdentity } from './client-identity.js';
 type PermissionAction = PermissionConfig['actions'][number];
 type ToolKind = 'raw' | 'semantic';
 type SemanticToolName = 'search_personal_context' | 'read_context_item';
+type ContextToolName = 'search' | 'list' | 'read' | 'write' | 'delete';
 
 interface ToolEntry {
   connector: Connector;
@@ -20,6 +22,7 @@ interface ToolEntry {
 
 export interface ToolRouterOptions {
   semanticTools?: SemanticToolsConfig;
+  contextIndex?: TextContextIndex;
 }
 
 export interface RouterConnector {
@@ -45,6 +48,7 @@ export class ToolRouter {
   private readonly semanticToolDefinitions: NamespacedTool[] = [];
   private readonly connectors: RouterConnector[];
   private readonly semanticTools: SemanticToolsConfig;
+  private readonly contextIndex?: TextContextIndex;
 
   constructor(
     connectors: Array<Connector | RouterConnector>,
@@ -58,6 +62,7 @@ export class ToolRouter {
         : { connector: entry, sourceId: entry.id }
     ));
     this.semanticTools = options.semanticTools ?? {};
+    this.contextIndex = options.contextIndex;
   }
 
   async initialize(): Promise<void> {
@@ -101,13 +106,16 @@ export class ToolRouter {
     }
 
     this.semanticToolDefinitions.push(...buildSemanticToolDefinitions());
+    if (this.contextIndex) {
+      this.semanticToolDefinitions.push(...buildContextToolDefinitions());
+    }
   }
 
   getAllTools(identity?: ClientIdentity): NamespacedTool[] {
     return [
       ...this.allTools.filter((tool) => isToolAllowed(tool, identity)).map((tool) => ({ ...tool })),
       ...this.semanticToolDefinitions
-        .filter((tool) => this.isSemanticToolVisible(tool.namespacedName as SemanticToolName, identity))
+        .filter((tool) => this.isVirtualToolVisible(tool.namespacedName, identity))
         .map((tool) => ({ ...tool })),
     ];
   }
@@ -119,6 +127,9 @@ export class ToolRouter {
   ): Promise<CallToolResult> {
     if (isSemanticToolName(namespacedName)) {
       return this.callSemanticTool(namespacedName, args, identity);
+    }
+    if (isContextToolName(namespacedName)) {
+      return this.callContextTool(namespacedName, args, identity);
     }
 
     const entry = this.toolMap.get(namespacedName);
@@ -216,6 +227,118 @@ export class ToolRouter {
     }
   }
 
+  private async callContextTool(
+    name: ContextToolName,
+    args: Record<string, unknown>,
+    identity?: ClientIdentity,
+  ): Promise<CallToolResult> {
+    const start = Date.now();
+    const redactions: NonNullable<import('../utils/audit.js').AuditEntry['redactions']> = [];
+    let result: CallToolResult | undefined;
+    let threw = false;
+    let deniedReason: string | undefined;
+
+    try {
+      if (!this.contextIndex) {
+        deniedReason = 'text_index_disabled';
+        result = accessDeniedResult(deniedReason);
+        return result;
+      }
+
+      result = await this.dispatchContextTool(name, args, identity);
+      for (const plugin of this.plugins) {
+        const output = await plugin.process({
+          connectorId: 'mvmt',
+          toolName: name,
+          originalName: name,
+          args,
+          result,
+        });
+        result = output.result;
+        redactions.push(...flattenRedactionEvents(output.auditEvents ?? []));
+      }
+      return result;
+    } catch (err) {
+      threw = true;
+      result = {
+        content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : 'Unknown error'}` }],
+        isError: true,
+      };
+      return result;
+    } finally {
+      this.recordAudit(
+        { connector: { id: 'mvmt', displayName: 'mvmt' } as Connector },
+        name,
+        args,
+        start,
+        result,
+        threw,
+        redactions,
+        identity,
+        deniedReason ?? (result?.isError ? deniedReasonFromResult(result) : undefined),
+      );
+    }
+  }
+
+  private async dispatchContextTool(
+    name: ContextToolName,
+    args: Record<string, unknown>,
+    identity?: ClientIdentity,
+  ): Promise<CallToolResult> {
+    if (!this.contextIndex) return accessDeniedResult('text_index_disabled');
+    if (name === 'search') {
+      const query = requireString(args.query, 'query');
+      const requested = optionalStringArray(args.mounts);
+      const mountNames = this.allowedContextMounts('search', identity, requested);
+      const limit = normalizeLimit(args.limit);
+      return jsonResult({
+        query,
+        ranking: 'prototype_keyword_count',
+        results: await this.contextIndex.search(query, mountNames, limit),
+      });
+    }
+
+    if (name === 'list') {
+      const inputPath = optionalString(args.path) ?? '/';
+      const mountName = inputPath === '/' ? undefined : this.contextIndex.mountNameForPath(inputPath);
+      if (mountName && !contextSourceAllowed(mountName, 'read', identity)) {
+        return accessDeniedResult(`missing_permission mount=${mountName} action=read`);
+      }
+      const entries = await this.contextIndex.list(inputPath);
+      return jsonResult({
+        path: inputPath,
+        entries: entries.filter((entry) => contextSourceAllowed(entry.mount, 'read', identity)),
+      });
+    }
+
+    if (name === 'read') {
+      const inputPath = requireString(args.path, 'path');
+      const mountName = this.contextIndex.mountNameForPath(inputPath);
+      if (!mountName || !contextSourceAllowed(mountName, 'read', identity)) {
+        return accessDeniedResult(`missing_permission mount=${mountName ?? '(unknown)'} action=read`);
+      }
+      return jsonResult(await this.contextIndex.read(inputPath));
+    }
+
+    if (name === 'write') {
+      const inputPath = requireString(args.path, 'path');
+      const content = requireText(args.content, 'content');
+      const expectedHash = optionalString(args.expected_hash);
+      const mountName = this.contextIndex.mountNameForPath(inputPath);
+      if (!mountName || !contextSourceAllowed(mountName, 'write', identity)) {
+        return accessDeniedResult(`missing_permission mount=${mountName ?? '(unknown)'} action=write`);
+      }
+      return jsonResult(await this.contextIndex.write(inputPath, content, expectedHash));
+    }
+
+    const inputPath = requireString(args.path, 'path');
+    const mountName = this.contextIndex.mountNameForPath(inputPath);
+    if (!mountName || !contextSourceAllowed(mountName, 'write', identity)) {
+      return accessDeniedResult(`missing_permission mount=${mountName ?? '(unknown)'} action=write`);
+    }
+    return jsonResult(await this.contextIndex.delete(inputPath));
+  }
+
   private async searchPersonalContext(
     args: Record<string, unknown>,
     identity?: ClientIdentity,
@@ -286,6 +409,15 @@ export class ToolRouter {
     return this.allowedSemanticSources(name, identity).length > 0;
   }
 
+  private isVirtualToolVisible(name: string, identity?: ClientIdentity): boolean {
+    if (isSemanticToolName(name)) return this.isSemanticToolVisible(name, identity);
+    if (isContextToolName(name)) {
+      const action: PermissionAction = name === 'search' ? 'search' : name === 'write' || name === 'delete' ? 'write' : 'read';
+      return this.allowedContextMounts(action, identity).length > 0;
+    }
+    return false;
+  }
+
   private allowedSemanticSources(
     name: SemanticToolName,
     identity?: ClientIdentity,
@@ -312,6 +444,18 @@ export class ToolRouter {
     return preferred
       .map((name) => tools.find((tool) => tool.originalName === name))
       .find((tool): tool is ToolEntry => Boolean(tool));
+  }
+
+  private allowedContextMounts(
+    action: PermissionAction,
+    identity?: ClientIdentity,
+    requestedMountNames?: string[],
+  ): string[] {
+    if (!this.contextIndex) return [];
+    const requested = requestedMountNames ? new Set(requestedMountNames) : undefined;
+    return this.contextIndex.mountNames().filter((mountName) => (
+      (!requested || requested.has(mountName)) && contextSourceAllowed(mountName, action, identity)
+    ));
   }
 
   private recordAudit(
@@ -415,8 +559,100 @@ function buildSemanticToolDefinitions(): NamespacedTool[] {
   ];
 }
 
+function buildContextToolDefinitions(): NamespacedTool[] {
+  return [
+    {
+      namespacedName: 'search',
+      originalName: 'search',
+      connectorId: 'mvmt',
+      sourceId: 'mvmt',
+      requiredAction: 'search',
+      toolKind: 'semantic',
+      description: 'Search permitted text-file mounts and return ranked chunks from the local index.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Keyword or phrase to search for' },
+          mounts: { type: 'array', items: { type: 'string' }, description: 'Optional mount names to search' },
+          limit: { type: 'number', description: 'Maximum total results. Default 8, max 20' },
+        },
+        required: ['query'],
+      },
+    },
+    {
+      namespacedName: 'list',
+      originalName: 'list',
+      connectorId: 'mvmt',
+      sourceId: 'mvmt',
+      requiredAction: 'read',
+      toolKind: 'semantic',
+      description: 'List permitted mounts or a directory within one mount.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Optional path such as /workspace or /workspace/docs' },
+        },
+      },
+    },
+    {
+      namespacedName: 'read',
+      originalName: 'read',
+      connectorId: 'mvmt',
+      sourceId: 'mvmt',
+      requiredAction: 'read',
+      toolKind: 'semantic',
+      description: 'Read one permitted text file by path.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Path such as /workspace/README.md' },
+        },
+        required: ['path'],
+      },
+    },
+    {
+      namespacedName: 'write',
+      originalName: 'write',
+      connectorId: 'mvmt',
+      sourceId: 'mvmt',
+      requiredAction: 'write',
+      toolKind: 'semantic',
+      description: 'Create or overwrite one permitted text file. Optionally pass expected_hash to avoid stale writes.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Path such as /workspace/notes.md' },
+          content: { type: 'string', description: 'Full file content to write' },
+          expected_hash: { type: 'string', description: 'Optional SHA-256 hash from a previous read' },
+        },
+        required: ['path', 'content'],
+      },
+    },
+    {
+      namespacedName: 'delete',
+      originalName: 'delete',
+      connectorId: 'mvmt',
+      sourceId: 'mvmt',
+      requiredAction: 'write',
+      toolKind: 'semantic',
+      description: 'Delete one permitted text file. Protected paths are always blocked.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Path such as /workspace/old-note.md' },
+        },
+        required: ['path'],
+      },
+    },
+  ];
+}
+
 function isSemanticToolName(value: string): value is SemanticToolName {
   return value === 'search_personal_context' || value === 'read_context_item';
+}
+
+function isContextToolName(value: string): value is ContextToolName {
+  return value === 'search' || value === 'list' || value === 'read' || value === 'write' || value === 'delete';
 }
 
 function semanticSourceAllowed(sourceId: string, action: PermissionAction, identity?: ClientIdentity): boolean {
@@ -426,11 +662,26 @@ function semanticSourceAllowed(sourceId: string, action: PermissionAction, ident
   ));
 }
 
+function contextSourceAllowed(sourceId: string, action: PermissionAction, identity?: ClientIdentity): boolean {
+  return semanticSourceAllowed(sourceId, action, identity);
+}
+
 function requireString(value: unknown, field: string): string {
   if (typeof value !== 'string' || value.trim().length === 0) {
     throw new Error(`${field} is required`);
   }
   return value.trim();
+}
+
+function requireText(value: unknown, field: string): string {
+  if (typeof value !== 'string') {
+    throw new Error(`${field} is required`);
+  }
+  return value;
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
 }
 
 function optionalStringArray(value: unknown): string[] | undefined {
@@ -547,6 +798,12 @@ function objectMetadata(value: Record<string, unknown> | undefined, keys: string
 function semanticErrorText(result: CallToolResult): string | undefined {
   const text = extractToolText(result);
   return text.startsWith('Error: ') ? text.slice('Error: '.length, 180) : undefined;
+}
+
+function deniedReasonFromResult(result: CallToolResult): string | undefined {
+  const text = extractToolText(result);
+  const match = text.match(/^Error: access denied \((.+)\)\.?$/);
+  return match?.[1] ?? semanticErrorText(result);
 }
 
 function flattenRedactionEvents(

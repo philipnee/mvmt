@@ -5,6 +5,8 @@ import { addConnector, listConnectors } from '../src/cli/connectors.js';
 import { runConfigSetup, showConfig } from '../src/cli/config.js';
 import { doctor } from '../src/cli/doctor.js';
 import { init } from '../src/cli/init.js';
+import { reindex } from '../src/cli/reindex.js';
+import { addMount, editMount, listMounts, removeMount } from '../src/cli/mounts.js';
 import { start } from '../src/cli/start.js';
 import {
   configureTunnel,
@@ -72,6 +74,72 @@ program
   .action(async (options: { config?: string; json?: boolean; timeoutMs?: string }) => {
     const globalOptions = program.opts<{ updateCheck?: boolean }>();
     await doctor({ ...options, updateCheck: globalOptions.updateCheck !== false });
+  });
+
+program
+  .command('reindex')
+  .description('Rebuild the prototype text context index')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (options: { config?: string }) => {
+    await reindex(options);
+  });
+
+const mountsCommand = program
+  .command('mounts')
+  .description('Manage local folder mounts')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (options: { config?: string }) => {
+    await listMounts(options);
+  });
+
+mountsCommand
+  .command('list')
+  .description('List configured mounts')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (options: { config?: string }) => {
+    await listMounts(options);
+  });
+
+mountsCommand
+  .command('add [name] [root]')
+  .description('Add a local folder mount')
+  .option('-c, --config <path>', 'Config file path')
+  .option('--mount-path <path>', 'Virtual mount path, such as /notes')
+  .option('--write', 'Allow write/remove tools for this mount')
+  .option('--read-only', 'Keep this mount read-only')
+  .option('--description <text>', 'Short description shown to agents when listing mounts')
+  .option('--guidance <text>', 'Mount-specific instructions shown to agents when listing mounts')
+  .option('--exclude <pattern>', 'Exclude glob pattern (repeatable)', collectValues)
+  .option('--protect <pattern>', 'Protected write/remove glob pattern (repeatable)', collectValues)
+  .option('--disabled', 'Add the mount disabled')
+  .action(async (name: string | undefined, root: string | undefined, options: { config?: string; mountPath?: string; write?: boolean; readOnly?: boolean; description?: string; guidance?: string; exclude?: string[]; protect?: string[]; disabled?: boolean }) => {
+    await addMount(name, root, options);
+  });
+
+mountsCommand
+  .command('edit [name]')
+  .description('Edit a local folder mount')
+  .option('-c, --config <path>', 'Config file path')
+  .option('--root <path>', 'New local folder root')
+  .option('--mount-path <path>', 'New virtual mount path, such as /notes')
+  .option('--write', 'Allow write/remove tools for this mount')
+  .option('--read-only', 'Make this mount read-only')
+  .option('--description <text>', 'Replace the mount description shown to agents')
+  .option('--guidance <text>', 'Replace the mount-specific instructions shown to agents')
+  .option('--exclude <pattern>', 'Replace exclude glob patterns (repeatable)', collectValues)
+  .option('--protect <pattern>', 'Replace protected write/remove glob patterns (repeatable)', collectValues)
+  .option('--enable', 'Enable this mount')
+  .option('--disable', 'Disable this mount')
+  .action(async (name: string | undefined, options: { config?: string; root?: string; mountPath?: string; write?: boolean; readOnly?: boolean; description?: string; guidance?: string; exclude?: string[]; protect?: string[]; enable?: boolean; disable?: boolean }) => {
+    await editMount(name, options);
+  });
+
+mountsCommand
+  .command('remove [name]')
+  .description('Remove a mount')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (name: string | undefined, options: { config?: string }) => {
+    await removeMount(name, options);
   });
 
 const configCommand = program

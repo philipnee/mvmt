@@ -1,5 +1,10 @@
+import fs from 'fs/promises';
+import os from 'os';
+import path from 'path';
 import { describe, expect, it, vi } from 'vitest';
 import { Connector } from '../src/connectors/types.js';
+import { parseConfig } from '../src/config/loader.js';
+import { TextContextIndex } from '../src/context/text-index.js';
 import { ToolRouter } from '../src/server/router.js';
 import { ClientIdentity } from '../src/server/client-identity.js';
 
@@ -338,6 +343,51 @@ describe('ToolRouter', () => {
       content: '# Launch\nShip it.',
     });
   });
+
+  it('exposes prototype text index tools by source/action permission', async () => {
+    const { index, tmp } = await createTextIndexFixture();
+    try {
+      const router = new ToolRouter([], undefined, [], { contextIndex: index });
+      await router.initialize();
+
+      const tools = router.getAllTools(client('codex', false, [
+        { sourceId: 'workspace', actions: ['search', 'read'] },
+      ]));
+
+      expect(tools.map((tool) => tool.namespacedName)).toEqual(['search', 'list', 'read']);
+      const result = await router.callTool('search', { query: 'alpha' }, client('codex', false, [
+        { sourceId: 'workspace', actions: ['search', 'read'] },
+      ]));
+      const parsed = JSON.parse(result.content[0].type === 'text' ? result.content[0].text : '{}');
+      expect(parsed.results[0]).toMatchObject({ mount: 'workspace', path: '/workspace/note.md' });
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('denies prototype text index writes without write permission', async () => {
+    const { index, tmp } = await createTextIndexFixture();
+    const audit = { record: vi.fn() };
+    try {
+      const router = new ToolRouter([], audit, [], { contextIndex: index });
+      await router.initialize();
+
+      const result = await router.callTool('write', { path: '/workspace/new.md', content: 'new' }, client('chatgpt', false, [
+        { sourceId: 'workspace', actions: ['search', 'read'] },
+      ]));
+
+      expect(result).toMatchObject({ isError: true });
+      expect(audit.record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          clientId: 'chatgpt',
+          deniedReason: 'missing_permission mount=workspace action=write',
+          isError: true,
+        }),
+      );
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
 });
 
 function client(
@@ -387,4 +437,21 @@ function obsidianFixtureConnector(): Connector {
       };
     }),
   };
+}
+
+async function createTextIndexFixture(): Promise<{ index: TextContextIndex; tmp: string }> {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-router-index-'));
+  const sourceRoot = path.join(tmp, 'source');
+  await fs.mkdir(sourceRoot);
+  await fs.writeFile(path.join(sourceRoot, 'note.md'), 'alpha note', 'utf-8');
+  const config = parseConfig({
+    version: 1,
+    mounts: [{ name: 'workspace', type: 'local_folder', path: '/workspace', root: sourceRoot, writeAccess: true }],
+  });
+  const index = new TextContextIndex({
+    mounts: config.mounts,
+    indexPath: path.join(tmp, 'index.json'),
+  });
+  await index.rebuild();
+  return { index, tmp };
 }

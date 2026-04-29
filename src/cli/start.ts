@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import { TextContextIndex, defaultTextIndexPath } from '../context/text-index.js';
 import { configExists, loadConfig, resolveConfigPath, saveConfig } from '../config/loader.js';
 import { MvmtConfig, TunnelSchema } from '../config/schema.js';
 import { createTemporaryFilesystemConfig, readFilesystemPaths } from './config.js';
@@ -77,13 +78,16 @@ export async function start(options: StartOptions = {}): Promise<void> {
   const config = loadConfig(configPath);
   const port = parsePort(options.port) ?? config.server.port;
   const loaded = await initializeConnectors(config, stdioMode, logger);
+  const textIndex = config.mounts.some((mount) => mount.enabled !== false)
+    ? new TextContextIndex({ mounts: config.mounts, indexPath: defaultTextIndexPath(configPath) })
+    : undefined;
   const plugins = createPlugins(config.plugins);
   for (const plugin of plugins) {
     emit(`Loaded plugin:${plugin.id}`, stdioMode, logger);
   }
 
-  if (loaded.length === 0) {
-    emit('No connectors loaded. Nothing to serve.', stdioMode, logger, 'error');
+  if (loaded.length === 0 && !textIndex) {
+    emit('No connectors or mounts loaded. Nothing to serve.', stdioMode, logger, 'error');
     emit('Check your config with `mvmt config` or rerun `mvmt config setup`.', stdioMode, logger, 'error');
     process.exit(1);
   }
@@ -95,16 +99,23 @@ export async function start(options: StartOptions = {}): Promise<void> {
     loaded.map((entry) => ({ connector: entry.connector, sourceId: entry.sourceId })),
     audit,
     plugins,
-    { semanticTools: config.semanticTools },
+    { semanticTools: config.semanticTools, contextIndex: textIndex },
   );
   await router.initialize();
+  if (textIndex) {
+    void textIndex.rebuild().then((stats) => {
+      emit(`Text index ready: ${stats.files} files, ${stats.chunks} chunks`, stdioMode, logger);
+    }).catch((err) => {
+      emit(`Text index failed: ${err instanceof Error ? err.message : 'unknown error'}`, stdioMode, logger, 'warn');
+    });
+  }
 
   // Cleanup tasks run on SIGINT/SIGTERM and on startup failure.
   // Tasks are appended as resources are acquired so only initialized
   // resources are cleaned up. See registerShutdown for the 5-second
   // force-exit timeout that guards against hung cleanup.
   const cleanupTasks: CleanupTask[] = [...temporaryCleanupTasks, ...loaded.map((entry) => () => entry.connector.shutdown())];
-  const shutdown = registerShutdown(cleanupTasks, stdioMode, logger);
+  const shutdown = registerShutdown(cleanupTasks, stdioMode, logger, { handleSigint: !interactiveMode });
 
   if (stdioMode) {
     const stdio = await startStdioServer(router);
@@ -192,7 +203,15 @@ export async function start(options: StartOptions = {}): Promise<void> {
       verifyToken: (token) => verifySessionTokenValue(token),
     });
     cleanupTasks.push(() => controlServer.close());
-    printStartupBanner(port, loaded, plugins, router.getAllTools().length, tunnel?.url, interactiveMode);
+    printStartupBanner(
+      port,
+      loaded,
+      plugins,
+      router.getAllTools().length,
+      tunnel?.url,
+      interactiveMode,
+      textIndex?.mountNames().length ?? 0,
+    );
     if (interactiveMode) {
       startInteractivePrompt({
         config,
@@ -229,6 +248,7 @@ function registerShutdown(
   cleanupTasks: CleanupTask[],
   stdioMode: boolean,
   logger: Logger,
+  options: { handleSigint?: boolean } = {},
 ): () => Promise<void> {
   let shuttingDown = false;
   const shutdown = async () => {
@@ -247,7 +267,9 @@ function registerShutdown(
     process.exit(0);
   };
 
-  process.once('SIGINT', shutdown);
+  if (options.handleSigint !== false) {
+    process.once('SIGINT', shutdown);
+  }
   process.once('SIGTERM', shutdown);
   return shutdown;
 }
@@ -259,6 +281,7 @@ function printStartupBanner(
   totalTools: number,
   publicUrl?: string,
   interactiveMode = false,
+  mountCount = 0,
 ): void {
   console.log('');
   console.log(chalk.cyan(MVMT_LOGO));
@@ -270,6 +293,9 @@ function printStartupBanner(
   console.log(chalk.bold('Connectors:'));
   for (const entry of loaded) {
     console.log(`  ${chalk.green('ok')} ${entry.connector.id.padEnd(22)} ${String(entry.toolCount).padStart(3)} tools`);
+  }
+  if (mountCount > 0) {
+    console.log(`  ${chalk.green('ok')} ${'text-index'.padEnd(22)} ${String(mountCount).padStart(3)} mounts`);
   }
   console.log(`  ${chalk.dim('total'.padEnd(25))} ${String(totalTools).padStart(3)} tools\n`);
   if (plugins.length > 0) {

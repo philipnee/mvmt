@@ -7,10 +7,13 @@ import { generateSessionToken, rotateSigningKey, TOKEN_PATH, defaultSigningKeyPa
 import { formatMcpPublicUrl } from '../utils/tunnel.js';
 import { printTokenSummary, readTokenSummary } from './token.js';
 import { printConfigSummary } from './config.js';
+import { printMounts, promptAndAddMount, promptAndEditMount, promptAndRemoveMount } from './mounts.js';
 import { promptForTunnelConfig } from './tunnel.js';
 import { LoadedConnector } from './connector-loader.js';
 import { TunnelController } from './tunnel-controller.js';
 import { ToolResultPlugin } from '../plugins/types.js';
+
+const SIGINT_EXIT_WINDOW_MS = 2_000;
 
 export class InteractiveAuditLogger implements AuditLogger {
   private liveLogs = true;
@@ -58,6 +61,8 @@ export interface InteractivePromptState {
 }
 
 export function startInteractivePrompt(state: InteractivePromptState): void {
+  let handlingCommand = false;
+  let lastSigintAt = 0;
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -75,11 +80,20 @@ export function startInteractivePrompt(state: InteractivePromptState): void {
   rl.prompt();
 
   rl.on('line', async (line) => {
+    if (handlingCommand) return;
+    handlingCommand = true;
+    lastSigintAt = 0;
     const command = line.trim().toLowerCase();
     try {
       await handleInteractiveCommand(command, state, rl);
     } catch (err) {
-      console.log(chalk.red(err instanceof Error ? err.message : 'Command failed'));
+      if (isPromptCancelError(err)) {
+        console.log(chalk.yellow('Canceled.'));
+      } else {
+        console.log(chalk.red(err instanceof Error ? err.message : 'Command failed'));
+      }
+    } finally {
+      handlingCommand = false;
     }
     if (command !== 'quit' && command !== 'exit') {
       rl.prompt();
@@ -87,12 +101,33 @@ export function startInteractivePrompt(state: InteractivePromptState): void {
   });
 
   rl.on('SIGINT', async () => {
-    await state.shutdown();
+    if (handlingCommand) return;
+    const now = Date.now();
+    if (shouldShutdownOnSigint(lastSigintAt, now)) {
+      await state.shutdown();
+      return;
+    }
+    lastSigintAt = now;
+    console.log(chalk.yellow('Press Ctrl-C again to stop mvmt, or type "quit".'));
+    rl.prompt();
   });
 
   rl.on('close', async () => {
     await state.shutdown();
   });
+}
+
+export function shouldShutdownOnSigint(lastSigintAt: number, now: number): boolean {
+  return lastSigintAt > 0 && now - lastSigintAt <= SIGINT_EXIT_WINDOW_MS;
+}
+
+export function isPromptCancelError(err: unknown): boolean {
+  return err instanceof Error
+    && (
+      err.name === 'ExitPromptError'
+      || err.message.includes('User force closed the prompt')
+      || err.message.includes('force closed')
+    );
 }
 
 async function handleInteractiveCommand(
@@ -177,6 +212,18 @@ async function handleInteractiveCommand(
     case 'connectors':
       printConnectorSummary(state.loaded, state.totalTools);
       return;
+    case 'mounts':
+      printMounts(state.config);
+      return;
+    case 'mounts add':
+      await handleMountsAdd(state);
+      return;
+    case 'mounts edit':
+      await handleMountsEdit(state);
+      return;
+    case 'mounts remove':
+      await handleMountsRemove(state);
+      return;
     default:
       console.log(chalk.yellow(`Unknown command: ${command}`));
       console.log(chalk.dim('Type "help" for commands.'));
@@ -202,6 +249,8 @@ function printInteractiveHelp(): void {
   console.log('  status      show server, connector, token, and log status');
   console.log('  url         show local and public MCP URLs');
   console.log('  connectors  list loaded connectors');
+  console.log('  mounts      list configured mounts');
+  console.log('  mounts add/edit/remove');
   console.log('  clear       clear the terminal');
   console.log('  quit        stop mvmt');
   console.log('');
@@ -239,6 +288,7 @@ function printInteractiveStatus(state: InteractivePromptState): void {
   printTunnelStatus(state);
   printPluginSummary(state.plugins);
   printConnectorSummary(state.loaded, state.totalTools);
+  printMounts(state.config);
 }
 
 function printInteractiveUrls(state: InteractivePromptState): void {
@@ -344,6 +394,36 @@ function printConnectorSummary(loaded: LoadedConnector[], totalTools: number): v
     console.log(`  ${chalk.green('ok')} ${entry.connector.id.padEnd(22)} ${String(entry.toolCount).padStart(3)} tools`);
   }
   console.log(`  ${chalk.dim('total'.padEnd(25))} ${String(totalTools).padStart(3)} tools`);
+}
+
+async function handleMountsAdd(state: InteractivePromptState): Promise<void> {
+  const nextConfig = await promptAndAddMount(state.config);
+  if (!nextConfig) return;
+  state.config.mounts = nextConfig.mounts;
+  await state.persistConfig();
+  console.log(chalk.green(`Mounts saved to ${state.configPath}`));
+  console.log(chalk.dim('Restart mvmt for the running server to load mount changes. Run `mvmt reindex` to rebuild the index.'));
+}
+
+async function handleMountsEdit(state: InteractivePromptState): Promise<void> {
+  const nextConfig = await promptAndEditMount(state.config);
+  if (!nextConfig) return;
+  state.config.mounts = nextConfig.mounts;
+  await state.persistConfig();
+  console.log(chalk.green(`Mounts saved to ${state.configPath}`));
+  console.log(chalk.dim('Restart mvmt for the running server to load mount changes. Run `mvmt reindex` to rebuild the index.'));
+}
+
+async function handleMountsRemove(state: InteractivePromptState): Promise<void> {
+  const nextConfig = await promptAndRemoveMount(state.config);
+  if (!nextConfig) {
+    console.log(chalk.yellow('Mount config unchanged.'));
+    return;
+  }
+  state.config.mounts = nextConfig.mounts;
+  await state.persistConfig();
+  console.log(chalk.green(`Mounts saved to ${state.configPath}`));
+  console.log(chalk.dim('Restart mvmt for the running server to load mount changes. Run `mvmt reindex` to rebuild the index.'));
 }
 
 function printPluginSummary(plugins: ToolResultPlugin[]): void {

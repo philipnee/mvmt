@@ -129,6 +129,19 @@ export const PluginSchema = z.discriminatedUnion('name', [
 // connector. Used by client permissions and semantic tool source lists.
 export const OBSIDIAN_SOURCE_ID = 'obsidian';
 
+export const LocalFolderMountSchema = z.object({
+  name: z.string().min(1).regex(/^[a-z0-9][a-z0-9_-]*$/, 'mount name must be lowercase alphanum/dash/underscore'),
+  type: z.literal('local_folder').default('local_folder'),
+  path: z.string().min(1).regex(/^\/(?!$)/, 'mount path must be absolute and cannot be /'),
+  root: z.string().min(1),
+  description: z.string().default(''),
+  guidance: z.string().default(''),
+  exclude: z.array(z.string().min(1)).default(['.git/**', 'node_modules/**', '.claude/**']),
+  protect: z.array(z.string().min(1)).default(['.env', '.env.*', '.claude/**']),
+  writeAccess: z.boolean().default(false),
+  enabled: z.boolean().default(true),
+});
+
 export const PermissionAction = z.enum(['search', 'read', 'write', 'memory_write']);
 
 export const PermissionSchema = z.object({
@@ -196,6 +209,7 @@ export const ConfigSchema = z
       })
       .default({}),
     proxy: z.array(ProxySchema).default([]),
+    mounts: z.array(LocalFolderMountSchema).default([]),
     obsidian: ObsidianSchema.optional(),
     plugins: z.array(PluginSchema).default([]),
     // clients and semanticTools are additive to the v1 schema. When
@@ -206,6 +220,7 @@ export const ConfigSchema = z
   })
   .superRefine((data, ctx) => {
     const knownSourceIds = collectKnownSourceIds(data);
+    validateUniqueSourceIds(data, ctx);
     const seenClientIds = new Set<string>();
     // Track auth bindings across clients so config order does not silently
     // become an authorization decision when two clients share the same
@@ -278,6 +293,46 @@ export const ConfigSchema = z
     }
   });
 
+function validateUniqueSourceIds(
+  data: { proxy: ProxyConfig[]; mounts: LocalFolderMountConfig[]; obsidian?: ObsidianConfig },
+  ctx: z.RefinementCtx,
+): void {
+  const seen = new Map<string, { path: (string | number)[] }>();
+  const track = (sourceId: string, issuePath: (string | number)[]) => {
+    const previous = seen.get(sourceId);
+    if (previous) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `duplicate sourceId "${sourceId}"; first seen at ${previous.path.join('.')}`,
+        path: issuePath,
+      });
+      return;
+    }
+    seen.set(sourceId, { path: issuePath });
+  };
+
+  for (const [index, proxy] of data.proxy.entries()) {
+    track(resolveProxySourceId(proxy), ['proxy', index, proxy.id ? 'id' : 'name']);
+  }
+  const seenMountPaths = new Map<string, number>();
+  for (const [index, mount] of data.mounts.entries()) {
+    track(mount.name, ['mounts', index, 'name']);
+    const firstMountPath = seenMountPaths.get(mount.path);
+    if (firstMountPath !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `duplicate mount path "${mount.path}"; first seen at mounts.${firstMountPath}.path`,
+        path: ['mounts', index, 'path'],
+      });
+    } else {
+      seenMountPaths.set(mount.path, index);
+    }
+  }
+  if (data.obsidian) {
+    track(OBSIDIAN_SOURCE_ID, ['obsidian']);
+  }
+}
+
 // resolveProxySourceId returns the policy-stable source id for a proxy
 // entry (id when set, otherwise name). Exported so policy enforcement
 // uses the same lookup the schema validation uses.
@@ -285,10 +340,13 @@ export function resolveProxySourceId(proxy: ProxyConfig): string {
   return proxy.id ?? proxy.name;
 }
 
-function collectKnownSourceIds(data: { proxy: ProxyConfig[]; obsidian?: ObsidianConfig }): Set<string> {
+function collectKnownSourceIds(data: { proxy: ProxyConfig[]; mounts: LocalFolderMountConfig[]; obsidian?: ObsidianConfig }): Set<string> {
   const ids = new Set<string>();
   for (const proxy of data.proxy) {
     ids.add(resolveProxySourceId(proxy));
+  }
+  for (const mount of data.mounts) {
+    ids.add(mount.name);
   }
   if (data.obsidian) {
     ids.add(OBSIDIAN_SOURCE_ID);
@@ -298,6 +356,7 @@ function collectKnownSourceIds(data: { proxy: ProxyConfig[]; obsidian?: Obsidian
 
 export type TunnelConfig = z.infer<typeof TunnelSchema>;
 export type ProxyConfig = z.infer<typeof ProxySchema>;
+export type LocalFolderMountConfig = z.infer<typeof LocalFolderMountSchema>;
 export type ObsidianConfig = z.infer<typeof ObsidianSchema>;
 export type PatternRedactorPatternConfig = z.infer<typeof PatternRedactorPatternSchema>;
 export type PatternRedactorPluginConfig = z.infer<typeof PatternRedactorPluginSchema>;
