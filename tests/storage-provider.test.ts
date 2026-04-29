@@ -6,6 +6,8 @@ import { parseConfig } from '../src/config/loader.js';
 import { MountRegistry } from '../src/context/mount-registry.js';
 import { LocalFolderStorageProvider } from '../src/context/storage-provider.js';
 
+const itUnlessWindows = process.platform === 'win32' ? it.skip : it;
+
 describe('LocalFolderStorageProvider', () => {
   let tmp: string;
 
@@ -68,6 +70,23 @@ describe('LocalFolderStorageProvider', () => {
     const provider = createProvider(tmp, false);
 
     await expect(provider.write('new.md', 'content')).rejects.toThrow('read-only');
+  });
+
+  itUnlessWindows('blocks symlink escapes for direct and nested paths', async () => {
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-storage-provider-outside-'));
+    try {
+      await fs.writeFile(path.join(outside, 'secret.md'), 'secret', 'utf-8');
+      await fs.symlink(path.join(outside, 'secret.md'), path.join(tmp, 'linked-secret.md'));
+      await fs.symlink(outside, path.join(tmp, 'linked-dir'));
+      const provider = createProvider(tmp, true);
+
+      await expect(provider.read('linked-secret.md')).rejects.toThrow('escapes mount root');
+      await expect(provider.list('linked-dir')).rejects.toThrow('escapes mount root');
+      await expect(provider.write('linked-dir/new.md', 'new')).rejects.toThrow('escapes mount root');
+      await expect(provider.remove('linked-secret.md')).rejects.toThrow('escapes mount root');
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
   });
 });
 

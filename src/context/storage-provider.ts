@@ -43,6 +43,7 @@ export class LocalFolderStorageProvider implements StorageProvider {
 
   async list(relativePath = ''): Promise<StorageProviderEntry[]> {
     const target = this.resolve(relativePath);
+    await this.assertRealPathWithinMount(target);
     const stat = await fsp.stat(target.realPath);
     if (!stat.isDirectory()) {
       return [{
@@ -62,6 +63,7 @@ export class LocalFolderStorageProvider implements StorageProvider {
       if (this.isExcluded(childRelative)) continue;
       if (!entry.isDirectory() && !this.options.isTextPath(entry.name)) continue;
       const realPath = path.join(target.realPath, entry.name);
+      if (!await this.realPathWithinMount(realPath)) continue;
       const itemStat = await fsp.stat(realPath);
       result.push({
         mount: this.mount.config.name,
@@ -87,6 +89,7 @@ export class LocalFolderStorageProvider implements StorageProvider {
   async read(relativePath: string): Promise<StorageProviderFile> {
     const target = this.resolve(relativePath);
     this.assertTextPath(target.virtualPath);
+    await this.assertRealPathWithinMount(target);
     const stat = await fsp.stat(target.realPath);
     if (!stat.isFile()) throw new Error(`${target.virtualPath} is not a file`);
     if (stat.size > this.options.maxTextBytes) throw new Error(`${target.virtualPath} is too large to read as text`);
@@ -105,6 +108,7 @@ export class LocalFolderStorageProvider implements StorageProvider {
     const target = this.resolve(relativePath);
     this.assertWritable(target);
     this.assertTextPath(target.virtualPath);
+    await this.assertRealPathWithinMount(target, { allowMissingLeaf: true });
     await fsp.mkdir(path.dirname(target.realPath), { recursive: true });
     await fsp.writeFile(target.realPath, content, 'utf-8');
     return this.read(relativePath);
@@ -113,6 +117,7 @@ export class LocalFolderStorageProvider implements StorageProvider {
   async remove(relativePath: string): Promise<void> {
     const target = this.resolve(relativePath);
     this.assertWritable(target);
+    await this.assertRealPathWithinMount(target);
     const stat = await fsp.stat(target.realPath);
     if (!stat.isFile()) throw new Error(`${target.virtualPath} is not a file`);
     await fsp.unlink(target.realPath);
@@ -165,6 +170,51 @@ export class LocalFolderStorageProvider implements StorageProvider {
 
   private realPath(relativePath: string): string {
     return path.resolve(this.mount.root, toVirtualRelative(relativePath));
+  }
+
+  private async assertRealPathWithinMount(
+    target: ResolvedProviderPath,
+    options: { allowMissingLeaf?: boolean } = {},
+  ): Promise<void> {
+    const rootRealPath = await fsp.realpath(this.mount.root);
+    try {
+      const targetRealPath = await fsp.realpath(target.realPath);
+      if (!isWithin(rootRealPath, targetRealPath)) {
+        throw new Error(`${target.virtualPath} escapes mount root`);
+      }
+      return;
+    } catch (err) {
+      if (!options.allowMissingLeaf || !isMissingPathError(err)) throw err;
+    }
+
+    const ancestorRealPath = await this.nearestExistingAncestorRealPath(target.realPath);
+    if (!isWithin(rootRealPath, ancestorRealPath)) {
+      throw new Error(`${target.virtualPath} escapes mount root`);
+    }
+  }
+
+  private async realPathWithinMount(realPath: string): Promise<boolean> {
+    try {
+      const rootRealPath = await fsp.realpath(this.mount.root);
+      const targetRealPath = await fsp.realpath(realPath);
+      return isWithin(rootRealPath, targetRealPath);
+    } catch {
+      return false;
+    }
+  }
+
+  private async nearestExistingAncestorRealPath(realPath: string): Promise<string> {
+    let candidate = path.dirname(realPath);
+    while (true) {
+      try {
+        return await fsp.realpath(candidate);
+      } catch (err) {
+        if (!isMissingPathError(err)) throw err;
+        const parent = path.dirname(candidate);
+        if (parent === candidate) throw err;
+        candidate = parent;
+      }
+    }
   }
 
   private assertWritable(target: ResolvedProviderPath): void {
@@ -228,4 +278,8 @@ function isWithin(root: string, candidate: string): boolean {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function isMissingPathError(err: unknown): boolean {
+  return err instanceof Error && 'code' in err && err.code === 'ENOENT';
 }
