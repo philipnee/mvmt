@@ -92,15 +92,14 @@ function runCommand(command, commandArgs, extraEnv = {}) {
 async function runSmokeTest() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-verify-'));
   const home = path.join(tmp, 'home');
-  const vault = path.join(tmp, 'vault');
+  const mountRoot = path.join(tmp, 'mount');
   const configPath = path.join(tmp, 'config.yaml');
   const configuredPort = await findFreePort();
   let child;
 
   try {
     fs.mkdirSync(home, { recursive: true });
-    fs.cpSync(path.join(process.cwd(), 'fixtures', 'sample-vault'), vault, { recursive: true });
-    fs.mkdirSync(path.join(vault, '.obsidian'), { recursive: true });
+    fs.cpSync(path.join(process.cwd(), 'fixtures', 'sample-vault'), mountRoot, { recursive: true });
     fs.writeFileSync(
       configPath,
       [
@@ -110,10 +109,12 @@ async function runSmokeTest() {
         '  allowedOrigins: []',
         '  access: local',
         'proxy: []',
-        'obsidian:',
-        `  path: ${JSON.stringify(vault)}`,
-        '  enabled: true',
-        '  writeAccess: false',
+        'mounts:',
+        '  - name: smoke',
+        '    type: local_folder',
+        '    path: /smoke',
+        `    root: ${JSON.stringify(mountRoot)}`,
+        '    writeAccess: false',
         'plugins: []',
         '',
       ].join('\n'),
@@ -130,7 +131,7 @@ async function runSmokeTest() {
     }
     const token = fs.readFileSync(path.join(home, '.mvmt', '.session-token'), 'utf-8').trim();
     const health = await httpJson(`http://127.0.0.1:${port}/health`, token);
-    if (health.status !== 'ok' || health.tools !== 4) {
+    if (health.status !== 'ok' || health.tools !== 5) {
       throw new Error(`unexpected health response: ${JSON.stringify(health)}`);
     }
 

@@ -5,7 +5,6 @@ describe('setup registry', () => {
   it('returns connector setups in guided setup order', () => {
     expect(getSetupRegistry().map((definition) => definition.id)).toEqual([
       'filesystem',
-      'obsidian',
       'mempalace',
     ]);
   });

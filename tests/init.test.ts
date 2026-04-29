@@ -4,23 +4,10 @@ import os from 'os';
 import path from 'path';
 import { buildConfig } from '../src/cli/init.js';
 import { filesystemSetupDefinition } from '../src/connectors/filesystem-setup.js';
-import { obsidianSetupDefinition } from '../src/connectors/obsidian-setup.js';
 import { memPalaceSetupDefinition } from '../src/connectors/mempalace-setup.js';
 import { findExecutableOnPath, readShebangCommand } from '../src/connectors/mempalace-setup.js';
 
 describe('init helpers', () => {
-  it('builds config from explicit local scopes and native Obsidian path', () => {
-    const base = buildConfig({ port: 4141 });
-    const config = obsidianSetupDefinition.apply(base, { path: '/vault', writeAccess: false });
-
-    expect(config).toMatchObject({
-      version: 1,
-      server: { port: 4141, access: 'local' },
-      proxy: [],
-      obsidian: { path: '/vault', enabled: true },
-    });
-  });
-
   it('adds a manual filesystem proxy for explicit folder access', () => {
     const base = buildConfig({ port: 4141 });
     const config = filesystemSetupDefinition.apply(base, {
@@ -63,17 +50,6 @@ describe('init helpers', () => {
     const config = buildConfig({ port: 4141 });
 
     expect(config.proxy).toEqual([]);
-  });
-
-  it('records Obsidian write access only when requested', () => {
-    const base = buildConfig({ port: 4141 });
-    const config = obsidianSetupDefinition.apply(base, { path: '/vault', writeAccess: true });
-
-    expect(config.obsidian).toMatchObject({
-      path: '/vault',
-      enabled: true,
-      writeAccess: true,
-    });
   });
 
   it('records tunnel access when requested', () => {

@@ -399,7 +399,7 @@ export class ToolRouter {
     return jsonResult({
       source_id: sourceId,
       item_id: itemId,
-      mime_type: sourceTypeFor(adapter) === 'obsidian' ? 'text/markdown' : 'text/plain',
+      mime_type: 'text/plain',
       title,
       content,
       metadata: objectMetadata(parsed, ['path', 'tags']),
@@ -517,7 +517,7 @@ function inferRequiredAction(toolName: string): PermissionAction {
 interface PersonalContextSearchResult {
   item_id: string;
   source_id: string;
-  source_type: 'filesystem' | 'obsidian' | 'mempalace' | 'generic';
+  source_type: 'filesystem' | 'mempalace' | 'generic';
   title: string;
   snippet: string;
   locator: string;
@@ -807,7 +807,6 @@ function accessDeniedResult(reason: string): CallToolResult {
 
 function sourceTypeFor(entry: ToolEntry): PersonalContextSearchResult['source_type'] {
   const fingerprint = `${entry.sourceId} ${entry.connector.id} ${entry.connector.displayName} ${entry.originalName}`.toLowerCase();
-  if (fingerprint.includes('obsidian')) return 'obsidian';
   if (fingerprint.includes('mempalace')) return 'mempalace';
   if (fingerprint.includes('file')) return 'filesystem';
   return 'generic';

@@ -3,8 +3,8 @@ import { PatternRedactorPlugin } from '../src/plugins/pattern-redactor.js';
 import { CallToolResult } from '../src/connectors/types.js';
 
 const context = {
-  connectorId: 'obsidian',
-  toolName: 'obsidian__read_note',
+  connectorId: 'notes',
+  toolName: 'notes__read_note',
   originalName: 'read_note',
   args: {},
 };
@@ -236,4 +236,3 @@ describe('PatternRedactorPlugin', () => {
     expect(text).toContain('only the first 1024 bytes');
   });
 });
-

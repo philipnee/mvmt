@@ -11,7 +11,7 @@ export interface ConnectorCommandOptions {
 }
 
 export interface ConnectorSetupStatus {
-  name: 'filesystem' | 'obsidian' | 'mempalace';
+  name: 'filesystem' | 'mempalace';
   displayName: string;
   configured: boolean;
   addable: boolean;
@@ -54,7 +54,7 @@ export async function addConnector(name?: string, options: ConnectorCommandOptio
 
   if (!definition.isAddable) {
     console.log(chalk.yellow(`Connector setup is not supported by this command yet: ${connectorName}`));
-    console.log(chalk.dim('Run mvmt config setup to configure filesystem folders or Obsidian.'));
+    console.log(chalk.dim('Run mvmt config setup to configure filesystem folders.'));
     return;
   }
 

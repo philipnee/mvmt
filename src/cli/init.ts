@@ -52,9 +52,8 @@ export async function setupConfig(
     ),
   );
 
-  const vaults = (detections.get('obsidian') as string[] | undefined) ?? [];
   const detectedMemPalace = (detections.get('mempalace') as DetectedMemPalace | undefined) ?? {};
-  printAvailableConnectors(vaults, detectedMemPalace);
+  printAvailableConnectors(detectedMemPalace);
 
   const applySelections: Array<(config: MvmtConfig) => MvmtConfig> = [];
   for (const definition of setupRegistry) {
@@ -284,16 +283,9 @@ function printBanner(): void {
   console.log(`\n${chalk.bold('mvmt')} - local MCP hub\n`);
 }
 
-function printAvailableConnectors(vaults: string[], memPalace: DetectedMemPalace): void {
+function printAvailableConnectors(memPalace: DetectedMemPalace): void {
   console.log('Available connectors:');
   console.log('  - Filesystem manual folder access');
-  console.log(
-    `  - Obsidian ${chalk.dim(
-      vaults.length > 0
-        ? `detected ${vaults.length} vault${vaults.length === 1 ? '' : 's'}`
-        : 'no vault auto-detected; manual path supported',
-    )}`,
-  );
   const memPalaceStatus =
     memPalace.command && memPalace.palacePath
       ? 'detected MCP command and palace path'

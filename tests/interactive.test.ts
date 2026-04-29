@@ -52,7 +52,7 @@ describe('Formatting helpers', () => {
   it('formatAuditEntry returns expected shape', () => {
     const entry = { 
       ts: '2025-01-01T12:00:00Z', 
-      connectorId: 'obsidian', 
+      connectorId: 'notes',
       tool: 'read_note', 
       argKeys: ['path'], 
       durationMs: 123, 
@@ -60,7 +60,7 @@ describe('Formatting helpers', () => {
     };
     const formatted = formatAuditEntry(entry);
     expect(formatted).toContain('OK');
-    expect(formatted).toContain('obsidian read_note');
+    expect(formatted).toContain('notes read_note');
     expect(formatted).toContain('args=path');
     expect(formatted).toContain('123ms');
   });

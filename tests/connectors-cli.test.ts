@@ -20,7 +20,6 @@ describe('connector setup helpers', () => {
 
     expect(statuses.map((status) => [status.name, status.configured, status.addable])).toEqual([
       ['filesystem', false, false],
-      ['obsidian', false, false],
       ['mempalace', false, true],
     ]);
   });
@@ -47,16 +46,10 @@ describe('connector setup helpers', () => {
           enabled: true,
         },
       ],
-      obsidian: {
-        path: '/vault',
-        enabled: true,
-        writeAccess: false,
-      },
     });
 
     expect(statuses.map((status) => [status.name, status.configured])).toEqual([
       ['filesystem', true],
-      ['obsidian', true],
       ['mempalace', true],
     ]);
   });

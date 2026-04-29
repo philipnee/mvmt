@@ -21,7 +21,7 @@ export {
 export type { TunnelCommandOptions, TunnelRuntimeStatus } from './cli/tunnel.js';
 export { printTokenSummary, readTokenSummary, rotateToken, showToken, showTokenSummary } from './cli/token.js';
 export type { TokenSummary } from './cli/token.js';
-export { ConfigSchema, LocalFolderMountSchema, ObsidianSchema, ProxySchema, TunnelSchema } from './config/schema.js';
+export { ConfigSchema, LocalFolderMountSchema, ProxySchema, TunnelSchema } from './config/schema.js';
 export {
   DEFAULT_PATTERN_REDACTOR_PATTERNS,
   PatternRedactorPatternSchema,
@@ -31,7 +31,6 @@ export {
 export type {
   MvmtConfig,
   LocalFolderMountConfig,
-  ObsidianConfig,
   PatternRedactorPatternConfig,
   PatternRedactorPluginConfig,
   PluginConfig,
@@ -40,7 +39,6 @@ export type {
 } from './config/schema.js';
 export { configExists, expandHome, getConfigPath, loadConfig, parseConfig, readConfig, resolveConfigPath, saveConfig } from './config/loader.js';
 
-export { ObsidianConnector, extractTags } from './connectors/obsidian.js';
 export { createProxyConnector } from './connectors/factory.js';
 export { upsertProxyConfig } from './connectors/setup-utils.js';
 export type { CallToolResult, Connector, ToolDefinition } from './connectors/types.js';

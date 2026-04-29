@@ -4,23 +4,24 @@ import path from 'path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { collectDoctorReport, doctor, printDoctorReport } from '../src/cli/doctor.js';
 
-const fixtureVault = path.resolve('fixtures/sample-vault');
-
 afterEach(() => {
   process.exitCode = undefined;
   vi.restoreAllMocks();
 });
 
 describe('collectDoctorReport', () => {
-  it('validates config and checks an enabled Obsidian connector', async () => {
+  it('validates config and checks enabled mounts', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-doctor-mount-'));
     const configPath = await writeConfig([
       'version: 1',
       'server:',
       '  port: 4141',
       'proxy: []',
-      'obsidian:',
-      `  path: ${fixtureVault}`,
-      '  enabled: true',
+      'mounts:',
+      '  - name: workspace',
+      '    type: local_folder',
+      '    path: /workspace',
+      `    root: ${root}`,
     ]);
 
     const report = await collectDoctorReport({ config: configPath, updateCheck: false });
@@ -33,12 +34,11 @@ describe('collectDoctorReport', () => {
     });
     expect(report.connectors).toEqual([
       expect.objectContaining({
-        name: 'obsidian',
-        id: 'obsidian',
-        kind: 'obsidian',
+        name: 'workspace',
+        id: '/workspace',
+        kind: 'mount',
         enabled: true,
         status: 'ok',
-        toolCount: 4,
       }),
     ]);
   });
@@ -67,13 +67,16 @@ describe('collectDoctorReport', () => {
     expect(report.config.errors.join('\n')).toContain('Config file does not exist');
   });
 
-  it('reports unhealthy enabled connectors', async () => {
+  it('reports unavailable enabled mounts', async () => {
+    const root = path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-doctor-missing-')), 'missing');
     const configPath = await writeConfig([
       'version: 1',
       'proxy: []',
-      'obsidian:',
-      '  path: /tmp/not-an-obsidian-vault',
-      '  enabled: true',
+      'mounts:',
+      '  - name: missing',
+      '    type: local_folder',
+      '    path: /missing',
+      `    root: ${root}`,
     ]);
 
     const report = await collectDoctorReport({ config: configPath, updateCheck: false });
@@ -81,9 +84,10 @@ describe('collectDoctorReport', () => {
     expect(report.ok).toBe(false);
     expect(report.connectors).toEqual([
       expect.objectContaining({
-        name: 'obsidian',
+        name: 'missing',
+        kind: 'mount',
         status: 'fail',
-        message: expect.stringContaining('Not a valid Obsidian vault'),
+        message: expect.stringContaining('missing'),
       }),
     ]);
   });
@@ -92,12 +96,15 @@ describe('collectDoctorReport', () => {
 describe('doctor output', () => {
   it('prints JSON and sets process exit status', async () => {
     const output = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-doctor-mount-'));
     const configPath = await writeConfig([
       'version: 1',
       'proxy: []',
-      'obsidian:',
-      `  path: ${fixtureVault}`,
-      '  enabled: true',
+      'mounts:',
+      '  - name: workspace',
+      '    type: local_folder',
+      '    path: /workspace',
+      `    root: ${root}`,
     ]);
 
     await doctor({ config: configPath, json: true, updateCheck: false });
@@ -108,12 +115,15 @@ describe('doctor output', () => {
 
   it('prints human diagnostics', async () => {
     const output = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-doctor-mount-'));
     const configPath = await writeConfig([
       'version: 1',
       'proxy: []',
-      'obsidian:',
-      `  path: ${fixtureVault}`,
-      '  enabled: true',
+      'mounts:',
+      '  - name: workspace',
+      '    type: local_folder',
+      '    path: /workspace',
+      `    root: ${root}`,
     ]);
     const report = await collectDoctorReport({ config: configPath, updateCheck: false });
 
@@ -122,7 +132,7 @@ describe('doctor output', () => {
     const text = output.mock.calls.map((call) => call.join(' ')).join('\n');
     expect(text).toContain('mvmt doctor');
     expect(text).toContain('Config');
-    expect(text).toContain('obsidian');
+    expect(text).toContain('workspace');
   });
 });
 

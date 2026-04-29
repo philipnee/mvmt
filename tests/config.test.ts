@@ -322,7 +322,6 @@ describe('client policy schema', () => {
     const config = parseConfig({
       version: 1,
       proxy: [{ name: 'workspace', command: 'npx' }],
-      obsidian: { path: '/vault' },
       clients: [
         {
           id: 'codex',
@@ -331,7 +330,7 @@ describe('client policy schema', () => {
           rawToolsEnabled: true,
           permissions: [
             { path: '/workspace/**', actions: ['search', 'read', 'write'] },
-            { path: '/obsidian/**', actions: ['search', 'read'] },
+            { path: '/notes/**', actions: ['search', 'read'] },
           ],
         },
       ],
@@ -349,13 +348,12 @@ describe('client policy schema', () => {
   it('parses an oauth-auth client with mapped client ids', () => {
     const config = parseConfig({
       version: 1,
-      obsidian: { path: '/vault' },
       clients: [
         {
           id: 'chatgpt',
           name: 'ChatGPT',
           auth: { type: 'oauth', oauthClientIds: ['chatgpt-mvmt', 'chatgpt-mvmt-v2'] },
-          permissions: [{ path: '/obsidian/**', actions: ['search', 'read'] }],
+          permissions: [{ path: '/notes/**', actions: ['search', 'read'] }],
         },
       ],
     });
@@ -502,14 +500,14 @@ describe('client policy schema', () => {
     const config = parseConfig({
       version: 1,
       proxy: [{ name: 'workspace', command: 'npx' }],
-      obsidian: { path: '/vault' },
+      mounts: [{ name: 'notes', type: 'local_folder', path: '/notes', root: '/vault' }],
       semanticTools: {
-        searchPersonalContext: { enabled: true, sourceIds: ['workspace', 'obsidian'] },
+        searchPersonalContext: { enabled: true, sourceIds: ['workspace', 'notes'] },
         readContextItem: { sourceIds: ['workspace'] },
       },
     });
 
-    expect(config.semanticTools?.searchPersonalContext?.sourceIds).toEqual(['workspace', 'obsidian']);
+    expect(config.semanticTools?.searchPersonalContext?.sourceIds).toEqual(['workspace', 'notes']);
     expect(config.semanticTools?.readContextItem?.enabled).toBe(true);
   });
 

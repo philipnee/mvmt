@@ -1,9 +1,8 @@
 import fs from 'fs';
 import yaml from 'yaml';
 import { expandHome, getConfigPath, parseConfig } from '../config/loader.js';
-import { MvmtConfig } from '../config/schema.js';
+import { LocalFolderMountConfig, MvmtConfig } from '../config/schema.js';
 import { createProxyConnector } from '../connectors/factory.js';
-import { ObsidianConnector } from '../connectors/obsidian.js';
 import { Connector } from '../connectors/types.js';
 import { checkForUpdate, PackageInfo, readPackageInfo, UpdateCheckResult } from '../utils/version.js';
 
@@ -22,7 +21,7 @@ export type DoctorStatus = 'ok' | 'warn' | 'fail' | 'skip';
 export interface DoctorConnectorReport {
   name: string;
   id?: string;
-  kind: 'proxy' | 'obsidian';
+  kind: 'proxy' | 'mount';
   transport?: 'stdio' | 'http';
   enabled: boolean;
   status: DoctorStatus;
@@ -160,18 +159,8 @@ export async function collectDoctorReport(options: DoctorOptions = {}): Promise<
     report.connectors.push(await checkConnector(connector, proxyConfig.name, 'proxy', proxyConfig.transport, timeoutMs));
   }
 
-  if (config.obsidian) {
-    if (!config.obsidian.enabled) {
-      report.connectors.push({
-        name: 'obsidian',
-        kind: 'obsidian',
-        enabled: false,
-        status: 'skip',
-        message: 'disabled in config',
-      });
-    } else {
-      report.connectors.push(await checkConnector(new ObsidianConnector(config.obsidian), 'obsidian', 'obsidian', undefined, timeoutMs));
-    }
+  for (const mount of config.mounts) {
+    report.connectors.push(checkMount(mount));
   }
 
   if (report.connectors.length === 0 || report.connectors.every((connector) => connector.status === 'skip')) {
@@ -187,6 +176,51 @@ export async function collectDoctorReport(options: DoctorOptions = {}): Promise<
   summarize(report);
   report.ok = report.config.valid && report.summary.fail === 0;
   return report;
+}
+
+function checkMount(mount: LocalFolderMountConfig): DoctorConnectorReport {
+  if (mount.enabled === false) {
+    return {
+      name: mount.name,
+      id: mount.path,
+      kind: 'mount',
+      enabled: false,
+      status: 'skip',
+      message: 'disabled in config',
+    };
+  }
+
+  const root = expandHome(mount.root);
+  try {
+    const stat = fs.statSync(root);
+    if (!stat.isDirectory()) {
+      return {
+        name: mount.name,
+        id: mount.path,
+        kind: 'mount',
+        enabled: true,
+        status: 'fail',
+        message: `mount root is not a directory: ${root}`,
+      };
+    }
+    return {
+      name: mount.name,
+      id: mount.path,
+      kind: 'mount',
+      enabled: true,
+      status: 'ok',
+      message: `mounted ${root}`,
+    };
+  } catch (err) {
+    return {
+      name: mount.name,
+      id: mount.path,
+      kind: 'mount',
+      enabled: true,
+      status: 'fail',
+      message: err instanceof Error ? err.message : `cannot access mount root: ${root}`,
+    };
+  }
 }
 
 export function printDoctorReport(report: DoctorReport): void {

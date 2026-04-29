@@ -1323,10 +1323,10 @@ describe('startHttpServer lifecycle', () => {
 
   it('serves semantic tools over MCP for clients without raw tool access', async () => {
     const connector = new SemanticConnector();
-    const router = new ToolRouter([{ connector, sourceId: 'obsidian' }], undefined, [], {
+    const router = new ToolRouter([{ connector, sourceId: 'notes' }], undefined, [], {
       semanticTools: {
-        searchPersonalContext: { enabled: true, sourceIds: ['obsidian'] },
-        readContextItem: { enabled: true, sourceIds: ['obsidian'] },
+        searchPersonalContext: { enabled: true, sourceIds: ['notes'] },
+        readContextItem: { enabled: true, sourceIds: ['notes'] },
       },
     });
     await router.initialize();
@@ -1341,7 +1341,7 @@ describe('startHttpServer lifecycle', () => {
           name: 'ChatGPT',
           auth: { type: 'token', tokenHash: sha256Hex('chatgpt-token') },
           rawToolsEnabled: false,
-          permissions: [{ path: '/obsidian/**', actions: ['search', 'read'] }],
+          permissions: [{ path: '/notes/**', actions: ['search', 'read'] }],
         },
       ],
     });
@@ -1359,7 +1359,7 @@ describe('startHttpServer lifecycle', () => {
         arguments: { query: 'launch' },
       });
       expect(JSON.parse(search.result.content[0].text).results).toEqual([
-        expect.objectContaining({ item_id: 'projects/launch.md', source_id: 'obsidian' }),
+        expect.objectContaining({ item_id: 'projects/launch.md', source_id: 'notes' }),
       ]);
       expect(connector.calls.map((call) => call.name)).toEqual(['search_notes']);
     } finally {
@@ -1523,8 +1523,8 @@ class PolicyConnector implements Connector {
 }
 
 class SemanticConnector implements Connector {
-  readonly id = 'obsidian';
-  readonly displayName = 'obsidian';
+  readonly id = 'notes';
+  readonly displayName = 'notes';
   readonly calls: Array<{ name: string; args: Record<string, unknown> }> = [];
 
   async initialize(): Promise<void> {}
