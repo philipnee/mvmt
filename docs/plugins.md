@@ -2,42 +2,44 @@
 
 A plugin is a post-processing hook for tool results.
 
-Connectors fetch or compute data. Plugins inspect the result before mvmt returns it to the MCP client.
+Mount tools fetch local data. Plugins inspect or transform the result before mvmt returns it to the MCP client.
 
-In v0, plugins are compiled into mvmt. They are not dynamic npm packages and mvmt does not load arbitrary plugin code from disk.
+In v0, plugins are compiled into mvmt. mvmt does not load arbitrary plugin code from disk.
 
-## What a plugin can do
+## What a Plugin Can Do
 
 A plugin can:
 
-- Inspect the connector ID, tool name, original tool name, arguments, and result.
-- Leave the result unchanged.
-- Add warnings to the result.
-- Transform text or image content.
-- Block the result and return an MCP error.
-- Add audit metadata that explains what happened.
+- inspect the runtime id, tool name, arguments, and result;
+- leave the result unchanged;
+- add warnings to the result;
+- transform text or image content;
+- block the result and return an MCP error;
+- add audit metadata.
 
 A plugin should not:
 
-- Expand connector scope.
-- Bypass auth, Origin checks, write gates, or audit logging.
-- Call arbitrary external services by default.
-- Pretend to be a full privacy or compliance layer.
+- expand mount scope;
+- bypass auth, Origin checks, mount write gates, client policy, or audit logging;
+- call external services by default;
+- pretend to be a full privacy or compliance layer.
 
-## Current plugin
+## Current Plugin
 
 `pattern-redactor` is the only built-in plugin.
 
 It scans text tool results with configured regex patterns and can run in three modes:
 
-- `warn` — report matches but return the original result.
-- `redact` — replace matches with configured replacement strings.
-- `block` — block the entire tool result.
+| Mode | Behavior |
+| --- | --- |
+| `warn` | Records matches but returns the original result. |
+| `redact` | Replaces matches with configured replacement strings. |
+| `block` | Blocks the entire tool result. |
 
 > [!WARNING]
-> The pattern-based redactor is best-effort defense-in-depth, not a security control. It will miss data that does not match configured patterns and may redact things you did not intend. Do not rely on it for compliance, privacy, or security requirements.
+> Pattern redaction is best-effort defense in depth. It can miss sensitive data and can redact harmless data. Use mounts and client permissions as the primary security boundary.
 
-## Plugin interface
+## Interface
 
 Plugins implement `ToolResultPlugin` from `src/plugins/types.ts`.
 
@@ -64,85 +66,34 @@ export interface ToolResultPlugin {
 }
 ```
 
-`toolName` is the namespaced tool name visible to clients, such as `obsidian__read_note`.
+For the current mount tools:
 
-`originalName` is the connector-local tool name, such as `read_note`.
+- `connectorId` is `mvmt`;
+- `toolName` is one of `search`, `list`, `read`, `write`, `remove`;
+- `originalName` is the same as `toolName`.
 
-## How plugins run
-
-The request pipeline is:
+## Pipeline
 
 ```text
-client -> auth/origin -> write gate -> router -> connector -> plugins -> audit log -> client
+client -> auth/origin -> client policy -> router -> mount provider -> plugins -> audit log -> client
 ```
 
-Plugins run after connector execution and before the final response is returned.
+Plugins run after the tool has produced a result and before the result is returned.
 
 If multiple plugins are enabled, they run in factory order. Each plugin receives the previous plugin's output.
 
-## How to add a plugin
+## Add a Plugin
 
 1. Add a plugin class under `src/plugins/`.
 2. Implement `ToolResultPlugin`.
 3. Add config schema in `src/config/schema.ts`.
 4. Register the plugin in `src/plugins/factory.ts`.
-5. Add setup prompts in `src/cli/init.ts` if users should configure it interactively.
-6. Add config docs in `docs/configuration.md`.
-7. Add README docs if users need to understand the behavior before enabling it.
-8. Add tests for pass-through, transform, block, audit events, large outputs, and disabled config.
+5. Add setup prompts if users should configure it interactively.
+6. Add tests for pass-through, transform, block, audit events, large outputs, and disabled config.
+7. Update `docs/configuration.md` and this file.
 
-## Minimal plugin skeleton
+## Design Rule
 
-```ts
-import { ToolResultPlugin, ToolResultPluginContext, ToolResultPluginOutput } from './types.js';
+Plugins are not the permission model.
 
-export class ExamplePlugin implements ToolResultPlugin {
-  readonly id = 'example-plugin';
-  readonly displayName = 'example plugin';
-
-  process(context: ToolResultPluginContext): ToolResultPluginOutput {
-    return {
-      result: {
-        ...context.result,
-        content: [
-          ...context.result.content,
-          {
-            type: 'text',
-            text: `mvmt example plugin inspected ${context.toolName}.`,
-          },
-        ],
-      },
-      auditEvents: [],
-    };
-  }
-}
-```
-
-## Audit expectations
-
-If a plugin changes behavior in a way a user may need to debug, it should write an audit event.
-
-Examples:
-
-- A redactor matched `openai-key` twice.
-- A policy plugin blocked `proxy_filesystem__read_file`.
-- A size-limit plugin truncated a result.
-
-Audit metadata should explain what happened without logging full sensitive values.
-
-## Design rule
-
-Plugins are defense-in-depth. They are not the primary permission model.
-
-The primary security model is still:
-
-- exact connector scope,
-- read-only defaults,
-- explicit write access,
-- localhost bind,
-- bearer/OAuth gates,
-- Origin checks,
-- env scrubbing,
-- audit logging.
-
-If a user does not want a client to see a class of data, the right fix is to not expose that data through a connector.
+If a client must not see a class of data, do not mount that data for the client. Use plugin redaction only as an additional guardrail.

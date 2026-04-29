@@ -1,187 +1,86 @@
-# Connectors
+# Mount Providers
 
-A connector is mvmt's adapter for one local data source or tool surface.
+The active runtime is mount-based.
 
-Examples:
-
-- **Obsidian** is a native connector. mvmt reads the vault directly with Node filesystem APIs.
-- **Filesystem** is a proxy connector. mvmt launches the official filesystem MCP server as a child process and routes its tools through mvmt's auth, write gates, plugins, and audit log.
-- **MemPalace** is a proxy connector setup. mvmt launches the local MemPalace MCP server as a child process and applies mvmt-side write gates, plugins, and audit logging.
-
-Connectors are the boundary where mvmt decides what exists, what is exposed, what is read-only, and what counts as a write.
-
-## What a connector does
-
-A connector is responsible for:
-
-- Validating its configured scope during startup.
-- Listing MCP tools that should be visible to clients.
-- Executing a tool call by original tool name.
-- Returning a standard MCP `CallToolResult`.
-- Refusing out-of-scope paths, tables, repos, vaults, or other resources.
-- Hiding or blocking write tools unless write access is explicitly enabled.
-- Cleaning up child processes, sockets, handles, or other resources on shutdown.
-
-The router is responsible for namespacing and dispatch. The connector is responsible for source-specific safety.
-
-## Connector interface
-
-Native connectors implement `Connector` from `src/connectors/types.ts`.
-
-```ts
-export interface ToolDefinition {
-  name: string;
-  description: string;
-  inputSchema: unknown;
-}
-
-export interface CallToolResult {
-  content: Array<
-    | { type: 'text'; text: string }
-    | { type: 'image'; data: string; mimeType: string }
-  >;
-  isError?: boolean;
-}
-
-export interface Connector {
-  readonly id: string;
-  readonly displayName: string;
-  initialize(): Promise<void>;
-  listTools(): Promise<ToolDefinition[]>;
-  callTool(name: string, args: Record<string, unknown>): Promise<CallToolResult>;
-  shutdown(): Promise<void>;
-}
-```
-
-## Native vs proxy connectors
-
-### Native connector
-
-A native connector is implemented in mvmt itself. Use this when mvmt can provide a safer or more focused local integration than an existing MCP server.
-
-Good native connector candidates:
-
-- Local notes.
-- Local files with mvmt-specific path controls.
-- Local databases with per-table permissions.
-- Local Git repositories with branch-aware search.
-
-Native connectors should be narrow and explicit. A connector should never scan a whole machine unless the user selected that scope.
-
-### Proxy connector
-
-A proxy connector wraps an existing MCP server. mvmt starts it over stdio or connects to it over HTTP, then forwards tools through mvmt's router.
-
-Proxy connectors are useful when the external MCP server is already the right implementation. Filesystem and MemPalace currently use this model.
-
-Proxy connectors still need mvmt-side guardrails:
-
-- Stdio children get scrubbed environment variables.
-- Known write tools are hidden and rejected when `writeAccess: false`.
-- Raw tool visibility and calls are filtered by per-client source/action policy when `clients[]` is configured.
-- Tool calls still go through plugins and audit logging.
-
-HTTP proxy connectors use the same write-tool policy as stdio proxy connectors.
-
-### MemPalace proxy setup
-
-MemPalace is treated as a local stdio MCP server. During `mvmt init`, mvmt tries to detect:
-
-- the `mempalace` executable on `PATH`,
-- the Python executable from the `mempalace` script shebang,
-- the palace path from `~/.mempalace/config.json`.
-
-If detection is incomplete, init prompts for the missing command or palace path. The generated proxy looks like:
+A mount maps a virtual path to a provider:
 
 ```yaml
-proxy:
-  - name: mempalace
-    source: mempalace
-    transport: stdio
-    command: /Users/you/.local/pipx/venvs/mempalace/bin/python
-    args: ["-m", "mempalace.mcp_server", "--palace", "/Users/you/.mempalace/palace"]
-    env: {}
-    writeAccess: false
-    enabled: true
+mounts:
+  - name: workspace
+    type: local_folder
+    path: /workspace
+    root: /Users/you/code/mvmt
 ```
 
-When `writeAccess: false`, mvmt hides and rejects known MemPalace write tools including drawer creation/deletion, KG mutation, tunnel creation/deletion, hook settings, and diary writes. Read/search/list tools remain visible.
+Clients call the same five tools regardless of provider:
 
-## How to add a native connector
+```text
+search
+list
+read
+write
+remove
+```
 
-1. Add a connector class under `src/connectors/`.
-2. Implement `Connector`.
-3. Add a config schema in `src/config/schema.ts`.
-4. Add setup prompts in `src/cli/init.ts`.
-5. Wire startup in `src/cli/start.ts`.
-6. Add diagnostics in `src/cli/doctor.ts`.
-7. Add exports in `src/index.ts` if the connector is part of the public API.
-8. Add tests for tool listing, scope validation, path traversal, write gates, and shutdown.
-9. Document the connector in `README.md` and `docs/configuration.md`.
+Today, the only shipped provider is `local_folder`.
 
-## Minimal native connector skeleton
+## Local Folder Provider
+
+`local_folder` exposes a selected directory through a virtual path.
+
+Responsibilities:
+
+- resolve virtual paths under the configured root;
+- reject path traversal;
+- reject symlink escapes;
+- hide excluded paths;
+- block writes and removes for protected paths;
+- enforce mount-level `writeAccess`;
+- return text-only results to the tool layer.
+
+Host filesystem paths are not returned to clients.
+
+## Provider Interface Direction
+
+The current implementation is local-folder specific, but the product direction is a provider interface behind the same tool surface.
+
+Future providers should fit this shape:
 
 ```ts
-import { Connector, ToolDefinition, CallToolResult } from './types.js';
-
-export class ExampleConnector implements Connector {
-  readonly id = 'example';
-  readonly displayName = 'example';
-
-  async initialize(): Promise<void> {
-    // Validate configured scope here.
-  }
-
-  async listTools(): Promise<ToolDefinition[]> {
-    return [
-      {
-        name: 'read_item',
-        description: 'Read one scoped item.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'string' },
-          },
-          required: ['id'],
-        },
-      },
-    ];
-  }
-
-  async callTool(name: string, args: Record<string, unknown>): Promise<CallToolResult> {
-    if (name !== 'read_item') {
-      return {
-        content: [{ type: 'text', text: `Unknown tool: ${name}` }],
-        isError: true,
-      };
-    }
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({ id: args.id, value: 'example' }, null, 2),
-        },
-      ],
-    };
-  }
-
-  async shutdown(): Promise<void> {
-    // Close resources here.
-  }
+interface StorageProvider {
+  list(path: string): Promise<ListEntry[]>;
+  read(path: string): Promise<TextFile>;
+  write(path: string, content: string): Promise<TextFile>;
+  remove(path: string): Promise<void>;
+  walkTextFiles(): AsyncIterable<TextFile>;
 }
 ```
 
-## Security checklist
+Future candidates:
 
-Before adding a connector, answer these questions in code and docs:
+- another mvmt instance mounted remotely;
+- S3 or object storage;
+- Dropbox or Drive;
+- a database-backed document store.
 
-- What exact user-selected scope does this connector expose?
+Do not add a new user-facing tool set for each provider. Prefer adapting the provider to the existing `search` / `list` / `read` / `write` / `remove` surface.
+
+## Legacy Connector Code
+
+The repository still contains legacy connector and proxy modules for compatibility with older config and branches.
+
+New product work should not expand the raw proxy tool surface. Use mounts and providers instead.
+
+## Security Checklist
+
+Before adding a provider, answer these questions in code and docs:
+
+- What exact user-selected scope does this provider expose?
 - What is read-only by default?
-- Which tools write, mutate, delete, move, append, or upload data?
-- How are path traversal, symlink escape, table escape, repo escape, or network escape blocked?
+- Which operations write, mutate, delete, move, append, or upload data?
+- How are path traversal, symlink escape, bucket escape, table escape, or network escape blocked?
+- How does the provider honor `exclude`, `protect`, and `writeAccess`?
 - What does `mvmt doctor` verify?
-- What gets written to the audit log?
-- What happens when startup validation fails?
+- What appears in the audit log?
 
 If the safest answer is "exclude that data from scope," prefer scope controls over redaction.
