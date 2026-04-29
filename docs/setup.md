@@ -10,21 +10,18 @@ This guide covers install, mount setup, server startup, and client connection.
 
 ## Install
 
-```bash
-npm install -g mvmt
-mvmt --version
-```
-
-From source:
+From this source checkout:
 
 ```bash
-git clone https://github.com/philipnee/mvmt.git
-cd mvmt
 npm install
 npm run build
 npm link
 mvmt --version
 ```
+
+The current npm package named `mvmt` is not this CLI release yet. If
+`npm install -g mvmt` leaves you with `zsh: command not found: mvmt`, use the
+source install above.
 
 ## Configure Mounts
 
