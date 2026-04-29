@@ -1,27 +1,21 @@
 # Setup Guide
 
-This guide covers the full path from install to a working MCP client. The README keeps the short path; this page has the details.
+This guide covers install, mount setup, server startup, and client connection.
 
 ## Requirements
 
 - Node.js 20 or newer.
 - npm.
-- Optional: Obsidian, if you want vault access.
-- Optional: MemPalace already installed and configured, if you want memory palace access.
-- Optional: `cloudflared`, if you want Cloudflare Tunnel.
+- Optional: `cloudflared` or another tunnel command for remote web clients.
 
 ## Install
-
-### From npm
 
 ```bash
 npm install -g mvmt
 mvmt --version
 ```
 
-### From source
-
-Use this while developing mvmt or testing a feature branch:
+From source:
 
 ```bash
 git clone https://github.com/philipnee/mvmt.git
@@ -32,30 +26,34 @@ npm link
 mvmt --version
 ```
 
-`npm run build` restores executable permission on `dist/bin/mvmt.js`. If `mvmt` ever says `permission denied`, rebuild and relink:
+## Configure Mounts
 
-```bash
-npm run build
-npm link
-hash -r
-mvmt --version
-```
-
-## Configure Local Sources
-
-Run:
+Run guided setup:
 
 ```bash
 mvmt config setup
 ```
 
-The wizard asks what local data mvmt is allowed to expose:
+Or add mounts directly:
 
-- Filesystem folders: exact folders only, read-only by default.
-- Obsidian: one vault path, read-only by default.
-- MemPalace: one palace path through the local MemPalace MCP server, read-only by default.
-- Pattern-based redactor plugin: optional best-effort regex redaction.
-- Access mode: local only or tunnel.
+```bash
+mvmt mounts add notes ~/Documents/Obsidian \
+  --mount-path /notes \
+  --read-only \
+  --description "Personal notes and project journals" \
+  --guidance "Search first. Read specific files before answering."
+```
+
+```bash
+mvmt mounts add workspace ~/code/mvmt \
+  --mount-path /workspace \
+  --write \
+  --protect ".env" \
+  --protect ".env.*" \
+  --protect ".claude/**" \
+  --description "mvmt source code and design docs" \
+  --guidance "Read README.md and docs before changing code."
+```
 
 The config is written to:
 
@@ -63,21 +61,7 @@ The config is written to:
 ~/.mvmt/config.yaml
 ```
 
-On macOS/Linux it is written with mode `600`.
-
-## MemPalace Setup
-
-mvmt does not install MemPalace or manage Python versions. It assumes MemPalace is already installed locally.
-
-During guided setup, mvmt tries to detect:
-
-- the `mempalace` executable on `PATH`,
-- the Python executable from that script's shebang,
-- the palace path from `~/.mempalace/config.json`.
-
-To update MemPalace later, rerun `mvmt config setup` and restart mvmt.
-
-With MemPalace write access disabled, mvmt hides known write tools such as drawer writes, knowledge graph mutation, tunnel mutation, diary writes, and hook settings. With write access enabled, those tools are visible to clients.
+At least one enabled mount is required. If there are no mounts, mvmt has no data to serve.
 
 ## Start mvmt
 
@@ -93,23 +77,49 @@ HTTP mode listens on:
 http://127.0.0.1:4141/mcp
 ```
 
-The bearer token is reused across restarts. Show the current token with:
+For a one-off read-only folder without changing saved config:
+
+```bash
+mvmt serve --path ~/Documents -i
+```
+
+## Token
+
+Show the current session bearer token:
 
 ```bash
 mvmt token
 ```
 
-Rotate it without restarting:
+Print only the raw token:
+
+```bash
+mvmt token show
+```
+
+Rotate it:
 
 ```bash
 mvmt token rotate
 ```
 
+If a client uses the old token, restart or update that client after rotation.
+
+## Rebuild the Index
+
+Search uses the text index. mvmt rebuilds it in the background on startup.
+
+Force a rebuild:
+
+```bash
+mvmt reindex
+```
+
+Use this after adding a mount or changing files outside mvmt.
+
 ## Connect Codex CLI
 
 Codex stores the name of an environment variable, not the token value.
-
-Add mvmt once:
 
 ```bash
 codex mcp add mvmt \
@@ -117,50 +127,32 @@ codex mcp add mvmt \
   --bearer-token-env-var MVMT_TOKEN
 ```
 
-Before starting Codex, export the current token:
+Before starting Codex:
 
 ```bash
 export MVMT_TOKEN="$(mvmt token show)"
 codex
 ```
 
-If you rotate the mvmt token, export the new token and restart Codex:
+If you rotate the token:
 
 ```bash
 export MVMT_TOKEN="$(mvmt token show)"
 codex resume
 ```
 
-Do not run `codex mcp login mvmt` for this local bearer-token setup. If Codex says:
-
-```text
-The mvmt MCP server is not logged in. Run `codex mcp login mvmt`.
-```
-
-it usually means `MVMT_TOKEN` is missing or stale in the shell that launched Codex.
-
-Check the configured entry:
-
-```bash
-codex mcp get mvmt
-```
-
-It should show:
-
-```text
-transport: streamable_http
-url: http://127.0.0.1:4141/mcp
-bearer_token_env_var: MVMT_TOKEN
-```
+Do not run `codex mcp login mvmt` for the local bearer-token setup. If Codex asks for login, the usual cause is a missing or stale `MVMT_TOKEN`.
 
 ## Connect Other Clients
 
-Most HTTP clients need:
+Most local HTTP clients need:
 
-- URL: `http://127.0.0.1:4141/mcp`
-- Header: `Authorization: Bearer <token from mvmt token>`
+```text
+URL: http://127.0.0.1:4141/mcp
+Authorization: Bearer <token>
+```
 
-Claude Desktop is different: use stdio mode so Claude launches mvmt directly:
+Claude Desktop is different because it can launch mvmt over stdio:
 
 ```json
 {
@@ -173,7 +165,7 @@ Claude Desktop is different: use stdio mode so Claude launches mvmt directly:
 }
 ```
 
-See [Client Setup](client-setup.md) for Claude Desktop, Claude Code, Codex CLI, Cursor, VS Code, and raw HTTP examples.
+See [Client Setup](client-setup.md) for more examples.
 
 ## Verify
 
@@ -188,48 +180,54 @@ curl -i http://127.0.0.1:4141/health \
 Expected:
 
 ```json
-{"status":"ok","tools":34}
+{"status":"ok","tools":5}
 ```
 
-The exact tool count depends on enabled connectors.
-
-In Codex, `/mcp list` should show tools such as:
+In an MCP client, the normal mount tools are:
 
 ```text
-obsidian__search_notes
-proxy_mempalace__mempalace_status
-proxy_mempalace__mempalace_search
+search
+list
+read
+write
+remove
 ```
 
+The exact list depends on client permissions.
+
 ## Common Problems
+
+### `No mounts loaded. Nothing to serve.`
+
+Add at least one mount:
+
+```bash
+mvmt mounts add workspace ~/code/mvmt --mount-path /workspace --read-only
+mvmt serve -i
+```
 
 ### `Tools: (none)`
 
 Usually one of these:
 
-- mvmt was still starting when the client connected.
-- The client has a stale token.
-- The client cached a failed tool-list response.
-- Another old mvmt process is still using port `4141`.
+- no enabled mounts exist;
+- the client has a stale token;
+- the client is mapped to a policy with no matching permissions;
+- the client cached a failed tool-list response.
 
-Fix:
+Run:
 
 ```bash
 mvmt doctor
+mvmt mounts list
 export MVMT_TOKEN="$(mvmt token show)"
 ```
 
 Then restart the MCP client.
 
-### Port 4141 is already in use
+### Port `4141` is already in use
 
-Find the process:
-
-```bash
-lsof -nP -iTCP:4141
-```
-
-Stop the old mvmt process or start on another port:
+Start on another port:
 
 ```bash
 mvmt serve -i --port 4142
@@ -237,33 +235,9 @@ mvmt serve -i --port 4142
 
 ### Token works in curl but not Codex
 
-Codex only sees environment variables from the shell that launched it. Re-export and restart Codex:
+Codex only sees environment variables from the shell that launched it.
 
 ```bash
 export MVMT_TOKEN="$(mvmt token show)"
 codex
 ```
-
-### MemPalace does not show up
-
-Check config:
-
-```bash
-mvmt config
-mvmt doctor
-```
-
-If MemPalace is missing:
-
-```bash
-mvmt config setup
-mvmt serve -i
-```
-
-If it fails to start, verify the configured Python can import MemPalace:
-
-```bash
-/path/to/python -m mempalace.mcp_server --palace ~/.mempalace/palace
-```
-
-Stop that manual server after testing; mvmt starts its own child process.

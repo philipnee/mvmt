@@ -1,220 +1,170 @@
 # mvmt Architecture
 
-mvmt is a local personal data plane. It runs on the user's machine, exposes only the local data the user explicitly scopes, and serves that data through MCP-compatible transports.
+mvmt is a local-first Multi-Volume Mount Transport. It exposes selected local folders through one permissioned MCP endpoint.
 
-It is not a connector registry, marketplace, or bundled catalog of third-party services.
+It is not sync, cloud storage, or a connector marketplace. Data stays where it lives. mvmt controls which mounted paths each client can search, list, read, write, or remove.
 
 ```text
                                LOCAL MACHINE
 +--------------------------------------------------------------------------------+
 |                                                                                |
-|  User chooses scope                                                            |
-|  +------------------+                                                          |
-|  | mvmt init        |                                                          |
-|  |                  |                                                          |
-|  | - folders        |                                                          |
-|  | - Obsidian vault |                                                          |
-|  | - read/write     |                                                          |
-|  | - local/tunnel   |                                                          |
-|  +--------+---------+                                                          |
-|           |                                                                    |
-|           v                                                                    |
-|  +-------------------------------+                                             |
-|  | ~/.mvmt/config.yaml           |                                             |
-|  |                               |                                             |
-|  | server:                       |                                             |
-|  |   port: 4141                  |                                             |
-|  |   access: local | tunnel      |                                             |
-|  | proxy:                        |                                             |
-|  |   filesystem folders          |                                             |
-|  | obsidian:                     |                                             |
-|  |   vault path                  |                                             |
-|  |   writeAccess: false          |                                             |
-|  +-------------------------------+                                             |
+|  ~/.mvmt/config.yaml                                                           |
 |                                                                                |
+|  mounts:                                                                       |
+|    /notes      -> ~/Documents/Obsidian                                         |
+|    /workspace  -> ~/code/mvmt                                                  |
 |                                                                                |
-|  +----------------------------------------------------------------------------+|
-|  | mvmt start                                                                 ||
-|  |                                                                            ||
-|  |  +----------------------+       +--------------------------------------+   ||
-|  |  | HTTP server          |       | stdio server                         |   ||
-|  |  | 127.0.0.1:4141       |       | for clients that launch mvmt directly|   ||
-|  |  | /mcp                 |       | no HTTP listener, no bearer token    |   ||
-|  |  | /health              |       +--------------------------------------+   ||
-|  |  | /authorize           |                                                 ||
-|  |  | /token               |                                                 ||
-|  |  +----------+-----------+                                                 ||
-|  |             |                                                             ||
-|  |             v                                                             ||
-|  |  +----------------------+                                                 ||
-|  |  | Security layer       |                                                 ||
-|  |  |                      |                                                 ||
-|  |  | - localhost bind     |                                                 ||
-|  |  | - bearer token       |                                                 ||
-|  |  | - origin check       |                                                 ||
-|  |  | - OAuth/PKCE bridge  |                                                 ||
-|  |  | - client identity    |                                                 ||
-|  |  +----------+-----------+                                                 ||
-|  |             |                                                             ||
-|  |             v                                                             ||
-|  |  +----------------------+                                                 ||
-|  |  | Tool router          |                                                 ||
-|  |  |                      |                                                 ||
-|  |  | namespaces tools     |                                                 ||
-|  |  | filters by policy    |                                                 ||
-|  |  | semantic tools       |                                                 ||
-|  |  | routes calls         |                                                 ||
-|  |  | applies plugins      |                                                 ||
-|  |  | writes audit log     |                                                 ||
-|  |  +----------+-----------+                                                 ||
-|  |             |                                                             ||
-|  |             +---------------------+----------------------+                 ||
-|  |                                   |                      |                 ||
-|  |                                   v                      v                 ||
-|  |  +----------------------+   +----------------------+   +----------------+ ||
-|  |  | Filesystem proxy     |   | Obsidian connector   |   | Future native  | ||
-|  |  |                      |   |                      |   | connectors     | ||
-|  |  | stdio child process  |   | direct fs access     |   |                | ||
-|  |  | official MCP fs      |   | markdown read/search |   | - Postgres     | ||
-|  |  | read-only default    |   | read-only default    |   | - SQLite       | ||
-|  |  | write gate           |   | write gate           |   | - Git          | ||
-|  |  | env scrubbed         |   | path scoped          |   |                | ||
-|  |  +----------+-----------+   +----------+-----------+   +----------------+ ||
-|  |             |                          |                                  ||
-|  +-------------|--------------------------|----------------------------------+|
-|                |                          |                                   |
-|                v                          v                                   |
-|       +----------------+          +----------------------+                    |
-|       | Allowed folders|          | Obsidian vault       |                    |
-|       |                |          |                      |                    |
-|       | ~/project      |          | ~/Documents/Vault    |                    |
-|       | /tmp/demo      |          | daily/*.md           |                    |
-|       +----------------+          +----------------------+                    |
+|  clients:                                                                      |
+|    codex can read/write /workspace                                             |
+|    chatgpt can search/read /notes                                              |
 |                                                                                |
-|  +------------------------------+                                              |
-|  | ~/.mvmt/.session-token       |                                              |
-|  | current local bearer token   |                                              |
-|  +------------------------------+                                              |
-|                                                                                |
-|  +------------------------------+                                              |
-|  | ~/.mvmt/audit.log            |                                              |
-|  | append-only JSONL tool calls |                                              |
-|  +------------------------------+                                              |
+|  +-----------------------+                                                     |
+|  | mvmt serve            |                                                     |
+|  |                       |                                                     |
+|  | HTTP: 127.0.0.1:4141  |                                                     |
+|  | stdio: optional       |                                                     |
+|  +-----------+-----------+                                                     |
+|              |                                                                 |
+|              v                                                                 |
+|  +-----------------------+                                                     |
+|  | Security layer        |                                                     |
+|  |                       |                                                     |
+|  | bearer/OAuth auth     |                                                     |
+|  | origin guard          |                                                     |
+|  | client identity       |                                                     |
+|  | path/action policy    |                                                     |
+|  +-----------+-----------+                                                     |
+|              |                                                                 |
+|              v                                                                 |
+|  +-----------------------+                                                     |
+|  | Tool router           |                                                     |
+|  |                       |                                                     |
+|  | search/list/read      |                                                     |
+|  | write/remove          |                                                     |
+|  | plugins               |                                                     |
+|  | audit log             |                                                     |
+|  +-----------+-----------+                                                     |
+|              |                                                                 |
+|              v                                                                 |
+|  +-----------------------+                                                     |
+|  | Text context index    |                                                     |
+|  | Mount registry        |                                                     |
+|  | Local folder provider |                                                     |
+|  +-----------+-----------+                                                     |
+|              |                                                                 |
+|              v                                                                 |
+|  +-----------------------+                                                     |
+|  | Selected local files  |                                                     |
+|  +-----------------------+                                                     |
 |                                                                                |
 +--------------------------------------------------------------------------------+
 ```
 
-## Client Paths
+## Runtime Paths
 
-Local HTTP clients connect to the local Streamable HTTP endpoint.
-
-```text
-+----------------+          Authorization: Bearer token          +---------------+
-| Claude Code    | --------------------------------------------> | mvmt /mcp     |
-| Cursor         |                                               | 127.0.0.1     |
-| VS Code        | <-------------------------------------------- | Streamable    |
-| Codex          |                MCP responses                  | HTTP          |
-+----------------+                                               +---------------+
-```
-
-Clients that launch MCP servers directly can run mvmt in stdio mode.
+Local HTTP clients connect to:
 
 ```text
-+----------------+              launches process                 +---------------+
-| Claude Desktop | --------------------------------------------> | mvmt start    |
-|                |                                               | --stdio       |
-|                | <-------------------------------------------- | MCP over stdio|
-+----------------+                                               +---------------+
+http://127.0.0.1:4141/mcp
 ```
 
-Tunnel mode provides public HTTPS access for cloud and web MCP clients. Quick tunnel URLs are temporary; stable URLs require a named tunnel or reserved domain.
+They send:
 
 ```text
-+----------------+       public HTTPS URL        +------------------------------+
-| Claude.ai      | ----------------------------> | Tunnel provider              |
-| ChatGPT web    |                               |                              |
-| remote client  | <---------------------------- | Cloudflare / localhost.run   |
-+----------------+                               +---------------+--------------+
-                                                                |
-                                                                |
-                                                                v
-                                                     +----------------------+
-                                                     | mvmt local HTTP      |
-                                                     | 127.0.0.1:4141/mcp   |
-                                                     | bearer/OAuth gate    |
-                                                     +----------------------+
+Authorization: Bearer <token>
 ```
+
+Claude Desktop can launch mvmt over stdio instead:
+
+```text
+Claude Desktop -> mvmt serve --stdio -> MCP over stdio
+```
+
+Tunnel mode publishes the local HTTP endpoint through a public HTTPS URL for web clients such as ChatGPT or claude.ai. The local server still binds to `127.0.0.1`.
 
 ## Request Pipeline
 
-Every tool list and tool call follows the same path.
-
 ```text
-+---------+     +--------------+     +----------------+     +-------------+     +----------+
-| client  | --> | auth/origin  | --> | client policy  | --> | tool router | --> | connector|
-+---------+     +--------------+     +----------------+     +------+------+     +----+-----+
-                                                                              ^          |
-                                                                              |          v
-                                                                              |   +-------------+
-                                                                              |   | raw result  |
-                                                                              |   +-------------+
-                                                                              |          |
-                                                                              |          v
-                                                                              |   +-------------+
-                                                                              +-- | plugins     |
-                                                                                  | redactor    |
-                                                                                  +------+------+
-                                                                                         |
-                                                                                         v
-                                                                                  +-------------+
-                                                                                  | audit log   |
-                                                                                  | ~/.mvmt/    |
-                                                                                  +-------------+
+client
+  -> transport auth
+  -> origin guard
+  -> client identity
+  -> path/action policy
+  -> tool router
+  -> text index or local folder provider
+  -> plugins
+  -> audit log
+  -> client
 ```
 
-## Tool Names
+Authentication answers who is calling.
 
-mvmt namespaces tools by connector ID so different connectors can expose tools with the same original name.
+Mount and client policy answer what that caller may access.
 
-```text
-+--------------------+----------------------+--------------------------------+
-| Connector          | Original tool        | Client sees                    |
-+--------------------+----------------------+--------------------------------+
-| proxy_filesystem   | read_file            | proxy_filesystem__read_file    |
-| proxy_filesystem   | list_directory       | proxy_filesystem__list_directory|
-| obsidian           | search_notes         | obsidian__search_notes         |
-| obsidian           | read_note            | obsidian__read_note            |
-+--------------------+----------------------+--------------------------------+
+## Tool Surface
+
+The mount runtime exposes five tools:
+
+| Tool | Purpose | Required permission |
+| --- | --- | --- |
+| `search` | Search indexed text chunks across permitted mounts. | `search` |
+| `list` | List visible mount roots or directories. | `read` |
+| `read` | Read one text file by virtual path. | `read` |
+| `write` | Create or overwrite one text file. | `write` |
+| `remove` | Delete one text file. | `write` |
+
+`write` and `remove` also require the target mount to have `writeAccess: true`, and protected paths remain blocked.
+
+## Mount Registry
+
+The mount registry maps virtual paths to configured mount roots.
+
+Example:
+
+```yaml
+mounts:
+  - name: workspace
+    path: /workspace
+    root: /Users/you/code/mvmt
 ```
 
-When `semanticTools` is configured, mvmt also exposes high-level tools without connector prefixes:
+`/workspace/docs/setup.md` resolves to a file under `/Users/you/code/mvmt/docs/setup.md`.
 
-```text
-+-------------------------+------------------------------------------------+
-| Tool                    | Purpose                                        |
-+-------------------------+------------------------------------------------+
-| search_personal_context | Keyword-union retrieval across allowed sources |
-| read_context_item       | Read an item returned by search                |
-+-------------------------+------------------------------------------------+
-```
+Path traversal and symlink escapes are rejected by the local folder provider. Clients never receive host filesystem paths in tool results.
 
-These tools are policy-aware. A client can see and call them only for configured sources where its permissions include the required action.
+## Text Index
+
+The text index is used by `search`.
+
+On startup, mvmt serves immediately and rebuilds the index in the background. `mvmt reindex` forces a full rebuild.
+
+The current index is a JSON snapshot beside the config. SQLite and incremental file watching are planned.
+
+## Plugins
+
+Plugins run after a tool returns and before the result reaches the client. The built-in `pattern-redactor` can warn, redact, or block regex matches in text results.
+
+Plugins are defense in depth. They do not expand mount scope and they do not replace path/action policy.
 
 ## Shutdown
 
-SIGINT or SIGTERM triggers shutdown. All cleanup tasks run in parallel:
+SIGINT or SIGTERM triggers cleanup:
 
-- Shut down each connector (kills stdio child processes, closes HTTP clients).
-- Close the HTTP server (closes MCP session transports, drains idle connections, force-closes after 1 second).
-- Stop the tunnel process if running (SIGTERM, then SIGKILL after 2 seconds).
+- close stdio or HTTP MCP transports;
+- stop the tunnel process if running;
+- close the control socket;
+- flush normal process cleanup.
 
-If cleanup does not finish within 5 seconds, the process force-exits.
+If cleanup hangs, mvmt force-exits after the shutdown timeout.
 
-On startup failure (e.g. port conflict), connectors that were already initialized are shut down before exit.
+## Future Federation
 
-## Boundary
+The long-term direction is mounted remote mvmt instances:
 
 ```text
-mvmt is not the source of all connectors.
-mvmt is the gatekeeper and router for local personal data that the user explicitly scoped.
+/local    -> local folder
+/desktop  -> remote mvmt instance
+/server   -> remote mvmt instance
 ```
+
+That is federation, not file sync. The first future abstraction is `resolve(path) -> AccessPlan`, followed by read-only remote mounts.

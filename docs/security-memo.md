@@ -1,44 +1,91 @@
 # Security Memo
 
-**Date:** 2026-04-14
+**Date:** 2026-04-28
 
-mvmt exposes personal local data through MCP. That makes its default security posture part of the product, not a later hardening pass.
+mvmt exposes selected local files to AI clients. Its security model is part of the product.
 
-## Current Boundary
+## Boundary
 
-mvmt is local-first. HTTP mode binds to `127.0.0.1`, requires a bearer token, and rejects browser requests from non-localhost origins unless explicitly allowlisted. Stdio mode has no network listener and depends on the launching MCP client for process isolation.
+mvmt is local-first.
 
-`mvmt init` must only configure scopes that the user grants inside mvmt. It must not import Claude Desktop, Claude Code, Cursor, or other MCP client configs. Those configs can contain broad credentials and trust decisions that mvmt should not inherit implicitly.
+- HTTP mode binds to `127.0.0.1`.
+- `/mcp` and `/health` require authentication.
+- Browser Origin checks block drive-by browser requests from untrusted origins.
+- Stdio mode has no network listener and depends on the launching MCP client for process isolation.
 
-## Access Scopes
+mvmt should not import trust decisions from Claude Desktop, Claude Code, Cursor, or other MCP client configs. The user chooses mvmt mounts directly.
 
-Filesystem access is explicit by folder path. The default is read-only. Write tools are hidden and rejected unless the user enables write access for that filesystem scope.
+## Mount Scope
 
-Obsidian is a native connector. The scope is a single vault path. The default is read-only. `append_to_daily` is hidden and rejected unless Obsidian write access is enabled.
+Filesystem access is explicit by mount.
 
-MemPalace is a stdio proxy connector. The scope is a single palace path. The default is read-only. Known memory write tools are hidden and rejected unless MemPalace write access is enabled.
+```yaml
+mounts:
+  - name: workspace
+    path: /workspace
+    root: /Users/you/code/mvmt
+    writeAccess: false
+```
 
-Future connectors should follow the same pattern: exact scope first, read-only default where possible, and separate write consent.
+Defaults:
+
+- no mount means no data;
+- mounts are read-only unless `writeAccess: true`;
+- `exclude` hides paths from reads, writes, removes, listing, and indexing;
+- `protect` blocks write and remove;
+- path traversal and symlink escapes are rejected.
+
+An Obsidian vault is just a local folder mount. MemPalace is not part of the current runtime surface.
 
 ## Token Handling
 
-HTTP auth uses a 256-bit owner/session bearer token stored at `~/.mvmt/.session-token` with mode `600` on non-Windows systems.
+HTTP auth uses a 256-bit session bearer token stored at:
 
-- `mvmt start` generates a fresh token.
-- `mvmt show` prints the current token without changing it.
-- `mvmt rotate` generates a new token and writes it to the token file.
+```text
+~/.mvmt/.session-token
+```
 
-The HTTP server validates against the token file on each request. This makes token rotation effective without restarting the server, but clients that cached the old token still need to be updated or restarted.
+The token file is mode `600` on non-Windows systems.
 
-When `clients[]` is configured, `/mcp` requests resolve to a named client identity instead of the owner/session token. A client can authenticate with a configured token hash or with an OAuth access token whose `client_id` is mapped to that client. Unknown OAuth client IDs are rejected as quarantined until the operator explicitly maps them.
+Commands:
 
-Client policy controls:
+```bash
+mvmt token
+mvmt token show
+mvmt token rotate
+```
 
-- whether raw connector tools are visible at all,
-- which source IDs the client can use,
-- which actions are allowed for each source (`search`, `read`, `write`, `memory_write`).
+The HTTP server validates against the token file on each request, so rotation is effective without restarting mvmt. Clients using the old token still need to be restarted or updated.
 
-The owner/session token remains the compatibility credential when no `clients[]` policy exists. Once policy is configured, it is no longer accepted as a `/mcp` data-plane credential.
+## Per-Client Policy
+
+When `clients[]` is absent, mvmt preserves legacy behavior: the session token can access all configured mounts.
+
+When `clients[]` exists, `/mcp` resolves every request to a configured client:
+
+- token clients match a stored SHA-256 `tokenHash`;
+- OAuth clients match configured OAuth `client_id` values;
+- unknown OAuth clients are quarantined with zero permissions;
+- the session token no longer grants data-plane access.
+
+Policy is path/action based:
+
+```yaml
+clients:
+  - id: codex
+    permissions:
+      - path: /workspace/**
+        actions: [search, read, write]
+      - path: /notes/**
+        actions: [search, read]
+```
+
+For writes, both checks must pass:
+
+1. client has `write` for the virtual path;
+2. mount has `writeAccess: true`.
+
+Protected paths remain blocked even when both checks pass.
 
 Tunnel mode requires `clients[]` by default so public traffic cannot fall back to the legacy all-mount session-token identity. `MVMT_ALLOW_LEGACY_TUNNEL=1` exists only as a temporary debugging escape hatch.
 
@@ -46,33 +93,24 @@ Mount access has two layers of path filtering: per-mount `exclude`/`protect` pat
 
 ## Known Limits
 
-Localhost traffic is plaintext. A process running as the same OS user can usually read local files and process state anyway, so the OS user remains the main trust boundary.
+- Localhost traffic is plaintext. The OS user remains the main trust boundary.
+- Client-token issuance is not managed yet; `clients[]` is manual config.
+- There is no admin UI yet.
+- Search is prototype keyword scoring over text files, not embeddings.
+- Binary/PDF/image indexing is not shipped.
+- Remote mvmt mounts are not shipped.
+- Audit log rotation is manual.
 
-The per-client permission model is enforced for raw tool listing and raw tool calls. It is configured in YAML today; there is not yet an admin UI or token issuance CLI.
+## Pattern Redaction
 
-The high-level `search_personal_context` and `read_context_item` tools are available only when configured under `semanticTools`. Retrieval is keyword-union across supported adapters, not embedding search or semantic ranking.
+The built-in `pattern-redactor` plugin is defense in depth for outbound tool results.
 
-There is no managed remote relay yet. For remote access, use a narrow config and read-only scopes where possible. Quick tunnels are temporary; use a named tunnel or reserved domain for a stable URL.
-
-Tunnel OAuth discovery uses forwarded host/proto headers from the tunnel provider to construct public URLs. Cloudflare Quick Tunnel is the recommended v0 path; other tunnels may produce incorrect discovery URLs.
-
-Audit logs are local JSONL files with mode `600`. They include argument key names and a truncated argument preview, which can contain values. Do not treat the audit log as sanitized.
-
-## Pattern-Based Redaction
-
-The built-in `pattern-redactor` plugin is defense-in-depth for outbound tool results. It is useful for accidental leakage, such as a stray API key in a code comment or log line.
-
-This is a best-effort pattern matcher, not a security control. It will miss data that doesn't match your patterns, and may redact things you didn't intend. Do not rely on it for compliance, privacy, or security requirements.
-
-If data must not reach AI tools, do not expose it through a connector. Scope the connector to exclude that data entirely.
-
-When the redactor matches, audit entries include the matched pattern name and count so users can see why output was changed or blocked.
+It is not the primary security boundary. If a client must not see data, do not mount that path for the client.
 
 ## Near-Term Security Priorities
 
-- Admin UI for client keys, permissions, and semantic tool mappings.
-- Token issuance/revocation CLI for `clients[]`.
-- `save_personal_memory` with explicit `memory_write` permission and clear audit behavior.
-- Clear remote relay design before marketing internet access.
+- Managed client-key issuance and revocation.
+- Admin UI for mounts, client policy, and audit visibility.
+- SQLite-backed index and incremental updates.
+- Remote mvmt mounts with clear two-sided permission checks.
 - Audit log rotation.
-- Stronger write policies for future native connectors such as Postgres.

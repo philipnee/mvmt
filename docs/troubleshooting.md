@@ -8,53 +8,64 @@ Another process is using the port.
 mvmt serve --port 4142
 ```
 
-## Connector fails to start
+## `No mounts loaded. Nothing to serve.`
 
-Run:
+mvmt needs at least one enabled mount.
 
 ```bash
-mvmt doctor
-mvmt serve --verbose
+mvmt mounts list
+mvmt mounts add workspace ~/code/mvmt --mount-path /workspace --read-only
+mvmt serve -i
 ```
-
-Common causes:
-
-- The MCP package is not installed or `npx` cannot download it.
-- Required environment variables are missing from `proxy[].env`.
-- The command is not on `PATH`.
-- An advanced/manual HTTP proxy URL is not a Streamable HTTP MCP endpoint.
 
 ## Tools are missing
 
 Check:
 
-- Whether the connector is enabled in `~/.mvmt/config.yaml`.
-- Whether `writeAccess: false` is hiding write-like tools.
-- Whether `mvmt doctor` reports the connector healthy.
+- at least one mount is enabled;
+- the client token is current;
+- `clients[]` policy grants the needed virtual path and action;
+- the mount itself allows writes when using `write` or `remove`;
+- protected paths are not being targeted.
 
-## Obsidian vault not detected
-
-`mvmt config setup` scans these locations one level deep:
-
-- `~/Documents/`
-- `~/Obsidian/`
-- `~/vaults/`
-- `~/`
-- `~/Library/Mobile Documents/iCloud~md~obsidian/Documents/` on macOS
-
-If your vault is elsewhere, enter the path manually.
-
-## Token rejected by client
-
-The bearer token is reused across normal `mvmt serve` restarts. It only changes when you rotate it. Read the current token:
+Useful commands:
 
 ```bash
+mvmt doctor
+mvmt mounts list
 mvmt token
 ```
 
-Then update or restart the client with that token.
+## Search returns no results
 
-If the token file is rejected even though mvmt is running, check that the client actually sent the new token. Existing MCP clients may need to be restarted after rotation.
+The text index may not be built yet.
+
+```bash
+mvmt reindex
+```
+
+Also check that the file type is text-like and smaller than the current text size limit.
+
+## Token rejected by client
+
+The session bearer token is reused across normal `mvmt serve` restarts. It changes only when you rotate it.
+
+```bash
+mvmt token show
+```
+
+If the token works in curl but not an MCP client, restart the client after updating its environment variable or config.
+
+## Codex says login is required
+
+For local bearer-token setup, do not use `codex mcp login mvmt`.
+
+Codex usually says this when the token environment variable is missing or stale.
+
+```bash
+export MVMT_TOKEN="$(mvmt token show)"
+codex
+```
 
 ## OAuth client gets `redirect_uri is not registered for this client`
 
@@ -62,33 +73,36 @@ mvmt only redirects OAuth authorization codes to registered callback URLs.
 
 The remote client must either:
 
-- support RFC 7591 dynamic client registration and call `/register`, or
-- use a pre-registered exact `redirect_uri`
+- support RFC 7591 Dynamic Client Registration and call `/register`; or
+- use a pre-registered exact `redirect_uri`.
 
-If your client does not auto-register, register it manually first:
+## OAuth provider returned `invalid_target`
 
-```bash
-curl -X POST https://your-public-mvmt-host/register \
-  -H "Content-Type: application/json" \
-  -d '{
-    "client_id": "my-client",
-    "redirect_uris": ["https://example.com/oauth/callback"]
-  }'
+The OAuth flow supplied a resource that does not match this mvmt instance's MCP resource.
+
+The canonical resource is:
+
+```text
+https://your-public-mvmt-host/mcp
 ```
+
+Recent mvmt versions default a missing authorize `resource` to the canonical `/mcp` resource. Explicitly wrong resources are rejected.
 
 ## Remote client cannot connect and no tool calls appear
 
-OAuth and MCP handshake failures can happen before a tool call exists, so they do not appear in the tool-call audit log. In interactive mode, turn live logs on:
+OAuth and MCP handshake failures can happen before a tool call exists, so they do not appear in the tool-call audit log.
+
+Use interactive request logs:
 
 ```bash
 mvmt serve -i
 > logs on
 ```
 
-Then retry the client connection. You should see sanitized events such as:
+You should see sanitized events such as:
 
 ```text
-oauth.discovery GET /.well-known/oauth-authorization-server/mcp 200
+oauth.discovery GET /.well-known/oauth-authorization-server 200
 oauth.register POST /register 201
 oauth.authorize GET /authorize 200
 oauth.token POST /token 400 invalid_grant
