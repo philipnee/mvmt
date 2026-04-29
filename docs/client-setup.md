@@ -77,28 +77,40 @@ Claude Desktop uses stdio mode, so it launches mvmt as a child process. No token
 
 ```bash
 mvmt serve
+mvmt tokens add claude-code --read /notes
+
+# Use the token printed by `mvmt tokens add`.
+MVMT_TOKEN="<paste mvmt_... token here>"
 claude mcp add --transport http \
-  --header "Authorization: Bearer $(mvmt token show)" \
+  --header "Authorization: Bearer $MVMT_TOKEN" \
   mvmt http://127.0.0.1:4141/mcp
 ```
 
-If you rotate the mvmt token, update the client token afterward.
+If you replace the API token, update the client header afterward.
 
 ## Codex CLI
 
 Codex stores a bearer-token environment variable name, not the token value itself:
 
 ```bash
-export MVMT_TOKEN="$(mvmt token show)"
+mvmt serve
+mvmt tokens add codex --read /notes
+
+# Use the token printed by `mvmt tokens add`.
+export MVMT_TOKEN="<paste mvmt_... token here>"
 codex mcp add mvmt \
   --url http://127.0.0.1:4141/mcp \
   --bearer-token-env-var MVMT_TOKEN
 ```
 
+Do not pass the token itself to `--bearer-token-env-var`. That flag expects the
+name of an environment variable.
+
 Start new Codex sessions from a shell where `MVMT_TOKEN` is set:
 
 ```bash
-MVMT_TOKEN="$(mvmt token show)" codex
+export MVMT_TOKEN="<paste mvmt_... token here>"
+codex
 ```
 
 ## Cursor
@@ -113,7 +125,7 @@ MVMT_TOKEN="$(mvmt token show)" codex
     "mvmt": {
       "url": "http://127.0.0.1:4141/mcp",
       "headers": {
-        "Authorization": "Bearer <paste token from mvmt token>"
+        "Authorization": "Bearer <paste token from mvmt tokens add>"
       }
     }
   }
@@ -132,7 +144,7 @@ MVMT_TOKEN="$(mvmt token show)" codex
     "mvmt": {
       "url": "http://127.0.0.1:4141/mcp",
       "headers": {
-        "Authorization": "Bearer <paste token from mvmt token>"
+        "Authorization": "Bearer <paste token from mvmt tokens add>"
       }
     }
   }

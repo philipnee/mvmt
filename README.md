@@ -375,6 +375,17 @@ mvmt tokens add codex --write /workspace
 `mvmt tokens add` prints the plaintext token once. mvmt stores only its
 SHA-256 hash in config.
 
+For Codex CLI, store that printed token in an environment variable and pass the
+variable name:
+
+```bash
+export MVMT_TOKEN="<paste mvmt_... token here>"
+codex mcp add mvmt --url http://127.0.0.1:4141/mcp --bearer-token-env-var MVMT_TOKEN
+```
+
+Do not pass the token itself to `--bearer-token-env-var`; Codex expects an
+environment variable name.
+
 Once API tokens are present, `/mcp` becomes strict:
 
 - bearer tokens must match a configured client `tokenHash`;

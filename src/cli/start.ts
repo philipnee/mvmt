@@ -374,10 +374,10 @@ function printStartupBanner(
     console.log(`${chalk.bold('Tool-call log')} ${AUDIT_LOG_PATH}`);
     console.log('\nRead token with:');
     console.log(`  ${chalk.cyan('mvmt token')}\n`);
-    console.log('Connect from Claude Desktop:');
-    console.log(`  { "mcpServers": { "mvmt": { "url": "http://127.0.0.1:${port}/mcp", "headers": { "Authorization": "Bearer <token from mvmt token>" } } } }`);
-    console.log('\nOr via Claude Code:');
-    console.log(`  ${chalk.cyan(`claude mcp add --transport http --header "Authorization: Bearer <token from mvmt token>" mvmt http://127.0.0.1:${port}/mcp`)}\n`);
+    console.log('Connect a local HTTP client:');
+    console.log(`  URL: ${chalk.cyan(`http://127.0.0.1:${port}/mcp`)}`);
+    console.log('  Header: Authorization: Bearer <token>');
+    console.log(chalk.dim('  Use `mvmt tokens add` for scoped client access, or `mvmt token` only in legacy mode.'));
   }
 }
 

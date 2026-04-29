@@ -379,6 +379,9 @@ export function printApiTokenSaved(configPath: string, result: ApiTokenUpdateRes
     console.log(`  token: ${result.plaintextToken}`);
     console.log('');
     console.log(chalk.dim('Use it as: Authorization: Bearer <token>'));
+    console.log(chalk.dim('For Codex CLI, put the token in an environment variable and pass the variable name:'));
+    console.log(`  ${chalk.cyan(`export MVMT_TOKEN="${result.plaintextToken}"`)}`);
+    console.log(`  ${chalk.cyan('codex mcp add mvmt --url http://127.0.0.1:4141/mcp --bearer-token-env-var MVMT_TOKEN')}`);
   } else {
     console.log(chalk.dim('Existing token value was not changed.'));
   }

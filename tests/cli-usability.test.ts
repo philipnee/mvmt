@@ -181,6 +181,8 @@ describe('CLI usability', () => {
       expect(stdout).toContain('API token (shown once)');
       expect(stdout).toContain('id: codex');
       expect(stdout).toContain('token: mvmt_');
+      expect(stdout).toContain('export MVMT_TOKEN="mvmt_');
+      expect(stdout).toContain('codex mcp add mvmt --url http://127.0.0.1:4141/mcp --bearer-token-env-var MVMT_TOKEN');
 
       const { stdout: list } = await runCli(['tokens', '--config', configPath]);
       expect(list).toContain('API tokens');
