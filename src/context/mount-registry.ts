@@ -41,6 +41,10 @@ export class MountRegistry {
       .map((mount) => mount.config.name);
   }
 
+  mountPathForName(name: string): string | undefined {
+    return this.registered.find((mount) => mount.config.name === name)?.config.path;
+  }
+
   mountNameForPath(inputPath: string): string | undefined {
     return this.findMount(normalizeVirtualPath(inputPath))?.config.name;
   }

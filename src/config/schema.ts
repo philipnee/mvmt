@@ -8,9 +8,9 @@ export const TunnelSchema = z.object({
 
 export const ProxySchema = z
   .object({
-    // id is the policy-stable identifier used by client permissions and
-    // semantic tools. When omitted, name is used. Set id explicitly when
-    // you need to rename a proxy without re-mapping policy.
+    // id is the stable raw-connector identifier. When omitted, name is
+    // used. Set id explicitly when you need to rename a proxy without
+    // changing its virtual policy path or semantic tool source list.
     id: z.string().min(1).optional(),
     name: z.string().min(1),
     source: z.string().optional(), // legacy setup-provenance metadata; runtime ignores it
@@ -126,7 +126,7 @@ export const PluginSchema = z.discriminatedUnion('name', [
 ]);
 
 // OBSIDIAN_SOURCE_ID is the conventional source id for the native Obsidian
-// connector. Used by client permissions and semantic tool source lists.
+// connector. Used by raw-tool virtual policy paths and semantic source lists.
 export const OBSIDIAN_SOURCE_ID = 'obsidian';
 
 export const LocalFolderMountSchema = z.object({
@@ -145,7 +145,7 @@ export const LocalFolderMountSchema = z.object({
 export const PermissionAction = z.enum(['search', 'read', 'write', 'memory_write']);
 
 export const PermissionSchema = z.object({
-  sourceId: z.string().min(1),
+  path: z.string().min(1).regex(/^\/(?!$)/, 'permission path must be absolute and cannot be /'),
   actions: z.array(PermissionAction).default([]),
 });
 
@@ -267,13 +267,7 @@ export const ConfigSchema = z
       }
 
       for (const [permIndex, permission] of client.permissions.entries()) {
-        if (!knownSourceIds.has(permission.sourceId)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: `unknown sourceId "${permission.sourceId}"; configure a proxy or obsidian first`,
-            path: ['clients', clientIndex, 'permissions', permIndex, 'sourceId'],
-          });
-        }
+        validatePermissionPath(permission.path, ctx, ['clients', clientIndex, 'permissions', permIndex, 'path']);
       }
     }
 
@@ -333,9 +327,20 @@ function validateUniqueSourceIds(
   }
 }
 
-// resolveProxySourceId returns the policy-stable source id for a proxy
-// entry (id when set, otherwise name). Exported so policy enforcement
-// uses the same lookup the schema validation uses.
+function validatePermissionPath(pathPattern: string, ctx: z.RefinementCtx, issuePath: (string | number)[]): void {
+  if (pathPattern === '/**') return;
+  if (pathPattern.includes('**') && !pathPattern.endsWith('/**')) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'permission path may only use ** as a trailing subtree wildcard',
+      path: issuePath,
+    });
+  }
+}
+
+// resolveProxySourceId returns the stable source id for a raw proxy entry
+// (id when set, otherwise name). Exported so runtime lookup and schema
+// validation use the same identifier.
 export function resolveProxySourceId(proxy: ProxyConfig): string {
   return proxy.id ?? proxy.name;
 }

@@ -1296,7 +1296,7 @@ describe('startHttpServer lifecycle', () => {
           name: 'Search-only client',
           auth: { type: 'token', tokenHash: sha256Hex('search-token') },
           rawToolsEnabled: true,
-          permissions: [{ sourceId: 'workspace', actions: ['search'] }],
+          permissions: [{ path: '/workspace/**', actions: ['search'] }],
         },
       ],
     });
@@ -1313,7 +1313,7 @@ describe('startHttpServer lifecycle', () => {
         arguments: { path: '/tmp/a' },
       });
       expect(denied.result.isError).toBe(true);
-      expect(denied.result.content[0].text).toContain('missing_permission source=workspace action=read');
+      expect(denied.result.content[0].text).toContain('missing_permission path=/workspace action=read');
       expect(connector.calls).toEqual([]);
     } finally {
       await server.close();
@@ -1341,7 +1341,7 @@ describe('startHttpServer lifecycle', () => {
           name: 'ChatGPT',
           auth: { type: 'token', tokenHash: sha256Hex('chatgpt-token') },
           rawToolsEnabled: false,
-          permissions: [{ sourceId: 'obsidian', actions: ['search', 'read'] }],
+          permissions: [{ path: '/obsidian/**', actions: ['search', 'read'] }],
         },
       ],
     });

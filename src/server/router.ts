@@ -294,28 +294,29 @@ export class ToolRouter {
       return jsonResult({
         query,
         ranking: 'prototype_keyword_count',
-        results: await this.contextIndex.search(query, mountNames, limit),
+        results: (await this.contextIndex.search(query, mountNames, limit))
+          .filter((entry) => pathAllowed(entry.path, 'search', identity)),
       });
     }
 
     if (name === 'list') {
       const inputPath = optionalString(args.path) ?? '/';
       const mountName = inputPath === '/' ? undefined : this.contextIndex.mountNameForPath(inputPath);
-      if (mountName && !contextSourceAllowed(mountName, 'read', identity)) {
-        return accessDeniedResult(`missing_permission mount=${mountName} action=read`);
+      if (mountName && !pathMayExposeEntry(inputPath, 'read', identity)) {
+        return accessDeniedResult(`missing_permission path=${inputPath} action=read`);
       }
       const entries = await this.contextIndex.list(inputPath);
       return jsonResult({
         path: inputPath,
-        entries: entries.filter((entry) => contextSourceAllowed(entry.mount, 'read', identity)),
+        entries: entries.filter((entry) => pathMayExposeEntry(entry.path, 'read', identity)),
       });
     }
 
     if (name === 'read') {
       const inputPath = requireString(args.path, 'path');
       const mountName = this.contextIndex.mountNameForPath(inputPath);
-      if (!mountName || !contextSourceAllowed(mountName, 'read', identity)) {
-        return accessDeniedResult(`missing_permission mount=${mountName ?? '(unknown)'} action=read`);
+      if (!mountName || !pathAllowed(inputPath, 'read', identity)) {
+        return accessDeniedResult(`missing_permission path=${inputPath} action=read`);
       }
       return jsonResult(await this.contextIndex.read(inputPath));
     }
@@ -325,16 +326,16 @@ export class ToolRouter {
       const content = requireText(args.content, 'content');
       const expectedHash = optionalString(args.expected_hash);
       const mountName = this.contextIndex.mountNameForPath(inputPath);
-      if (!mountName || !contextSourceAllowed(mountName, 'write', identity)) {
-        return accessDeniedResult(`missing_permission mount=${mountName ?? '(unknown)'} action=write`);
+      if (!mountName || !pathAllowed(inputPath, 'write', identity)) {
+        return accessDeniedResult(`missing_permission path=${inputPath} action=write`);
       }
       return jsonResult(await this.contextIndex.write(inputPath, content, expectedHash));
     }
 
     const inputPath = requireString(args.path, 'path');
     const mountName = this.contextIndex.mountNameForPath(inputPath);
-    if (!mountName || !contextSourceAllowed(mountName, 'write', identity)) {
-      return accessDeniedResult(`missing_permission mount=${mountName ?? '(unknown)'} action=write`);
+    if (!mountName || !pathAllowed(inputPath, 'write', identity)) {
+      return accessDeniedResult(`missing_permission path=${inputPath} action=write`);
     }
     return jsonResult(await this.contextIndex.delete(inputPath));
   }
@@ -383,7 +384,7 @@ export class ToolRouter {
     const itemId = requireString(args.item_id, 'item_id');
     const allowedSources = this.allowedSemanticSources('read_context_item', identity, [sourceId]);
     if (!allowedSources.includes(sourceId)) {
-      return accessDeniedResult(`missing_permission source=${sourceId} action=read`);
+      return accessDeniedResult(`missing_permission path=/${sourceId} action=read`);
     }
 
     const adapter = this.findSemanticAdapter(sourceId, 'read');
@@ -413,7 +414,7 @@ export class ToolRouter {
     if (isSemanticToolName(name)) return this.isSemanticToolVisible(name, identity);
     if (isContextToolName(name)) {
       const action: PermissionAction = name === 'search' ? 'search' : name === 'write' || name === 'delete' ? 'write' : 'read';
-      return this.allowedContextMounts(action, identity).length > 0;
+      return this.contextIndex !== undefined && actionAvailable(action, identity);
     }
     return false;
   }
@@ -453,9 +454,12 @@ export class ToolRouter {
   ): string[] {
     if (!this.contextIndex) return [];
     const requested = requestedMountNames ? new Set(requestedMountNames) : undefined;
-    return this.contextIndex.mountNames().filter((mountName) => (
-      (!requested || requested.has(mountName)) && contextSourceAllowed(mountName, action, identity)
-    ));
+    return this.contextIndex.mountNames().filter((mountName) => {
+      const mountPath = this.contextIndex?.mountPathForName(mountName);
+      return Boolean(mountPath)
+        && (!requested || requested.has(mountName))
+        && pathMayExposeEntry(mountPath!, action, identity);
+    });
   }
 
   private recordAudit(
@@ -497,8 +501,9 @@ function toolDeniedReason(
   if (!identity || identity.isLegacyDefault) return undefined;
   if (tool.toolKind === 'semantic') return undefined;
   if (!identity.rawToolsEnabled) return 'raw_tools_disabled';
-  if (semanticSourceAllowed(tool.sourceId, tool.requiredAction, identity)) return undefined;
-  return `missing_permission source=${tool.sourceId} action=${tool.requiredAction}`;
+  const sourcePath = `/${tool.sourceId}`;
+  if (pathAllowed(sourcePath, tool.requiredAction, identity)) return undefined;
+  return `missing_permission path=${sourcePath} action=${tool.requiredAction}`;
 }
 
 function inferRequiredAction(toolName: string): PermissionAction {
@@ -656,14 +661,48 @@ function isContextToolName(value: string): value is ContextToolName {
 }
 
 function semanticSourceAllowed(sourceId: string, action: PermissionAction, identity?: ClientIdentity): boolean {
+  return pathAllowed(`/${sourceId}`, action, identity);
+}
+
+function pathAllowed(inputPath: string, action: PermissionAction, identity?: ClientIdentity): boolean {
   if (!identity || identity.isLegacyDefault) return true;
+  const normalized = normalizePermissionPath(inputPath);
   return identity.permissions.some((permission) => (
-    permission.sourceId === sourceId && permission.actions.includes(action)
+    permission.actions.includes(action) && pathMatchesPermission(normalized, permission.path)
   ));
 }
 
-function contextSourceAllowed(sourceId: string, action: PermissionAction, identity?: ClientIdentity): boolean {
-  return semanticSourceAllowed(sourceId, action, identity);
+function pathMayExposeEntry(inputPath: string, action: PermissionAction, identity?: ClientIdentity): boolean {
+  if (!identity || identity.isLegacyDefault) return true;
+  const normalized = normalizePermissionPath(inputPath);
+  return identity.permissions.some((permission) => {
+    if (!permission.actions.includes(action)) return false;
+    if (pathMatchesPermission(normalized, permission.path)) return true;
+    const base = permission.path.endsWith('/**')
+      ? normalizePermissionPath(permission.path.slice(0, -3))
+      : normalizePermissionPath(permission.path);
+    return base === normalized || base.startsWith(`${normalized}/`);
+  });
+}
+
+function actionAvailable(action: PermissionAction, identity?: ClientIdentity): boolean {
+  return !identity || identity.isLegacyDefault || identity.permissions.some((permission) => permission.actions.includes(action));
+}
+
+function pathMatchesPermission(inputPath: string, pattern: string): boolean {
+  const normalizedPattern = normalizePermissionPath(pattern);
+  if (normalizedPattern === '/**') return true;
+  if (normalizedPattern.endsWith('/**')) {
+    const base = normalizedPattern.slice(0, -3);
+    return inputPath === base || inputPath.startsWith(`${base}/`);
+  }
+  return inputPath === normalizedPattern;
+}
+
+function normalizePermissionPath(inputPath: string): string {
+  const trimmed = inputPath.trim().replace(/\\/g, '/').replace(/\/+$/, '');
+  if (!trimmed || trimmed === '/') return '/';
+  return trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
 }
 
 function requireString(value: unknown, field: string): string {
