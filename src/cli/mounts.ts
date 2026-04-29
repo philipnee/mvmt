@@ -13,6 +13,7 @@ import { normalizePathSeparators, stripTrailingSlashes } from '../context/mount-
 
 export interface MountCommandOptions {
   config?: string;
+  json?: boolean;
 }
 
 export interface AddMountOptions extends MountCommandOptions {
@@ -39,6 +40,10 @@ export interface EditMountOptions extends MountCommandOptions {
   disable?: boolean;
 }
 
+export interface RemoveMountOptions extends MountCommandOptions {
+  yes?: boolean;
+}
+
 export interface MountInput {
   name: string;
   root: string;
@@ -53,7 +58,7 @@ export interface MountInput {
 
 export async function listMounts(options: MountCommandOptions = {}): Promise<void> {
   const config = loadConfig(resolveMountsConfigPath(options.config));
-  printMounts(config);
+  printMounts(config, { json: Boolean(options.json) });
 }
 
 export async function addMount(name: string | undefined, root: string | undefined, options: AddMountOptions = {}): Promise<void> {
@@ -86,11 +91,11 @@ export async function editMount(name: string | undefined, options: EditMountOpti
   console.log(chalk.dim('Restart mvmt for the running server to load mount changes. Run `mvmt reindex` to rebuild the index.'));
 }
 
-export async function removeMount(name: string | undefined, options: MountCommandOptions = {}): Promise<void> {
+export async function removeMount(name: string | undefined, options: RemoveMountOptions = {}): Promise<void> {
   const configPath = resolveMountsConfigPath(options.config);
   const config = loadConfig(configPath);
   const mountName = name ?? await promptForMountName(config, 'Remove which mount?');
-  const ok = await confirm({
+  const ok = options.yes ? true : await confirm({
     message: `Remove mount ${mountName}? Client permissions that reference it will become invalid.`,
     default: false,
   });
@@ -105,7 +110,12 @@ export async function removeMount(name: string | undefined, options: MountComman
   console.log(chalk.dim('Restart mvmt for the running server to unload mount changes. Run `mvmt reindex` to rebuild the index.'));
 }
 
-export function printMounts(config: MvmtConfig): void {
+export function printMounts(config: MvmtConfig, options: { json?: boolean } = {}): void {
+  if (options.json) {
+    console.log(JSON.stringify({ mounts: config.mounts.map(toMountSummary) }, null, 2));
+    return;
+  }
+
   console.log(chalk.bold('Mounts'));
   if (config.mounts.length === 0) {
     console.log(`  ${chalk.dim('none')}`);
@@ -121,6 +131,20 @@ export function printMounts(config: MvmtConfig): void {
     if (mount.exclude.length > 0) console.log(`    exclude: ${mount.exclude.join(', ')}`);
     if (mount.protect.length > 0) console.log(`    protect: ${mount.protect.join(', ')}`);
   }
+}
+
+function toMountSummary(mount: LocalFolderMountConfig): Record<string, unknown> {
+  return {
+    name: mount.name,
+    path: mount.path,
+    root: mount.root,
+    enabled: mount.enabled !== false,
+    writeAccess: mount.writeAccess,
+    description: mount.description,
+    guidance: mount.guidance,
+    exclude: mount.exclude,
+    protect: mount.protect,
+  };
 }
 
 export function addMountToConfig(config: MvmtConfig, mountInput: MountInput): MvmtConfig {
@@ -267,11 +291,11 @@ async function promptForMountInput(config: MvmtConfig): Promise<MountInput> {
     default: false,
   });
   const description = await input({
-    message: 'Description for agents (optional):',
+    message: 'Description for clients (optional):',
     default: '',
   });
   const guidance = await input({
-    message: 'Mount-specific instructions for agents (optional):',
+    message: 'Mount-specific instructions for clients (optional):',
     default: '',
   });
   const exclude = splitPatterns(await input({
@@ -313,11 +337,11 @@ async function promptForMountPatch(config: MvmtConfig, name: string): Promise<Pa
     default: current.enabled,
   });
   const description = await input({
-    message: 'Description for agents:',
+    message: 'Description for clients:',
     default: current.description,
   });
   const guidance = await input({
-    message: 'Mount-specific instructions for agents:',
+    message: 'Mount-specific instructions for clients:',
     default: current.guidance,
   });
   const exclude = splitPatterns(await input({
