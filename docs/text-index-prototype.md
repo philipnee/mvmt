@@ -65,9 +65,6 @@ mounts edit
 mounts remove
 ```
 
-Client policy still uses `sourceId` on this branch. A follow-up PR moves
-permissions to global path rules.
-
 ```yaml
 clients:
   - id: codex
@@ -77,7 +74,7 @@ clients:
       tokenHash: "..."
     rawToolsEnabled: false
     permissions:
-      - sourceId: workspace
+      - path: /workspace/**
         actions: [search, read, write]
 ```
 

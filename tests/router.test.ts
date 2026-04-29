@@ -164,7 +164,7 @@ describe('ToolRouter', () => {
     );
   });
 
-  it('filters raw tools by client source/action permissions', async () => {
+  it('filters raw tools by client path/action permissions', async () => {
     const connector: Connector = {
       id: 'proxy_filesystem',
       displayName: 'filesystem',
@@ -181,7 +181,7 @@ describe('ToolRouter', () => {
     const router = new ToolRouter([{ connector, sourceId: 'workspace' }]);
     await router.initialize();
 
-    expect(router.getAllTools(client('codex', true, [{ sourceId: 'workspace', actions: ['search'] }]))).toEqual([
+    expect(router.getAllTools(client('codex', true, [{ path: '/workspace/**', actions: ['search'] }]))).toEqual([
       expect.objectContaining({ namespacedName: 'proxy_filesystem__search_files', requiredAction: 'search' }),
     ]);
   });
@@ -203,10 +203,10 @@ describe('ToolRouter', () => {
     const router = new ToolRouter([connector], audit);
     await router.initialize();
 
-    expect(router.getAllTools(client('chatgpt', false, [{ sourceId: 'obsidian', actions: ['read'] }]))).toEqual([]);
+    expect(router.getAllTools(client('chatgpt', false, [{ path: '/obsidian/**', actions: ['read'] }]))).toEqual([]);
     await expect(
       router.callTool('obsidian__read_note', { notePath: 'Project' }, client('chatgpt', false, [
-        { sourceId: 'obsidian', actions: ['read'] },
+        { path: '/obsidian/**', actions: ['read'] },
       ])),
     ).resolves.toMatchObject({ isError: true });
     expect(callTool).not.toHaveBeenCalled();
@@ -219,7 +219,7 @@ describe('ToolRouter', () => {
     );
   });
 
-  it('denies raw tool calls without the required source/action permission', async () => {
+  it('denies raw tool calls without the required path/action permission', async () => {
     const audit = { record: vi.fn() };
     const callTool = vi.fn();
     const connector: Connector = {
@@ -238,14 +238,14 @@ describe('ToolRouter', () => {
 
     await expect(
       router.callTool('proxy_filesystem__read_file', { path: '/tmp/a' }, client('codex', true, [
-        { sourceId: 'workspace', actions: ['search'] },
+        { path: '/workspace/**', actions: ['search'] },
       ])),
     ).resolves.toMatchObject({ isError: true });
     expect(callTool).not.toHaveBeenCalled();
     expect(audit.record).toHaveBeenCalledWith(
       expect.objectContaining({
         clientId: 'codex',
-        deniedReason: 'missing_permission source=workspace action=read',
+        deniedReason: 'missing_permission path=/workspace action=read',
         isError: true,
       }),
     );
@@ -268,7 +268,7 @@ describe('ToolRouter', () => {
     await router.initialize();
 
     await router.callTool('obsidian__read_note', {}, client('codex', true, [
-      { sourceId: 'obsidian', actions: ['read'] },
+      { path: '/obsidian/**', actions: ['read'] },
     ]));
 
     expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ clientId: 'codex', isError: false }));
@@ -285,7 +285,7 @@ describe('ToolRouter', () => {
     await router.initialize();
 
     expect(router.getAllTools(client('chatgpt', false, [
-      { sourceId: 'obsidian', actions: ['search', 'read'] },
+      { path: '/obsidian/**', actions: ['search', 'read'] },
     ])).map((tool) => tool.namespacedName)).toEqual([
       'search_personal_context',
       'read_context_item',
@@ -302,7 +302,7 @@ describe('ToolRouter', () => {
     await router.initialize();
 
     const result = await router.callTool('search_personal_context', { query: 'launch' }, client('chatgpt', false, [
-      { sourceId: 'obsidian', actions: ['search'] },
+      { path: '/obsidian/**', actions: ['search'] },
     ]));
     const parsed = JSON.parse(result.content[0].type === 'text' ? result.content[0].text : '{}');
 
@@ -332,7 +332,7 @@ describe('ToolRouter', () => {
     const result = await router.callTool(
       'read_context_item',
       { source_id: 'obsidian', item_id: 'projects/launch.md' },
-      client('chatgpt', false, [{ sourceId: 'obsidian', actions: ['read'] }]),
+      client('chatgpt', false, [{ path: '/obsidian/**', actions: ['read'] }]),
     );
     const parsed = JSON.parse(result.content[0].type === 'text' ? result.content[0].text : '{}');
 
@@ -344,22 +344,45 @@ describe('ToolRouter', () => {
     });
   });
 
-  it('exposes prototype text index tools by source/action permission', async () => {
+  it('exposes prototype text index tools by path/action permission', async () => {
     const { index, tmp } = await createTextIndexFixture();
     try {
       const router = new ToolRouter([], undefined, [], { contextIndex: index });
       await router.initialize();
 
       const tools = router.getAllTools(client('codex', false, [
-        { sourceId: 'workspace', actions: ['search', 'read'] },
+        { path: '/workspace/**', actions: ['search', 'read'] },
       ]));
 
       expect(tools.map((tool) => tool.namespacedName)).toEqual(['search', 'list', 'read']);
       const result = await router.callTool('search', { query: 'alpha' }, client('codex', false, [
-        { sourceId: 'workspace', actions: ['search', 'read'] },
+        { path: '/workspace/**', actions: ['search', 'read'] },
       ]));
       const parsed = JSON.parse(result.content[0].type === 'text' ? result.content[0].text : '{}');
       expect(parsed.results[0]).toMatchObject({ mount: 'workspace', path: '/workspace/note.md' });
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('allows targeted reads with an exact file permission', async () => {
+    const { index, tmp } = await createTextIndexFixture();
+    try {
+      const router = new ToolRouter([], undefined, [], { contextIndex: index });
+      await router.initialize();
+      const identity = client('codex', false, [{ path: '/workspace/note.md', actions: ['read'] }]);
+
+      expect(router.getAllTools(identity).map((tool) => tool.namespacedName)).toEqual(['list', 'read']);
+
+      const rootList = await router.callTool('list', { path: '/' }, identity);
+      const rootParsed = JSON.parse(rootList.content[0].type === 'text' ? rootList.content[0].text : '{}');
+      expect(rootParsed.entries).toEqual([
+        expect.objectContaining({ path: '/workspace' }),
+      ]);
+
+      const result = await router.callTool('read', { path: '/workspace/note.md' }, identity);
+      const parsed = JSON.parse(result.content[0].type === 'text' ? result.content[0].text : '{}');
+      expect(parsed).toMatchObject({ path: '/workspace/note.md', content: 'alpha note' });
     } finally {
       await fs.rm(tmp, { recursive: true, force: true });
     }
@@ -373,14 +396,14 @@ describe('ToolRouter', () => {
       await router.initialize();
 
       const result = await router.callTool('write', { path: '/workspace/new.md', content: 'new' }, client('chatgpt', false, [
-        { sourceId: 'workspace', actions: ['search', 'read'] },
+        { path: '/workspace/**', actions: ['search', 'read'] },
       ]));
 
       expect(result).toMatchObject({ isError: true });
       expect(audit.record).toHaveBeenCalledWith(
         expect.objectContaining({
           clientId: 'chatgpt',
-          deniedReason: 'missing_permission mount=workspace action=write',
+          deniedReason: 'missing_permission path=/workspace/new.md action=write',
           isError: true,
         }),
       );

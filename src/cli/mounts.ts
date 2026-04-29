@@ -367,8 +367,12 @@ function hasEditOptions(options: EditMountOptions): boolean {
 }
 
 function assertMountNotReferenced(config: MvmtConfig, name: string): void {
+  const mount = config.mounts.find((candidate) => candidate.name === name);
+  const mountPath = mount?.path;
   for (const client of config.clients ?? []) {
-    if (client.permissions.some((permission) => permission.sourceId === name)) {
+    if (mountPath && client.permissions.some((permission) => (
+      permission.path === mountPath || permission.path.startsWith(`${mountPath}/`)
+    ))) {
       throw new Error(`Mount ${name} is still referenced by client ${client.id}`);
     }
   }

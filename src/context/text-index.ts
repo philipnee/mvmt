@@ -141,6 +141,10 @@ export class TextContextIndex {
     return this.registry.mountNameForPath(inputPath);
   }
 
+  mountPathForName(name: string): string | undefined {
+    return this.registry.mountPathForName(name);
+  }
+
   async rebuild(): Promise<TextIndexStats> {
     const files: IndexedFile[] = [];
     const chunks: IndexedChunk[] = [];

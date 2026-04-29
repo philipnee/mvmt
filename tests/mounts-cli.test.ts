@@ -102,7 +102,7 @@ describe('mount config helpers', () => {
           id: 'codex',
           name: 'Codex',
           auth: { type: 'token', tokenHash: 'a'.repeat(64) },
-          permissions: [{ sourceId: 'workspace', actions: ['read'] }],
+          permissions: [{ path: '/workspace/**', actions: ['read'] }],
         },
       ],
     });

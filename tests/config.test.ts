@@ -318,7 +318,7 @@ describe('client policy schema', () => {
     expect(config.semanticTools).toBeUndefined();
   });
 
-  it('parses a token-auth client with permissions referencing known sources', () => {
+  it('parses a token-auth client with path permissions', () => {
     const config = parseConfig({
       version: 1,
       proxy: [{ name: 'workspace', command: 'npx' }],
@@ -330,8 +330,8 @@ describe('client policy schema', () => {
           auth: { type: 'token', tokenHash: SHA256_HEX_64 },
           rawToolsEnabled: true,
           permissions: [
-            { sourceId: 'workspace', actions: ['search', 'read', 'write'] },
-            { sourceId: 'obsidian', actions: ['search', 'read'] },
+            { path: '/workspace/**', actions: ['search', 'read', 'write'] },
+            { path: '/obsidian/**', actions: ['search', 'read'] },
           ],
         },
       ],
@@ -355,7 +355,7 @@ describe('client policy schema', () => {
           id: 'chatgpt',
           name: 'ChatGPT',
           auth: { type: 'oauth', oauthClientIds: ['chatgpt-mvmt', 'chatgpt-mvmt-v2'] },
-          permissions: [{ sourceId: 'obsidian', actions: ['search', 'read'] }],
+          permissions: [{ path: '/obsidian/**', actions: ['search', 'read'] }],
         },
       ],
     });
@@ -367,7 +367,7 @@ describe('client policy schema', () => {
     expect(config.clients?.[0].rawToolsEnabled).toBe(false);
   });
 
-  it('rejects unknown sourceId in client permissions', () => {
+  it('rejects invalid client permission paths', () => {
     expect(() =>
       parseConfig({
         version: 1,
@@ -376,11 +376,25 @@ describe('client policy schema', () => {
             id: 'codex',
             name: 'Codex',
             auth: { type: 'token', tokenHash: SHA256_HEX_64 },
-            permissions: [{ sourceId: 'nonexistent', actions: ['read'] }],
+            permissions: [{ path: 'relative/path', actions: ['read'] }],
           },
         ],
       }),
-    ).toThrow(/unknown sourceId "nonexistent"/);
+    ).toThrow(/permission path must be absolute/);
+
+    expect(() =>
+      parseConfig({
+        version: 1,
+        clients: [
+          {
+            id: 'codex',
+            name: 'Codex',
+            auth: { type: 'token', tokenHash: SHA256_HEX_64 },
+            permissions: [{ path: '/workspace/**/secrets', actions: ['read'] }],
+          },
+        ],
+      }),
+    ).toThrow(/permission path may only use \*\* as a trailing subtree wildcard/);
   });
 
   it('rejects duplicate client ids', () => {
@@ -521,13 +535,13 @@ describe('client policy schema', () => {
           id: 'codex',
           name: 'Codex',
           auth: { type: 'token', tokenHash: SHA256_HEX_64 },
-          permissions: [{ sourceId: 'workspace', actions: ['read'] }],
+          permissions: [{ path: '/workspace/**', actions: ['read'] }],
         },
       ],
     });
 
     expect(resolveProxySourceId(config.proxy[0])).toBe('workspace');
-    expect(config.clients?.[0].permissions[0].sourceId).toBe('workspace');
+    expect(config.clients?.[0].permissions[0].path).toBe('/workspace/**');
   });
 
   it('falls back to proxy.name when id is omitted', () => {
