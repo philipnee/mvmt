@@ -27,6 +27,7 @@ export interface NamespacedTool {
 export class ToolRouter {
   private readonly contextToolDefinitions: NamespacedTool[] = [];
   private readonly contextIndex?: TextContextIndex;
+  private initialized = false;
 
   constructor(
     private readonly audit?: AuditLogger,
@@ -37,6 +38,8 @@ export class ToolRouter {
   }
 
   async initialize(): Promise<void> {
+    if (this.initialized) return;
+    this.initialized = true;
     if (this.contextIndex) {
       this.contextToolDefinitions.push(...buildContextToolDefinitions());
     }

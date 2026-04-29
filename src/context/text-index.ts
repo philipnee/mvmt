@@ -228,15 +228,17 @@ export class TextContextIndex {
     const resolved = this.resolvePath(inputPath);
     const provider = this.providerForResolved(resolved);
     if (expectedHash) {
+      let current: TextReadResult;
       try {
-        const current = await this.read(inputPath);
-        if (current.hash !== expectedHash) {
+        current = await this.read(inputPath);
+      } catch (err) {
+        if (isNodeError(err) && err.code === 'ENOENT') {
           throw new Error(`hash mismatch for ${resolved.virtualPath}`);
         }
-      } catch (err) {
-        if ((err instanceof Error && err.message.includes('hash mismatch')) || await provider.exists(resolved.relativePath)) {
-          throw err;
-        }
+        throw err;
+      }
+      if (current.hash !== expectedHash) {
+        throw new Error(`hash mismatch for ${resolved.virtualPath}`);
       }
     }
     const read = this.toReadResult(await provider.write(resolved.relativePath, content));

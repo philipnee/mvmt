@@ -37,6 +37,25 @@ describe('ToolRouter', () => {
     }
   });
 
+  it('initializes context tools only once', async () => {
+    const { index, tmp } = await createTextIndexFixture();
+    try {
+      const router = new ToolRouter(undefined, [], { contextIndex: index });
+      await router.initialize();
+      await router.initialize();
+
+      expect(router.getAllTools().map((tool) => tool.namespacedName)).toEqual([
+        'search',
+        'list',
+        'read',
+        'write',
+        'remove',
+      ]);
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('normalizes permission paths with trailing slashes without regex backtracking', async () => {
     const { index, tmp } = await createTextIndexFixture();
     try {

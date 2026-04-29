@@ -85,6 +85,7 @@ describe('TextContextIndex', () => {
       path: '/workspace/draft.md',
       removed: true,
     });
+    await expect(index.write('/workspace/draft.md', 'recreated', written.hash)).rejects.toThrow('hash mismatch');
     await expect(index.read('/workspace/draft.md')).rejects.toThrow();
   });
 
