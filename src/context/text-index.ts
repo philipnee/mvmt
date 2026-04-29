@@ -3,8 +3,14 @@ import fsp from 'fs/promises';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { expandHome } from '../config/loader.js';
 import { LocalFolderMountConfig } from '../config/schema.js';
+import {
+  joinVirtualPath,
+  MountRegistry,
+  RegisteredMount,
+  ResolvedMountPath,
+  toVirtualRelative,
+} from './mount-registry.js';
 
 const TEXT_EXTENSIONS = new Set([
   '.md',
@@ -112,48 +118,34 @@ interface TextIndexSnapshot {
   chunks: IndexedChunk[];
 }
 
-interface ResolvedMount {
-  config: LocalFolderMountConfig;
-  root: string;
-}
-
 export function defaultTextIndexPath(configPath: string): string {
   return path.join(path.dirname(configPath), 'text-index.json');
 }
 
 export class TextContextIndex {
-  private readonly mounts: ResolvedMount[];
+  private readonly registry: MountRegistry;
 
   constructor(private readonly options: TextContextIndexOptions) {
-    this.mounts = options.mounts
-      .filter((mount) => mount.enabled !== false)
-      .map((mount) => ({
-        config: mount,
-        root: path.resolve(expandHome(mount.root)),
-      }))
-      .sort((a, b) => b.config.path.length - a.config.path.length);
+    this.registry = new MountRegistry(options.mounts);
   }
 
   mountNames(): string[] {
-    return this.mounts.map((mount) => mount.config.name);
+    return this.registry.mountNames();
   }
 
   writableMountNames(): string[] {
-    return this.mounts
-      .filter((mount) => mount.config.writeAccess)
-      .map((mount) => mount.config.name);
+    return this.registry.writableMountNames();
   }
 
   mountNameForPath(inputPath: string): string | undefined {
-    const normalized = normalizeVirtualPath(inputPath);
-    return this.findMount(normalized)?.config.name;
+    return this.registry.mountNameForPath(inputPath);
   }
 
   async rebuild(): Promise<TextIndexStats> {
     const files: IndexedFile[] = [];
     const chunks: IndexedChunk[] = [];
 
-    for (const mount of this.mounts) {
+    for (const mount of this.registry.mounts()) {
       await this.indexDirectory(mount, mount.root, files, chunks);
     }
 
@@ -187,7 +179,7 @@ export class TextContextIndex {
 
   async list(inputPath = '/'): Promise<TextListEntry[]> {
     if (inputPath === '/' || inputPath.trim() === '') {
-      return this.mounts.map((mount) => ({
+      return this.registry.mounts().map((mount) => ({
         mount: mount.config.name,
         path: mount.config.path,
         type: 'directory',
@@ -282,7 +274,7 @@ export class TextContextIndex {
   }
 
   private async indexDirectory(
-    mount: ResolvedMount,
+    mount: RegisteredMount,
     directory: string,
     files: IndexedFile[],
     chunks: IndexedChunk[],
@@ -320,28 +312,13 @@ export class TextContextIndex {
     }
   }
 
-  private resolvePath(inputPath: string): {
-    mount: ResolvedMount;
-    relativePath: string;
-    realPath: string;
-    virtualPath: string;
-  } {
-    const normalized = normalizeVirtualPath(inputPath);
-    const mount = this.findMount(normalized);
-    if (!mount) throw new Error(`unknown mount for path: ${normalized}`);
-    const relativePath = toVirtualRelative(normalized.slice(mount.config.path.length));
-    if (this.isExcluded(mount, relativePath)) throw new Error(`${normalized} is excluded`);
-    const realPath = path.resolve(mount.root, relativePath);
-    if (!isWithin(mount.root, realPath)) throw new Error(`${normalized} escapes mount root`);
-    return {
-      mount,
-      relativePath,
-      realPath,
-      virtualPath: relativePath ? joinVirtualPath(mount.config.path, relativePath) : mount.config.path,
-    };
+  private resolvePath(inputPath: string): ResolvedMountPath {
+    const resolved = this.registry.resolve(inputPath);
+    if (this.isExcluded(resolved.mount, resolved.relativePath)) throw new Error(`${resolved.virtualPath} is excluded`);
+    return resolved;
   }
 
-  private assertWritable(resolved: { mount: ResolvedMount; relativePath: string; virtualPath: string }): void {
+  private assertWritable(resolved: { mount: RegisteredMount; relativePath: string; virtualPath: string }): void {
     if (!resolved.mount.config.writeAccess) {
       throw new Error(`${resolved.mount.config.name} is read-only`);
     }
@@ -356,16 +333,12 @@ export class TextContextIndex {
     }
   }
 
-  private isExcluded(mount: ResolvedMount, relativePath: string): boolean {
+  private isExcluded(mount: RegisteredMount, relativePath: string): boolean {
     return matchesAny(relativePath, mount.config.exclude);
   }
 
-  private isProtected(mount: ResolvedMount, relativePath: string): boolean {
+  private isProtected(mount: RegisteredMount, relativePath: string): boolean {
     return matchesAny(relativePath, mount.config.protect);
-  }
-
-  private findMount(normalizedPath: string): ResolvedMount | undefined {
-    return this.mounts.find((candidate) => pathMatchesMount(normalizedPath, candidate.config.path));
   }
 
   private async readSnapshot(): Promise<TextIndexSnapshot> {
@@ -431,26 +404,8 @@ function snippetFor(text: string, terms: string[]): string {
   return text.slice(start, start + 500).replace(/\s+/g, ' ').trim();
 }
 
-function normalizeVirtualPath(inputPath: string): string {
-  const trimmed = inputPath.trim();
-  if (!trimmed || trimmed === '/') return '/';
-  return `/${trimmed.replace(/^\/+/, '').replace(/\\/g, '/')}`;
-}
-
-function toVirtualRelative(inputPath: string): string {
-  return inputPath.replace(/\\/g, '/').split('/').filter(Boolean).join('/');
-}
-
 function joinVirtualRelative(base: string, leaf: string): string {
   return [base, leaf].filter(Boolean).join('/').replace(/\\/g, '/');
-}
-
-function joinVirtualPath(mountPath: string, relativePath: string): string {
-  return [mountPath.replace(/\/+$/, ''), toVirtualRelative(relativePath)].filter(Boolean).join('/');
-}
-
-function pathMatchesMount(inputPath: string, mountPath: string): boolean {
-  return inputPath === mountPath || inputPath.startsWith(`${mountPath.replace(/\/+$/, '')}/`);
 }
 
 function matchesAny(relativePath: string, patterns: string[]): boolean {
@@ -471,11 +426,6 @@ function globToRegExp(pattern: string): RegExp {
     .replace(/\\\*\\\*/g, '.*')
     .replace(/\\\*/g, '[^/]*');
   return new RegExp(`^${escaped}$`);
-}
-
-function isWithin(root: string, candidate: string): boolean {
-  const relative = path.relative(root, candidate);
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
 function sha256(value: string): string {
