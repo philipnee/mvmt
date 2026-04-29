@@ -150,20 +150,10 @@ Scope: local-first mount runtime, CLI command layer, text index, router, tests, 
 - Files likely involved: `src/cli/*`, `tests/*cli*.test.ts`.
 - Status: Backlog.
 
-### 14. Educational correctness is not directly applicable
-
-- Problem: the prompt mentions database-internals lessons and simulations, but this repository is a CLI/server project and no database-internals PDF is present.
-- Evidence from the code: no lesson, curriculum, simulation, or PDF files found in the source tree.
-- User/developer impact: no educational claims were audited beyond README/docs correctness.
-- Risk level: Low.
-- Proposed fix: if educational material is added later, keep it separate from runtime logic and mark uncertain claims as `TODO_REQUIRES_REVIEW`.
-- Acceptance criteria: future educational content has explicit review markers for unverified technical claims.
-- Files likely involved: future docs only.
-- Status: Backlog.
-
 ## Verification Log
 
 - 2026-04-29: `npm test -- --run tests/router.test.ts tests/text-index.test.ts tests/cli-command-options.test.ts tests/cli-usability.test.ts` passed.
 - 2026-04-29: `npm run verify` passed.
 - 2026-04-29: `npm run verify` passed after final audit update.
+- 2026-04-29: removed leaked non-project audit finding.
 - New findings discovered during implementation: none.
