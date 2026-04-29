@@ -2,7 +2,13 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { completeDirectoryPath, shouldFinishFolderPrompt, validateExistingFolderPath } from '../src/cli/folder-prompt.js';
+import {
+  completeDirectoryPath,
+  completeFilePath,
+  shouldFinishFolderPrompt,
+  validateExistingFilePath,
+  validateExistingFolderPath,
+} from '../src/cli/folder-prompt.js';
 
 const tempDirs: string[] = [];
 
@@ -32,6 +38,17 @@ describe('folder prompt helpers', () => {
     expect(matches).not.toContain(`${root}${path.sep}Dockerfile${path.sep}`);
   });
 
+  it('completes files when the caller asks for a file path', async () => {
+    const root = await makeTempDir();
+    await fs.mkdir(path.join(root, 'cloudflared'));
+    await fs.writeFile(path.join(root, 'config.yml'), 'tunnel: test\n');
+
+    const [matches] = completeFilePath(`${root}${path.sep}c`);
+
+    expect(matches).toContain(`${root}${path.sep}config.yml`);
+    expect(matches).toContain(`${root}${path.sep}cloudflared${path.sep}`);
+  });
+
   it('validates that a mount root exists and is a directory', async () => {
     const root = await makeTempDir();
     const file = path.join(root, 'note.txt');
@@ -40,6 +57,16 @@ describe('folder prompt helpers', () => {
     await expect(validateExistingFolderPath(root)).resolves.toBe(true);
     await expect(validateExistingFolderPath(file)).resolves.toBe('Mount root must be a folder, not a file');
     await expect(validateExistingFolderPath(path.join(root, 'missing'))).resolves.toContain('Folder not found');
+  });
+
+  it('validates that a path exists and is a file', async () => {
+    const root = await makeTempDir();
+    const file = path.join(root, 'config.yml');
+    await fs.writeFile(file, 'tunnel: test\n');
+
+    await expect(validateExistingFilePath(file)).resolves.toBe(true);
+    await expect(validateExistingFilePath(root)).resolves.toBe('Path must be a file, not a folder');
+    await expect(validateExistingFilePath(path.join(root, 'missing.yml'))).resolves.toContain('File not found');
   });
 
   it('allows Enter to finish only when the caller opts in', () => {

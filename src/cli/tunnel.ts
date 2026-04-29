@@ -1,6 +1,5 @@
 import { input, select } from '@inquirer/prompts';
 import chalk from 'chalk';
-import fs from 'fs/promises';
 import { configExists, expandHome, getConfigPath, readConfig, resolveConfigPath, saveConfig } from '../config/loader.js';
 import { MvmtConfig, TunnelConfig } from '../config/schema.js';
 import {
@@ -19,6 +18,7 @@ import {
 } from '../utils/control.js';
 import { readSessionToken } from '../utils/token.js';
 import { tunnelLegacyAccessWarning } from './tunnel-safety.js';
+import { promptForExistingFile } from './folder-prompt.js';
 
 export interface TunnelCommandOptions {
   config?: string;
@@ -286,13 +286,8 @@ async function promptForTunnelDetails(
 ): Promise<TunnelConfig> {
   if (provider === 'cloudflare-named') {
     console.log(chalk.dim('Use this after creating a Cloudflare named tunnel and DNS route.'));
-    const configPath = await input({
-      message: 'Cloudflared config file',
-      default: '~/.cloudflared/config.yml',
-      validate: async (value) => {
-        const resolved = expandHome(value.trim());
-        return (await pathExists(resolved)) ? true : `File not found: ${resolved}`;
-      },
+    const configPath = await promptForExistingFile('Cloudflared config file:', {
+      defaultValue: '~/.cloudflared/config.yml',
     });
     const publicUrl = await input({
       message: 'Public base URL',
@@ -411,15 +406,6 @@ function printApiTokenWarningForConfig(configOverride: string | undefined): void
   if (!loaded) return;
   const warning = tunnelLegacyAccessWarning(loaded.config);
   if (warning) printTunnelEnabledWithNoTokens(warning);
-}
-
-async function pathExists(filePath: string): Promise<boolean> {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function validatePublicUrlInput(value: string): true | string {

@@ -332,10 +332,8 @@ async function promptForMountInput(config: MvmtConfig): Promise<MountInput> {
 async function promptForMountPatch(config: MvmtConfig, name: string): Promise<Partial<MountInput>> {
   const current = config.mounts.find((mount) => mount.name === name);
   if (!current) throw new Error(`Unknown mount: ${name}`);
-  const root = await input({
-    message: 'Folder on this computer:',
-    default: current.root,
-    validate: validateExistingFolderPath,
+  const root = await promptForExistingFolder('Folder on this computer:', {
+    defaultValue: current.root,
   });
   const mountPath = await input({
     message: 'Virtual path clients will use:',

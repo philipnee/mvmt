@@ -6,6 +6,7 @@ import { resolveSetupPath } from '../connectors/setup-paths.js';
 
 export interface FolderPromptOptions {
   allowEmpty?: boolean;
+  defaultValue?: string;
 }
 
 export async function promptForExistingFolder(
@@ -13,9 +14,22 @@ export async function promptForExistingFolder(
   options: FolderPromptOptions = {},
 ): Promise<string> {
   while (true) {
-    const answer = (await questionWithDirectoryCompletion(`${message} `)).trim();
+    const answer = (await questionWithPathCompletion(`${message} `, completeDirectoryPath, options.defaultValue)).trim();
     if (shouldFinishFolderPrompt(answer, options)) return '';
     const valid = await validateExistingFolderPath(answer);
+    if (valid === true) return answer;
+    console.error(valid);
+  }
+}
+
+export async function promptForExistingFile(
+  message = 'File on this computer:',
+  options: FolderPromptOptions = {},
+): Promise<string> {
+  while (true) {
+    const answer = (await questionWithPathCompletion(`${message} `, completeFilePath, options.defaultValue)).trim();
+    if (shouldFinishFolderPrompt(answer, options)) return '';
+    const valid = await validateExistingFilePath(answer);
     if (valid === true) return answer;
     console.error(valid);
   }
@@ -37,7 +51,27 @@ export async function validateExistingFolderPath(value: string): Promise<true | 
   }
 }
 
+export async function validateExistingFilePath(value: string): Promise<true | string> {
+  const trimmed = value.trim();
+  if (!trimmed) return 'Enter a file path such as ~/.cloudflared/config.yml';
+
+  try {
+    const stats = await fs.promises.stat(resolveSetupPath(trimmed));
+    return stats.isFile() ? true : 'Path must be a file, not a folder';
+  } catch {
+    return `File not found: ${trimmed}`;
+  }
+}
+
 export function completeDirectoryPath(line: string): [string[], string] {
+  return completeLocalPath(line, { includeFiles: false });
+}
+
+export function completeFilePath(line: string): [string[], string] {
+  return completeLocalPath(line, { includeFiles: true });
+}
+
+function completeLocalPath(line: string, options: { includeFiles: boolean }): [string[], string] {
   const { baseDir, prefix } = directorySearch(line);
   let entries: fs.Dirent[];
   try {
@@ -47,22 +81,27 @@ export function completeDirectoryPath(line: string): [string[], string] {
   }
 
   const matches = entries
-    .filter((entry) => entry.isDirectory())
+    .filter((entry) => entry.isDirectory() || options.includeFiles)
     .filter((entry) => prefix.startsWith('.') || !entry.name.startsWith('.'))
     .filter((entry) => entry.name.toLowerCase().startsWith(prefix.toLowerCase()))
     .sort((a, b) => a.name.localeCompare(b.name))
-    .map((entry) => formatCompletion(path.join(baseDir, entry.name), line));
+    .map((entry) => formatCompletion(path.join(baseDir, entry.name), line, entry.isDirectory()));
 
   return [matches, line];
 }
 
-function questionWithDirectoryCompletion(message: string): Promise<string> {
+function questionWithPathCompletion(
+  message: string,
+  completer: (line: string) => [string[], string],
+  defaultValue?: string,
+): Promise<string> {
   return new Promise((resolve, reject) => {
     let settled = false;
     const rl = readline.createInterface({
       input: process.stdin,
       output: process.stdout,
-      completer: completeDirectoryPath,
+      completer,
+      terminal: true,
     });
 
     const finish = (callback: () => void) => {
@@ -76,8 +115,9 @@ function questionWithDirectoryCompletion(message: string): Promise<string> {
       finish(() => reject(new Error('User force closed the prompt with SIGINT')));
     });
     rl.question(message, (answer) => {
-      finish(() => resolve(answer));
+      finish(() => resolve(answer || defaultValue || ''));
     });
+    if (defaultValue) rl.write(defaultValue);
   });
 }
 
@@ -95,8 +135,8 @@ function directorySearch(line: string): { baseDir: string; prefix: string } {
   };
 }
 
-function formatCompletion(absolutePath: string, originalInput: string): string {
-  const completedPath = `${absolutePath}${path.sep}`;
+function formatCompletion(absolutePath: string, originalInput: string, isDirectory: boolean): string {
+  const completedPath = isDirectory ? `${absolutePath}${path.sep}` : absolutePath;
   if (originalInput.startsWith('~/') || originalInput === '~') {
     return collapseHomePath(completedPath);
   }
@@ -106,7 +146,7 @@ function formatCompletion(absolutePath: string, originalInput: string): string {
 
   const relative = path.relative(process.cwd(), completedPath);
   const display = relative.startsWith('..') ? relative : `.${path.sep}${relative}`;
-  return display.endsWith(path.sep) ? display : `${display}${path.sep}`;
+  return isDirectory && !display.endsWith(path.sep) ? `${display}${path.sep}` : display;
 }
 
 function expandHomePath(value: string): string {
