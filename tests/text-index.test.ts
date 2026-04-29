@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { parseConfig } from '../src/config/loader.js';
 import { TextContextIndex } from '../src/context/text-index.js';
 
+const itUnlessWindows = process.platform === 'win32' ? it.skip : it;
+
 describe('TextContextIndex', () => {
   let tmp: string;
 
@@ -97,6 +99,25 @@ describe('TextContextIndex', () => {
     });
 
     await expect(index.write('/workspace/new.md', 'content')).rejects.toThrow('read-only');
+  });
+
+  itUnlessWindows('does not index or read symlink escapes', async () => {
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-text-index-outside-'));
+    try {
+      await fs.writeFile(path.join(outside, 'secret.md'), 'outside secret', 'utf-8');
+      await fs.symlink(path.join(outside, 'secret.md'), path.join(tmp, 'linked-secret.md'));
+      await fs.symlink(outside, path.join(tmp, 'linked-dir'));
+
+      const index = createIndex(tmp);
+      const stats = await index.rebuild();
+
+      expect(stats.files).toBe(0);
+      await expect(index.search('secret', ['workspace'], 10)).resolves.toEqual([]);
+      await expect(index.read('/workspace/linked-secret.md')).rejects.toThrow('escapes mount root');
+      await expect(index.write('/workspace/linked-dir/new.md', 'new')).rejects.toThrow('escapes mount root');
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
   });
 });
 
