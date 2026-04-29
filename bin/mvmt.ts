@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { Command } from 'commander';
+import { withInheritedConfig } from '../src/cli/command-options.js';
 import { addConnector, listConnectors } from '../src/cli/connectors.js';
 import { runConfigSetup, showConfig } from '../src/cli/config.js';
 import { doctor } from '../src/cli/doctor.js';
@@ -336,12 +337,6 @@ function normalizeHelpArgs(args: string[]): string[] {
 
 function collectValues(value: string, previous?: string[]): string[] {
   return [...(previous ?? []), value];
-}
-
-function withInheritedConfig<T extends { config?: string }>(options: T, command: Command): T {
-  const parentConfig = command.parent?.opts<{ config?: string }>().config;
-  const config = options.config ?? parentConfig;
-  return config ? { ...options, config } : options;
 }
 
 function examples(rows: Array<[command: string, description: string]>): string {
