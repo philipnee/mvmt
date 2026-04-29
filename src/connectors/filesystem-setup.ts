@@ -103,8 +103,33 @@ export const filesystemSetupDefinition = {
 } satisfies ConnectorSetupDefinition<null, FilesystemConfigInput, 'filesystem'>;
 
 function sanitizeMountName(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, '-')
-    .replace(/^-+|-+$/g, '') || 'folder';
+  const chars: string[] = [];
+  let pendingSeparator = false;
+
+  for (const char of value.toLowerCase()) {
+    if (isMountNameChar(char)) {
+      if (pendingSeparator && chars.length > 0) chars.push('-');
+      chars.push(char);
+      pendingSeparator = false;
+    } else {
+      pendingSeparator = true;
+    }
+  }
+
+  let start = 0;
+  let end = chars.length;
+  while (start < end && chars[start] === '-') start += 1;
+  while (end > start && chars[end - 1] === '-') end -= 1;
+
+  return chars.slice(start, end).join('') || 'folder';
+}
+
+function isMountNameChar(char: string): boolean {
+  const code = char.charCodeAt(0);
+  return (
+    (code >= 97 && code <= 122)
+    || (code >= 48 && code <= 57)
+    || char === '_'
+    || char === '-'
+  );
 }

@@ -52,6 +52,19 @@ describe('init helpers', () => {
     });
   });
 
+  it('sanitizes folder names into stable mount names without regex trimming', () => {
+    const base = buildConfig({ port: 4141 });
+    const config = filesystemSetupDefinition.apply(base, {
+      paths: ['/Users/me/---My Project---', '/Users/me/你好'],
+      writeAccess: false,
+    });
+
+    expect(config.mounts.map((mount) => [mount.name, mount.path])).toEqual([
+      ['my-project', '/my-project'],
+      ['folder', '/folder'],
+    ]);
+  });
+
   it('does not create a proxy when no connector is applied', () => {
     const config = buildConfig({ port: 4141 });
 
