@@ -117,4 +117,3 @@ a dependency.
 - No file watcher yet.
 - Text-like extensions only.
 - Removes are permanent file deletes in this prototype.
-- Existing connector/raw-tool behavior remains available on this branch for comparison.

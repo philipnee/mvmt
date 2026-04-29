@@ -2,7 +2,7 @@ import chalk from 'chalk';
 import fsPromises from 'fs/promises';
 import os from 'os';
 import path from 'path';
-import { MvmtConfig, ProxyConfig } from '../config/schema.js';
+import { MvmtConfig } from '../config/schema.js';
 import { configExists, expandHome, readConfig, resolveConfigPath, saveConfig } from '../config/loader.js';
 import { filesystemSetupDefinition } from '../connectors/filesystem-setup.js';
 import { buildConfig, SetupConfigOptions, setupConfig } from './init.js';
@@ -113,7 +113,6 @@ export function printConfigSummary(
     }
   }
 
-  printFilesystemSummary(config.proxy);
   printMountSummary(config);
   printPluginSummary(config);
 }
@@ -133,25 +132,6 @@ function printMountSummary(config: MvmtConfig): void {
   }
 }
 
-function printFilesystemSummary(proxy: ProxyConfig[]): void {
-  console.log('\nFilesystem');
-  const filesystem = proxy.find((entry) => entry.name.toLowerCase() === 'filesystem' && entry.enabled !== false);
-  if (!filesystem) {
-    console.log(`  ${chalk.dim('not configured')}`);
-    return;
-  }
-
-  const paths = readFilesystemPaths(filesystem);
-  if (paths.length === 0) {
-    console.log(`  ${chalk.dim('configured, but no folder paths were parsed')}`);
-    return;
-  }
-
-  for (const folder of paths) {
-    console.log(`  ${folder}  ${filesystem.writeAccess ? 'writable' : 'read-only'}`);
-  }
-}
-
 function printPluginSummary(config: MvmtConfig): void {
   console.log('\nPlugins');
   const enabled = config.plugins.filter((plugin) => plugin.enabled !== false);
@@ -163,11 +143,4 @@ function printPluginSummary(config: MvmtConfig): void {
   for (const plugin of enabled) {
     console.log(`  ${plugin.name}`);
   }
-}
-
-export function readFilesystemPaths(proxy: ProxyConfig): string[] {
-  if (!proxy.args || proxy.args.length === 0) return [];
-  const packageIndex = proxy.args.findIndex((arg) => arg === '@modelcontextprotocol/server-filesystem');
-  if (packageIndex === -1) return [];
-  return proxy.args.slice(packageIndex + 1);
 }

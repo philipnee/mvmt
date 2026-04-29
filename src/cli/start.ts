@@ -2,7 +2,7 @@ import chalk from 'chalk';
 import { TextContextIndex, defaultTextIndexPath } from '../context/text-index.js';
 import { configExists, loadConfig, resolveConfigPath, saveConfig } from '../config/loader.js';
 import { MvmtConfig, TunnelSchema } from '../config/schema.js';
-import { createTemporaryFilesystemConfig, readFilesystemPaths } from './config.js';
+import { createTemporaryFilesystemConfig } from './config.js';
 import { setupConfig } from './init.js';
 import { createPlugins } from '../plugins/factory.js';
 import { ToolResultPlugin } from '../plugins/types.js';
@@ -53,8 +53,8 @@ export async function start(options: StartOptions = {}): Promise<void> {
       logger.info('Using a temporary read-only filesystem config for this run only.');
       logger.info(`Saved config at ${savedConfigPath} was not modified.`);
       logger.info('Serving folders:');
-      for (const folder of readFilesystemPaths(temporaryConfig.config.proxy[0])) {
-        logger.info(`  ${folder}`);
+      for (const mount of temporaryConfig.config.mounts) {
+        logger.info(`  ${mount.path} -> ${mount.root}`);
       }
     } catch (err) {
       logger.error(err instanceof Error ? err.message : 'Failed to update filesystem access.');
@@ -87,7 +87,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
   }
 
   if (loaded.length === 0 && !textIndex) {
-    emit('No connectors or mounts loaded. Nothing to serve.', stdioMode, logger, 'error');
+    emit('No mounts loaded. Nothing to serve.', stdioMode, logger, 'error');
     emit('Check your config with `mvmt config` or rerun `mvmt config setup`.', stdioMode, logger, 'error');
     process.exit(1);
   }
@@ -290,7 +290,7 @@ function printStartupBanner(
     console.log(`${chalk.bold('public URL  ')} -> ${chalk.yellow(formatMcpPublicUrl(publicUrl))}`);
   }
   console.log('');
-  console.log(chalk.bold('Connectors:'));
+  console.log(chalk.bold('Runtime:'));
   for (const entry of loaded) {
     console.log(`  ${chalk.green('ok')} ${entry.connector.id.padEnd(22)} ${String(entry.toolCount).padStart(3)} tools`);
   }

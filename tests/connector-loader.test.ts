@@ -1,10 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { initializeConnectors, formatConnectorError } from '../src/cli/connector-loader.js';
-import * as factory from '../src/connectors/factory.js';
-
-vi.mock('../src/connectors/factory.js', () => ({
-  createProxyConnector: vi.fn(),
-}));
 
 describe('connector-loader', () => {
   let logger: any;
@@ -29,41 +24,20 @@ describe('connector-loader', () => {
   });
 
   describe('initializeConnectors', () => {
-    it('skips undefined proxy connectors', async () => {
-      vi.mocked(factory.createProxyConnector).mockReturnValue(undefined);
+    it('ignores legacy proxy connectors', async () => {
       const config = { proxy: [{ name: 'test', enabled: true }] } as any;
-      
+
       const loaded = await initializeConnectors(config, false, logger);
       expect(loaded).toHaveLength(0);
-      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('has no command or url'));
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Legacy proxy connectors are ignored'));
     });
 
-    it('logs warning and continues when one connector fails', async () => {
-      const failConnector = {
-        initialize: vi.fn().mockRejectedValue(new Error('init failed')),
-        id: 'fail',
-      };
-      const okConnector = {
-        initialize: vi.fn().mockResolvedValue(undefined),
-        listTools: vi.fn().mockResolvedValue([{ name: 'tool1' }]),
-        id: 'ok',
-      };
-
-      vi.mocked(factory.createProxyConnector)
-        .mockReturnValueOnce(failConnector as any)
-        .mockReturnValueOnce(okConnector as any);
-
-      const config = { 
-        proxy: [
-          { name: 'fail', enabled: true },
-          { name: 'ok', enabled: true }
-        ] 
-      } as any;
+    it('does not warn when no legacy proxy connectors are enabled', async () => {
+      const config = { proxy: [{ name: 'test', enabled: false }] } as any;
 
       const loaded = await initializeConnectors(config, false, logger);
-      expect(loaded).toHaveLength(1);
-      expect(loaded[0].toolCount).toBe(1);
-      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('failed to start: init failed'));
+      expect(loaded).toHaveLength(0);
+      expect(logger.warn).not.toHaveBeenCalled();
     });
   });
 });

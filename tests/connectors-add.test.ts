@@ -35,6 +35,7 @@ const baseConfig: MvmtConfig = {
     access: 'local',
   },
   proxy: [],
+  mounts: [],
   plugins: [],
 };
 
@@ -52,13 +53,16 @@ describe('addConnector', () => {
     const input = { paths: ['/Users/me/project'], writeAccess: false };
     const nextConfig: MvmtConfig = {
       ...baseConfig,
-      proxy: [
+      mounts: [
         {
-          name: 'filesystem',
-          transport: 'stdio',
-          command: 'npx',
-          args: ['-y', '@modelcontextprotocol/server-filesystem', '/Users/me/project'],
-          env: {},
+          name: 'project',
+          type: 'local_folder',
+          path: '/project',
+          root: '/Users/me/project',
+          description: '',
+          guidance: '',
+          exclude: ['.git/**', 'node_modules/**', '.claude/**'],
+          protect: ['.env', '.env.*', '.claude/**'],
           writeAccess: false,
           enabled: true,
         },

@@ -4,7 +4,6 @@ import { getConfigPath, loadConfig, saveConfig } from '../config/loader.js';
 import { MvmtConfig } from '../config/schema.js';
 import { getConnectorSetupDefinition, getSetupRegistry } from '../connectors/setup-registry.js';
 import { resolveSetupPath } from '../connectors/setup-paths.js';
-import { upsertProxyConfig } from '../connectors/setup-utils.js';
 
 export interface ConnectorCommandOptions {
   config?: string;

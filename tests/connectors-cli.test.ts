@@ -11,6 +11,7 @@ const baseConfig: MvmtConfig = {
     access: 'local',
   },
   proxy: [],
+  mounts: [],
   plugins: [],
 };
 
@@ -26,13 +27,17 @@ describe('connector setup helpers', () => {
   it('reports configured local connector setups', () => {
     const statuses = getConnectorSetupStatuses({
       ...baseConfig,
-      proxy: [
+      mounts: [
         {
-          name: 'filesystem',
-          transport: 'stdio',
-          command: 'npx',
-          args: [],
-          env: {},
+          name: 'workspace',
+          type: 'local_folder',
+          path: '/workspace',
+          root: '/workspace',
+          description: '',
+          guidance: '',
+          exclude: [],
+          protect: [],
+          writeAccess: false,
           enabled: true,
         },
       ],

@@ -3,25 +3,35 @@ import { buildConfig } from '../src/cli/init.js';
 import { filesystemSetupDefinition } from '../src/connectors/filesystem-setup.js';
 
 describe('init helpers', () => {
-  it('adds a manual filesystem proxy for explicit folder access', () => {
+  it('adds local folder mounts for explicit folder access', () => {
     const base = buildConfig({ port: 4141 });
     const config = filesystemSetupDefinition.apply(base, {
       paths: ['/Users/me/project', '/Users/me/docs'],
       writeAccess: false,
     });
 
-    expect(config.proxy).toEqual([
+    expect(config.mounts).toEqual([
       {
-        name: 'filesystem',
-        transport: 'stdio',
-        command: 'npx',
-        args: [
-          '-y',
-          '@modelcontextprotocol/server-filesystem',
-          '/Users/me/project',
-          '/Users/me/docs',
-        ],
-        env: {},
+        name: 'project',
+        type: 'local_folder',
+        path: '/project',
+        root: '/Users/me/project',
+        description: '',
+        guidance: '',
+        exclude: ['.git/**', 'node_modules/**', '.claude/**'],
+        protect: ['.env', '.env.*', '.claude/**'],
+        writeAccess: false,
+        enabled: true,
+      },
+      {
+        name: 'docs',
+        type: 'local_folder',
+        path: '/docs',
+        root: '/Users/me/docs',
+        description: '',
+        guidance: '',
+        exclude: ['.git/**', 'node_modules/**', '.claude/**'],
+        protect: ['.env', '.env.*', '.claude/**'],
         writeAccess: false,
         enabled: true,
       },
@@ -35,10 +45,24 @@ describe('init helpers', () => {
       writeAccess: true,
     });
 
-    expect(config.proxy[0]).toMatchObject({
-      name: 'filesystem',
+    expect(config.mounts[0]).toMatchObject({
+      name: 'project',
+      root: '/Users/me/project',
       writeAccess: true,
     });
+  });
+
+  it('sanitizes folder names into stable mount names without regex trimming', () => {
+    const base = buildConfig({ port: 4141 });
+    const config = filesystemSetupDefinition.apply(base, {
+      paths: ['/Users/me/---My Project---', '/Users/me/你好'],
+      writeAccess: false,
+    });
+
+    expect(config.mounts.map((mount) => [mount.name, mount.path])).toEqual([
+      ['my-project', '/my-project'],
+      ['folder', '/folder'],
+    ]);
   });
 
   it('does not create a proxy when no connector is applied', () => {

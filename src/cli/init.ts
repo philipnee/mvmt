@@ -43,7 +43,7 @@ export async function setupConfig(
 
   console.log('Configure the local data mvmt is allowed to expose.\n');
 
-  console.log('Checking available connectors...\n');
+  console.log('Checking available setup options...\n');
   const setupRegistry = getSetupRegistry();
   const detections = new Map(
     await Promise.all(
@@ -282,7 +282,7 @@ function printBanner(): void {
 }
 
 function printAvailableConnectors(): void {
-  console.log('Available connectors:');
-  console.log('  - Filesystem manual folder access');
+  console.log('Available setup options:');
+  console.log('  - Local folder mounts');
   console.log('');
 }
