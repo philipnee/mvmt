@@ -95,12 +95,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
   const audit = interactiveMode
     ? new InteractiveAuditLogger(createAuditLogger())
     : createAuditLogger();
-  const router = new ToolRouter(
-    loaded.map((entry) => ({ connector: entry.connector, sourceId: entry.sourceId })),
-    audit,
-    plugins,
-    { semanticTools: config.semanticTools, contextIndex: textIndex },
-  );
+  const router = new ToolRouter(audit, plugins, { contextIndex: textIndex });
   await router.initialize();
   if (textIndex) {
     void textIndex.rebuild().then((stats) => {

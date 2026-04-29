@@ -11,9 +11,10 @@ import {
   isStandaloneSseRequest,
   startHttpServer,
 } from '../src/server/index.js';
+import { parseConfig } from '../src/config/loader.js';
+import { TextContextIndex } from '../src/context/text-index.js';
 import { OAuthStore } from '../src/server/oauth.js';
 import { ToolRouter } from '../src/server/router.js';
-import { Connector } from '../src/connectors/types.js';
 import { ensureSigningKey, generateSessionToken, rotateSigningKey } from '../src/utils/token.js';
 
 function req(origin?: string): Request {
@@ -78,7 +79,7 @@ describe('SSE request helpers', () => {
 
 describe('startHttpServer lifecycle', () => {
   it('serves OAuth authorization metadata for the root and MCP resource path', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -111,7 +112,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('serves protected resource metadata with the scopes ChatGPT requests', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -141,7 +142,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('emits sanitized request logs for OAuth discovery, registration, and auth failures', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -205,7 +206,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('logs invalid bearer tokens distinctly from missing ones', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -240,7 +241,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('blocks cross-origin browser requests to OAuth endpoints', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -290,7 +291,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('allows OAuth browser requests from the public tunnel origin', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -314,7 +315,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('exchanges an authorization code when the OAuth resource parameter is echoed', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -372,7 +373,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('exchanges an authorization code when the token request omits a resource already bound at authorize time', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -425,7 +426,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('exchanges a refresh token for a new access token', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -492,7 +493,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('omits the optional issuer parameter from the authorization redirect', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -531,7 +532,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('rejects /authorize for unregistered redirect_uri', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -563,7 +564,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('defaults a missing GET /authorize resource to the canonical MCP resource', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -641,7 +642,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('defaults a missing POST /authorize resource to the canonical MCP resource', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -704,7 +705,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('redirects explicit /authorize resource mismatches to the registered redirect_uri', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -750,7 +751,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('accepts resource URLs with normalized host casing and trailing slash', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -813,7 +814,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('rejects /register when redirect_uris are missing', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -833,7 +834,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('guards caller-supplied OAuth client_id registration', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -882,7 +883,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('returns 500 from /register when the client registry cannot be persisted', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -910,7 +911,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('returns an RFC 7591-style client information response from /register', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -947,7 +948,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('uses resolvePublicBaseUrl and ignores X-Forwarded-Host in OAuth metadata', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -972,7 +973,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('returns a close handle that releases the listening port', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -995,7 +996,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('reuses an existing session token across server restarts', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -1020,7 +1021,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('keeps OAuth access tokens valid across restarts when the advertised resource is unchanged', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -1062,7 +1063,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('recovers stale MCP session IDs after a server restart', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -1121,7 +1122,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('rejects OAuth access tokens when the advertised resource changes across restart', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -1156,7 +1157,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('accepts legacy audience-less OAuth access tokens during the compatibility window', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -1178,7 +1179,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('rejects unknown OAuth clients with a quarantine error once clients[] is configured', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -1231,7 +1232,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('rejects the session token on /mcp once clients[] is configured', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -1263,7 +1264,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('preserves legacy session-token access when clients[] is absent', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -1282,8 +1283,8 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('filters MCP tools/list and denies tool calls by resolved client permissions', async () => {
-    const connector = new PolicyConnector();
-    const router = new ToolRouter([{ connector, sourceId: 'workspace' }]);
+    const { index, tmp: indexTmp } = await createTextIndexServerFixture();
+    const router = new ToolRouter(undefined, [], { contextIndex: index });
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -1305,30 +1306,29 @@ describe('startHttpServer lifecycle', () => {
       const sessionId = await initializeMcpSession(server.port, 'search-token');
       const listTools = await mcpJsonRequest(server.port, 'search-token', sessionId, 2, 'tools/list', {});
       expect(listTools.result.tools.map((tool: { name: string }) => tool.name)).toEqual([
-        'proxy_filesystem__search_files',
+        'search',
       ]);
 
       const denied = await mcpJsonRequest(server.port, 'search-token', sessionId, 3, 'tools/call', {
-        name: 'proxy_filesystem__read_file',
-        arguments: { path: '/tmp/a' },
+        name: 'read',
+        arguments: { path: '/workspace/note.md' },
       });
       expect(denied.result.isError).toBe(true);
-      expect(denied.result.content[0].text).toContain('missing_permission path=/workspace action=read');
-      expect(connector.calls).toEqual([]);
+      expect(denied.result.content[0].text).toContain('missing_permission path=/workspace/note.md action=read');
     } finally {
       await server.close();
       fs.rmSync(tmp, { recursive: true, force: true });
+      fs.rmSync(indexTmp, { recursive: true, force: true });
     }
   });
 
-  it('serves semantic tools over MCP for clients without raw tool access', async () => {
-    const connector = new SemanticConnector();
-    const router = new ToolRouter([{ connector, sourceId: 'notes' }], undefined, [], {
-      semanticTools: {
-        searchPersonalContext: { enabled: true, sourceIds: ['notes'] },
-        readContextItem: { enabled: true, sourceIds: ['notes'] },
-      },
+  it('serves mount tools over MCP for clients without raw tool access', async () => {
+    const { index, tmp: indexTmp } = await createTextIndexServerFixture({
+      mountName: 'notes',
+      mountPath: '/notes',
+      files: { 'projects/launch.md': '# Launch\nShip it.' },
     });
+    const router = new ToolRouter(undefined, [], { contextIndex: index });
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -1350,26 +1350,27 @@ describe('startHttpServer lifecycle', () => {
       const sessionId = await initializeMcpSession(server.port, 'chatgpt-token');
       const listTools = await mcpJsonRequest(server.port, 'chatgpt-token', sessionId, 2, 'tools/list', {});
       expect(listTools.result.tools.map((tool: { name: string }) => tool.name)).toEqual([
-        'search_personal_context',
-        'read_context_item',
+        'search',
+        'list',
+        'read',
       ]);
 
       const search = await mcpJsonRequest(server.port, 'chatgpt-token', sessionId, 3, 'tools/call', {
-        name: 'search_personal_context',
+        name: 'search',
         arguments: { query: 'launch' },
       });
       expect(JSON.parse(search.result.content[0].text).results).toEqual([
-        expect.objectContaining({ item_id: 'projects/launch.md', source_id: 'notes' }),
+        expect.objectContaining({ mount: 'notes', path: '/notes/projects/launch.md' }),
       ]);
-      expect(connector.calls.map((call) => call.name)).toEqual(['search_notes']);
     } finally {
       await server.close();
       fs.rmSync(tmp, { recursive: true, force: true });
+      fs.rmSync(indexTmp, { recursive: true, force: true });
     }
   });
 
   it('revokes outstanding OAuth access tokens the moment the signing key file is rewritten', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -1400,7 +1401,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('rate-limits auth-surface routes and returns 429 once the bucket is exhausted', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -1433,7 +1434,7 @@ describe('startHttpServer lifecycle', () => {
   });
 
   it('persists OAuth client registrations across server restarts', async () => {
-    const router = new ToolRouter([new EmptyConnector()]);
+    const router = new ToolRouter();
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -1483,82 +1484,38 @@ describe('startHttpServer lifecycle', () => {
   });
 });
 
-class EmptyConnector implements Connector {
-  readonly id = 'empty';
-  readonly displayName = 'empty';
-
-  async initialize(): Promise<void> {}
-
-  async listTools() {
-    return [];
-  }
-
-  async callTool() {
-    return { content: [{ type: 'text' as const, text: 'ok' }] };
-  }
-
-  async shutdown(): Promise<void> {}
+interface TextIndexServerFixtureOptions {
+  mountName?: string;
+  mountPath?: string;
+  files?: Record<string, string>;
 }
 
-class PolicyConnector implements Connector {
-  readonly id = 'proxy_filesystem';
-  readonly displayName = 'filesystem';
-  readonly calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+async function createTextIndexServerFixture(
+  options: TextIndexServerFixtureOptions = {},
+): Promise<{ index: TextContextIndex; tmp: string }> {
+  const mountName = options.mountName ?? 'workspace';
+  const mountPath = options.mountPath ?? '/workspace';
+  const files = options.files ?? { 'note.md': 'alpha note' };
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-index-'));
+  const root = path.join(tmp, 'root');
+  fs.mkdirSync(root);
 
-  async initialize(): Promise<void> {}
-
-  async listTools() {
-    return [
-      { name: 'search_files', description: 'Search files', inputSchema: { type: 'object', properties: {} } },
-      { name: 'read_file', description: 'Read a file', inputSchema: { type: 'object', properties: {} } },
-    ];
+  for (const [relativePath, content] of Object.entries(files)) {
+    const filePath = path.join(root, relativePath);
+    await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.promises.writeFile(filePath, content, 'utf-8');
   }
 
-  async callTool(name: string, args: Record<string, unknown>) {
-    this.calls.push({ name, args });
-    return { content: [{ type: 'text' as const, text: 'ok' }] };
-  }
-
-  async shutdown(): Promise<void> {}
-}
-
-class SemanticConnector implements Connector {
-  readonly id = 'notes';
-  readonly displayName = 'notes';
-  readonly calls: Array<{ name: string; args: Record<string, unknown> }> = [];
-
-  async initialize(): Promise<void> {}
-
-  async listTools() {
-    return [
-      { name: 'search_notes', description: 'Search notes', inputSchema: { type: 'object', properties: {} } },
-      { name: 'read_note', description: 'Read a note', inputSchema: { type: 'object', properties: {} } },
-    ];
-  }
-
-  async callTool(name: string, args: Record<string, unknown>) {
-    this.calls.push({ name, args });
-    if (name === 'search_notes') {
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: JSON.stringify({ results: [{ path: 'projects/launch.md', snippet: 'launch plan' }] }),
-          },
-        ],
-      };
-    }
-    return {
-      content: [
-        {
-          type: 'text' as const,
-          text: JSON.stringify({ path: 'projects/launch.md', content: '# Launch\nShip it.' }),
-        },
-      ],
-    };
-  }
-
-  async shutdown(): Promise<void> {}
+  const config = parseConfig({
+    version: 1,
+    mounts: [{ name: mountName, type: 'local_folder', path: mountPath, root, writeAccess: true }],
+  });
+  const index = new TextContextIndex({
+    mounts: config.mounts,
+    indexPath: path.join(tmp, 'index.json'),
+  });
+  await index.rebuild();
+  return { index, tmp };
 }
 
 function canListenOn(port: number): Promise<boolean> {

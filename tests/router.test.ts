@@ -2,352 +2,24 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { describe, expect, it, vi } from 'vitest';
-import { Connector } from '../src/connectors/types.js';
 import { parseConfig } from '../src/config/loader.js';
 import { TextContextIndex } from '../src/context/text-index.js';
-import { ToolRouter } from '../src/server/router.js';
 import { ClientIdentity } from '../src/server/client-identity.js';
+import { ToolRouter } from '../src/server/router.js';
 
 describe('ToolRouter', () => {
-  it('namespaces tools and routes calls to the owning connector', async () => {
-    const callTool = vi.fn(async (_name: string, args: Record<string, unknown>) => ({
-      content: [{ type: 'text' as const, text: JSON.stringify({ ok: true, args }) }],
-    }));
-    const connector: Connector = {
-      id: 'proxy_github',
-      displayName: 'github',
-      initialize: vi.fn(),
-      shutdown: vi.fn(),
-      listTools: vi.fn(async () => [
-        {
-          name: 'create_issue',
-          description: 'Create an issue',
-          inputSchema: { type: 'object', properties: { title: { type: 'string' } } },
-        },
-      ]),
-      callTool,
-    };
-
-    const router = new ToolRouter([connector]);
+  it('does not expose tools without a text context index', async () => {
+    const router = new ToolRouter();
     await router.initialize();
 
-    expect(router.getAllTools()).toEqual([
-      {
-        namespacedName: 'proxy_github__create_issue',
-        originalName: 'create_issue',
-        connectorId: 'proxy_github',
-        sourceId: 'proxy_github',
-        requiredAction: 'write',
-        toolKind: 'raw',
-        description: '[github] Create an issue',
-        inputSchema: { type: 'object', properties: { title: { type: 'string' } } },
-      },
-    ]);
-
-    await expect(router.callTool('proxy_github__create_issue', { title: 'Bug' })).resolves.toEqual({
-      content: [{ type: 'text', text: JSON.stringify({ ok: true, args: { title: 'Bug' } }) }],
-    });
-    expect(callTool).toHaveBeenCalledWith('create_issue', { title: 'Bug' });
-  });
-
-  it('rejects duplicate namespaced tool names', async () => {
-    const connector: Connector = {
-      id: 'dup',
-      displayName: 'dup',
-      initialize: vi.fn(),
-      shutdown: vi.fn(),
-      listTools: vi.fn(async () => [
-        { name: 'same', description: '', inputSchema: { type: 'object', properties: {} } },
-        { name: 'same', description: '', inputSchema: { type: 'object', properties: {} } },
-      ]),
-      callTool: vi.fn(),
-    };
-
-    const router = new ToolRouter([connector]);
-    await expect(router.initialize()).rejects.toThrow('Duplicate tool name');
-  });
-
-  it('throws for unknown tools', async () => {
-    const router = new ToolRouter([]);
-    await router.initialize();
-
+    expect(router.getAllTools()).toEqual([]);
     await expect(router.callTool('missing', {})).rejects.toThrow('Unknown tool: missing');
   });
 
-  it('applies result plugins before returning connector output', async () => {
-    const connector: Connector = {
-      id: 'notes',
-      displayName: 'notes',
-      initialize: vi.fn(),
-      shutdown: vi.fn(),
-      listTools: vi.fn(async () => [
-        { name: 'read_note', description: '', inputSchema: { type: 'object', properties: {} } },
-      ]),
-      callTool: vi.fn(async () => ({
-        content: [{ type: 'text' as const, text: 'email philip@example.com' }],
-      })),
-    };
-
-    const router = new ToolRouter(
-      [connector],
-      undefined,
-      [
-        {
-          id: 'test-plugin',
-          displayName: 'test plugin',
-          process: vi.fn((context) => ({
-            result: {
-              ...context.result,
-              content: [{ type: 'text' as const, text: 'scrubbed' }],
-            },
-          })),
-        },
-      ],
-    );
-    await router.initialize();
-
-    await expect(router.callTool('notes__read_note', {})).resolves.toEqual({
-      content: [{ type: 'text', text: 'scrubbed' }],
-    });
-  });
-
-  it('records plugin redaction counts in the audit log', async () => {
-    const audit = { record: vi.fn() };
-    const connector: Connector = {
-      id: 'notes',
-      displayName: 'notes',
-      initialize: vi.fn(),
-      shutdown: vi.fn(),
-      listTools: vi.fn(async () => [
-        { name: 'read_note', description: '', inputSchema: { type: 'object', properties: {} } },
-      ]),
-      callTool: vi.fn(async () => ({
-        content: [{ type: 'text' as const, text: 'sk-abcdefghijklmnopqrstuvwxyz123456' }],
-      })),
-    };
-
-    const router = new ToolRouter(
-      [connector],
-      audit,
-      [
-        {
-          id: 'pattern-redactor',
-          displayName: 'pattern redactor',
-          process: vi.fn((context) => ({
-            result: context.result,
-            auditEvents: [
-              {
-                pluginId: 'pattern-redactor',
-                mode: 'redact',
-                matches: [{ pattern: 'openai-keys', count: 1 }],
-              },
-            ],
-          })),
-        },
-      ],
-    );
-    await router.initialize();
-
-    await router.callTool('notes__read_note', {});
-
-    expect(audit.record).toHaveBeenCalledWith(
-      expect.objectContaining({
-        redactions: [
-          {
-            pluginId: 'pattern-redactor',
-            mode: 'redact',
-            pattern: 'openai-keys',
-            count: 1,
-          },
-        ],
-      }),
-    );
-  });
-
-  it('filters raw tools by client path/action permissions', async () => {
-    const connector: Connector = {
-      id: 'proxy_filesystem',
-      displayName: 'filesystem',
-      initialize: vi.fn(),
-      shutdown: vi.fn(),
-      listTools: vi.fn(async () => [
-        { name: 'search_files', description: 'Search files', inputSchema: { type: 'object', properties: {} } },
-        { name: 'read_file', description: 'Read a file', inputSchema: { type: 'object', properties: {} } },
-        { name: 'write_file', description: 'Write a file', inputSchema: { type: 'object', properties: {} } },
-      ]),
-      callTool: vi.fn(),
-    };
-
-    const router = new ToolRouter([{ connector, sourceId: 'workspace' }]);
-    await router.initialize();
-
-    expect(router.getAllTools(client('codex', true, [{ path: '/workspace/**', actions: ['search'] }]))).toEqual([
-      expect.objectContaining({ namespacedName: 'proxy_filesystem__search_files', requiredAction: 'search' }),
-    ]);
-  });
-
-  it('denies raw tools when rawToolsEnabled is false', async () => {
-    const audit = { record: vi.fn() };
-    const callTool = vi.fn();
-    const connector: Connector = {
-      id: 'notes',
-      displayName: 'notes',
-      initialize: vi.fn(),
-      shutdown: vi.fn(),
-      listTools: vi.fn(async () => [
-        { name: 'read_note', description: 'Read a note', inputSchema: { type: 'object', properties: {} } },
-      ]),
-      callTool,
-    };
-
-    const router = new ToolRouter([connector], audit);
-    await router.initialize();
-
-    expect(router.getAllTools(client('chatgpt', false, [{ path: '/notes/**', actions: ['read'] }]))).toEqual([]);
-    await expect(
-      router.callTool('notes__read_note', { notePath: 'Project' }, client('chatgpt', false, [
-        { path: '/notes/**', actions: ['read'] },
-      ])),
-    ).resolves.toMatchObject({ isError: true });
-    expect(callTool).not.toHaveBeenCalled();
-    expect(audit.record).toHaveBeenCalledWith(
-      expect.objectContaining({
-        clientId: 'chatgpt',
-        deniedReason: 'raw_tools_disabled',
-        isError: true,
-      }),
-    );
-  });
-
-  it('denies raw tool calls without the required path/action permission', async () => {
-    const audit = { record: vi.fn() };
-    const callTool = vi.fn();
-    const connector: Connector = {
-      id: 'proxy_filesystem',
-      displayName: 'filesystem',
-      initialize: vi.fn(),
-      shutdown: vi.fn(),
-      listTools: vi.fn(async () => [
-        { name: 'read_file', description: 'Read a file', inputSchema: { type: 'object', properties: {} } },
-      ]),
-      callTool,
-    };
-
-    const router = new ToolRouter([{ connector, sourceId: 'workspace' }], audit);
-    await router.initialize();
-
-    await expect(
-      router.callTool('proxy_filesystem__read_file', { path: '/tmp/a' }, client('codex', true, [
-        { path: '/workspace/**', actions: ['search'] },
-      ])),
-    ).resolves.toMatchObject({ isError: true });
-    expect(callTool).not.toHaveBeenCalled();
-    expect(audit.record).toHaveBeenCalledWith(
-      expect.objectContaining({
-        clientId: 'codex',
-        deniedReason: 'missing_permission path=/workspace action=read',
-        isError: true,
-      }),
-    );
-  });
-
-  it('records clientId for authorized raw tool calls', async () => {
-    const audit = { record: vi.fn() };
-    const connector: Connector = {
-      id: 'notes',
-      displayName: 'notes',
-      initialize: vi.fn(),
-      shutdown: vi.fn(),
-      listTools: vi.fn(async () => [
-        { name: 'read_note', description: 'Read a note', inputSchema: { type: 'object', properties: {} } },
-      ]),
-      callTool: vi.fn(async () => ({ content: [{ type: 'text' as const, text: 'ok' }] })),
-    };
-
-    const router = new ToolRouter([connector], audit);
-    await router.initialize();
-
-    await router.callTool('notes__read_note', {}, client('codex', true, [
-      { path: '/notes/**', actions: ['read'] },
-    ]));
-
-    expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ clientId: 'codex', isError: false }));
-  });
-
-  it('lists semantic tools even when raw tools are disabled', async () => {
-    const connector = notesFixtureConnector();
-    const router = new ToolRouter([connector], undefined, [], {
-      semanticTools: {
-        searchPersonalContext: { enabled: true, sourceIds: ['notes'] },
-        readContextItem: { enabled: true, sourceIds: ['notes'] },
-      },
-    });
-    await router.initialize();
-
-    expect(router.getAllTools(client('chatgpt', false, [
-      { path: '/notes/**', actions: ['search', 'read'] },
-    ])).map((tool) => tool.namespacedName)).toEqual([
-      'search_personal_context',
-      'read_context_item',
-    ]);
-  });
-
-  it('searches allowed semantic sources and returns source-attributed results', async () => {
-    const connector = notesFixtureConnector();
-    const router = new ToolRouter([connector], undefined, [], {
-      semanticTools: {
-        searchPersonalContext: { enabled: true, sourceIds: ['notes'] },
-      },
-    });
-    await router.initialize();
-
-    const result = await router.callTool('search_personal_context', { query: 'launch' }, client('chatgpt', false, [
-      { path: '/notes/**', actions: ['search'] },
-    ]));
-    const parsed = JSON.parse(result.content[0].type === 'text' ? result.content[0].text : '{}');
-
-    expect(parsed).toMatchObject({
-      query: 'launch',
-      ranking: 'per_source_keyword_union',
-      results: [
-        {
-          item_id: 'projects/launch.md',
-          source_id: 'notes',
-          source_type: 'generic',
-          actions: ['read_context_item'],
-        },
-      ],
-    });
-  });
-
-  it('reads allowed semantic context items without enabling raw tools', async () => {
-    const connector = notesFixtureConnector();
-    const router = new ToolRouter([connector], undefined, [], {
-      semanticTools: {
-        readContextItem: { enabled: true, sourceIds: ['notes'] },
-      },
-    });
-    await router.initialize();
-
-    const result = await router.callTool(
-      'read_context_item',
-      { source_id: 'notes', item_id: 'projects/launch.md' },
-      client('chatgpt', false, [{ path: '/notes/**', actions: ['read'] }]),
-    );
-    const parsed = JSON.parse(result.content[0].type === 'text' ? result.content[0].text : '{}');
-
-    expect(parsed).toMatchObject({
-      source_id: 'notes',
-      item_id: 'projects/launch.md',
-      mime_type: 'text/plain',
-      content: '# Launch\nShip it.',
-    });
-  });
-
-  it('exposes prototype text index tools by path/action permission', async () => {
+  it('exposes text index tools by path/action permission', async () => {
     const { index, tmp } = await createTextIndexFixture();
     try {
-      const router = new ToolRouter([], undefined, [], { contextIndex: index });
+      const router = new ToolRouter(undefined, [], { contextIndex: index });
       await router.initialize();
 
       const tools = router.getAllTools(client('codex', false, [
@@ -368,7 +40,7 @@ describe('ToolRouter', () => {
   it('normalizes permission paths with trailing slashes without regex backtracking', async () => {
     const { index, tmp } = await createTextIndexFixture();
     try {
-      const router = new ToolRouter([], undefined, [], { contextIndex: index });
+      const router = new ToolRouter(undefined, [], { contextIndex: index });
       await router.initialize();
       const identity = client('codex', false, [{ path: '/workspace/**////', actions: ['read'] }]);
 
@@ -385,7 +57,7 @@ describe('ToolRouter', () => {
   it('allows targeted reads with an exact file permission', async () => {
     const { index, tmp } = await createTextIndexFixture();
     try {
-      const router = new ToolRouter([], undefined, [], { contextIndex: index });
+      const router = new ToolRouter(undefined, [], { contextIndex: index });
       await router.initialize();
       const identity = client('codex', false, [{ path: '/workspace/note.md', actions: ['read'] }]);
 
@@ -405,11 +77,11 @@ describe('ToolRouter', () => {
     }
   });
 
-  it('denies prototype text index writes without write permission', async () => {
+  it('denies writes without write permission and records the client', async () => {
     const { index, tmp } = await createTextIndexFixture();
     const audit = { record: vi.fn() };
     try {
-      const router = new ToolRouter([], audit, [], { contextIndex: index });
+      const router = new ToolRouter(audit, [], { contextIndex: index });
       await router.initialize();
 
       const result = await router.callTool('write', { path: '/workspace/new.md', content: 'new' }, client('chatgpt', false, [
@@ -419,6 +91,8 @@ describe('ToolRouter', () => {
       expect(result).toMatchObject({ isError: true });
       expect(audit.record).toHaveBeenCalledWith(
         expect.objectContaining({
+          connectorId: 'mvmt',
+          tool: 'write',
           clientId: 'chatgpt',
           deniedReason: 'missing_permission path=/workspace/new.md action=write',
           isError: true,
@@ -429,10 +103,29 @@ describe('ToolRouter', () => {
     }
   });
 
-  it('exposes remove as the destructive prototype text index tool', async () => {
+  it('allows writes when client and mount permissions allow them', async () => {
     const { index, tmp } = await createTextIndexFixture();
     try {
-      const router = new ToolRouter([], undefined, [], { contextIndex: index });
+      const router = new ToolRouter(undefined, [], { contextIndex: index });
+      await router.initialize();
+      const identity = client('codex', false, [{ path: '/workspace/**', actions: ['read', 'write'] }]);
+
+      const write = await router.callTool('write', { path: '/workspace/new.md', content: 'new note' }, identity);
+      const writeParsed = JSON.parse(write.content[0].type === 'text' ? write.content[0].text : '{}');
+      expect(writeParsed).toMatchObject({ path: '/workspace/new.md', content: 'new note' });
+
+      const read = await router.callTool('read', { path: '/workspace/new.md' }, identity);
+      const readParsed = JSON.parse(read.content[0].type === 'text' ? read.content[0].text : '{}');
+      expect(readParsed).toMatchObject({ content: 'new note' });
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('exposes remove as the destructive text index tool', async () => {
+    const { index, tmp } = await createTextIndexFixture();
+    try {
+      const router = new ToolRouter(undefined, [], { contextIndex: index });
       await router.initialize();
       const identity = client('codex', false, [{ path: '/workspace/**', actions: ['write'] }]);
 
@@ -440,6 +133,80 @@ describe('ToolRouter', () => {
       const result = await router.callTool('remove', { path: '/workspace/note.md' }, identity);
       const parsed = JSON.parse(result.content[0].type === 'text' ? result.content[0].text : '{}');
       expect(parsed).toMatchObject({ path: '/workspace/note.md', removed: true });
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('applies result plugins before returning mount output', async () => {
+    const { index, tmp } = await createTextIndexFixture();
+    try {
+      const router = new ToolRouter(
+        undefined,
+        [
+          {
+            id: 'test-plugin',
+            displayName: 'test plugin',
+            process: vi.fn((context) => ({
+              result: {
+                ...context.result,
+                content: [{ type: 'text' as const, text: 'scrubbed' }],
+              },
+            })),
+          },
+        ],
+        { contextIndex: index },
+      );
+      await router.initialize();
+
+      await expect(router.callTool('read', { path: '/workspace/note.md' })).resolves.toEqual({
+        content: [{ type: 'text', text: 'scrubbed' }],
+      });
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('records plugin redaction counts in the audit log', async () => {
+    const { index, tmp } = await createTextIndexFixture();
+    const audit = { record: vi.fn() };
+    try {
+      const router = new ToolRouter(
+        audit,
+        [
+          {
+            id: 'pattern-redactor',
+            displayName: 'pattern redactor',
+            process: vi.fn((context) => ({
+              result: context.result,
+              auditEvents: [
+                {
+                  pluginId: 'pattern-redactor',
+                  mode: 'redact',
+                  matches: [{ pattern: 'openai-keys', count: 1 }],
+                },
+              ],
+            })),
+          },
+        ],
+        { contextIndex: index },
+      );
+      await router.initialize();
+
+      await router.callTool('read', { path: '/workspace/note.md' });
+
+      expect(audit.record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          redactions: [
+            {
+              pluginId: 'pattern-redactor',
+              mode: 'redact',
+              pattern: 'openai-keys',
+              count: 1,
+            },
+          ],
+        }),
+      );
     } finally {
       await fs.rm(tmp, { recursive: true, force: true });
     }
@@ -457,41 +224,6 @@ function client(
     source: 'token',
     rawToolsEnabled,
     permissions,
-  };
-}
-
-function notesFixtureConnector(): Connector {
-  return {
-    id: 'notes',
-    displayName: 'notes',
-    initialize: vi.fn(),
-    shutdown: vi.fn(),
-    listTools: vi.fn(async () => [
-      { name: 'search_notes', description: 'Search notes', inputSchema: { type: 'object', properties: {} } },
-      { name: 'read_note', description: 'Read a note', inputSchema: { type: 'object', properties: {} } },
-    ]),
-    callTool: vi.fn(async (name: string) => {
-      if (name === 'search_notes') {
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: JSON.stringify({
-                results: [{ path: 'projects/launch.md', snippet: 'launch plan' }],
-              }),
-            },
-          ],
-        };
-      }
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: JSON.stringify({ path: 'projects/launch.md', content: '# Launch\nShip it.' }),
-          },
-        ],
-      };
-    }),
   };
 }
 
