@@ -10,6 +10,7 @@ import {
 } from '../config/schema.js';
 import { resolveSetupPath } from '../connectors/setup-paths.js';
 import { normalizePathSeparators, stripTrailingSlashes } from '../context/mount-registry.js';
+import { promptForExistingFolder, validateExistingFolderPath } from './folder-prompt.js';
 
 export interface MountCommandOptions {
   config?: string;
@@ -68,6 +69,7 @@ export async function addMount(name: string | undefined, root: string | undefine
   const inputValue = name && root
     ? mountInputFromOptions(name, root, options)
     : await promptForMountInput(config);
+  if (!await validateMountRootForCommand(inputValue.root)) return;
 
   const nextConfig = addMountToConfig(config, inputValue);
   await saveConfig(configPath, nextConfig);
@@ -84,6 +86,7 @@ export async function editMount(name: string | undefined, options: EditMountOpti
   const patch = hasEditOptions(options)
     ? mountPatchFromOptions(options)
     : await promptForMountPatch(config, mountName);
+  if (patch.root && !await validateMountRootForCommand(patch.root)) return;
 
   const nextConfig = editMountInConfig(config, mountName, patch);
   await saveConfig(configPath, nextConfig);
@@ -269,7 +272,7 @@ function mountPatchFromOptions(options: EditMountOptions): Partial<MountInput> {
 
 async function promptForMountInput(config: MvmtConfig): Promise<MountInput> {
   const name = await input({
-    message: 'Mount name:',
+    message: 'Mount name (short id, e.g. notes):',
     validate: (value) => {
       const trimmed = value.trim();
       if (!/^[a-z0-9][a-z0-9_-]*$/.test(trimmed)) return 'Use lowercase letters, numbers, dash, or underscore';
@@ -277,35 +280,40 @@ async function promptForMountInput(config: MvmtConfig): Promise<MountInput> {
       return true;
     },
   });
-  const root = await input({
-    message: 'Local folder root:',
-    validate: (value) => value.trim().length > 0 ? true : 'Enter a folder path',
-  });
+  const root = await promptForExistingFolder();
   const mountPath = await input({
-    message: 'Mount path:',
+    message: 'Virtual path clients will use:',
     default: `/${name.trim()}`,
     validate: (value) => validateMountPathInput(value, config),
   });
   const writeAccess = await confirm({
-    message: 'Allow write/remove in this mount?',
+    message: 'Allow write/remove under this mount?',
     default: false,
   });
   const description = await input({
-    message: 'Description for clients (optional):',
+    message: 'Short description shown by list("/") (optional):',
     default: '',
   });
   const guidance = await input({
-    message: 'Mount-specific instructions for clients (optional):',
+    message: 'Guidance shown by list("/") (optional):',
     default: '',
   });
-  const exclude = splitPatterns(await input({
-    message: 'Exclude patterns (comma-separated):',
-    default: DEFAULT_MOUNT_EXCLUDE_PATTERNS.join(', '),
-  }));
-  const protect = splitPatterns(await input({
-    message: 'Protected write/remove patterns (comma-separated):',
-    default: DEFAULT_MOUNT_PROTECT_PATTERNS.join(', '),
-  }));
+  const customizePatterns = await confirm({
+    message: 'Customize hidden/protected file patterns?',
+    default: false,
+  });
+  const exclude = customizePatterns
+    ? splitPatterns(await input({
+      message: 'Hidden patterns, comma-separated:',
+      default: DEFAULT_MOUNT_EXCLUDE_PATTERNS.join(', '),
+    }))
+    : [...DEFAULT_MOUNT_EXCLUDE_PATTERNS];
+  const protect = customizePatterns
+    ? splitPatterns(await input({
+      message: 'Protected write/remove patterns, comma-separated:',
+      default: DEFAULT_MOUNT_PROTECT_PATTERNS.join(', '),
+    }))
+    : [...DEFAULT_MOUNT_PROTECT_PATTERNS];
   return {
     name: name.trim(),
     root: root.trim(),
@@ -322,14 +330,18 @@ async function promptForMountInput(config: MvmtConfig): Promise<MountInput> {
 async function promptForMountPatch(config: MvmtConfig, name: string): Promise<Partial<MountInput>> {
   const current = config.mounts.find((mount) => mount.name === name);
   if (!current) throw new Error(`Unknown mount: ${name}`);
-  const root = await input({ message: 'Local folder root:', default: current.root });
+  const root = await input({
+    message: 'Folder on this computer:',
+    default: current.root,
+    validate: validateExistingFolderPath,
+  });
   const mountPath = await input({
-    message: 'Mount path:',
+    message: 'Virtual path clients will use:',
     default: current.path,
     validate: (value) => validateMountPathInput(value, config, name),
   });
   const writeAccess = await confirm({
-    message: 'Allow write/remove in this mount?',
+    message: 'Allow write/remove under this mount?',
     default: current.writeAccess,
   });
   const enabled = await confirm({
@@ -337,11 +349,11 @@ async function promptForMountPatch(config: MvmtConfig, name: string): Promise<Pa
     default: current.enabled,
   });
   const description = await input({
-    message: 'Description for clients:',
+    message: 'Short description shown by list("/"):',
     default: current.description,
   });
   const guidance = await input({
-    message: 'Mount-specific instructions for clients:',
+    message: 'Guidance shown by list("/"):',
     default: current.guidance,
   });
   const exclude = splitPatterns(await input({
@@ -368,6 +380,14 @@ async function promptForMountName(config: MvmtConfig, message: string): Promise<
 
 function splitPatterns(value: string): string[] {
   return value.split(',').map((item) => item.trim()).filter(Boolean);
+}
+
+async function validateMountRootForCommand(root: string): Promise<boolean> {
+  const valid = await validateExistingFolderPath(root);
+  if (valid === true) return true;
+  console.error(valid);
+  process.exitCode = 1;
+  return false;
 }
 
 function assertWriteFlags(options: { write?: boolean; readOnly?: boolean }): void {

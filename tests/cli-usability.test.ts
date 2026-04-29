@@ -4,7 +4,7 @@ import os from 'os';
 import path from 'path';
 import { promisify } from 'util';
 import { describe, expect, it } from 'vitest';
-import { parseConfig, saveConfig } from '../src/config/loader.js';
+import { parseConfig, readConfig, saveConfig } from '../src/config/loader.js';
 
 const execFileAsync = promisify(execFile);
 const root = path.resolve(import.meta.dirname, '..');
@@ -83,6 +83,73 @@ describe('CLI usability', () => {
       expect(result.code).toBe(1);
       expect(result.output).toContain('No mounts configured.');
       expect(result.output).toContain('mvmt mounts add <name> <folder>');
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('gives non-interactive serve users mount setup commands when no mounts exist', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    const configPath = path.join(tmp, 'config.yaml');
+    try {
+      await saveConfig(configPath, parseConfig({ version: 1 }));
+
+      const result = await runCliAllowFailure(['serve', '--config', configPath]);
+      expect(result.code).toBe(1);
+      expect(result.output).toContain('No mounts loaded. Nothing to serve.');
+      expect(result.output).toContain('mvmt mounts add <name> <folder>');
+      expect(result.output).toContain('mvmt serve --path <dir>');
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects non-interactive mount roots that do not exist', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    const configPath = path.join(tmp, 'config.yaml');
+    const missingRoot = path.join(tmp, 'missing');
+    try {
+      await saveConfig(configPath, parseConfig({ version: 1 }));
+
+      const result = await runCliAllowFailure([
+        'mounts',
+        'add',
+        'missing',
+        missingRoot,
+        '--config',
+        configPath,
+      ]);
+      expect(result.code).toBe(1);
+      expect(result.output).toContain(`Folder not found: ${missingRoot}`);
+      expect(result.output).not.toContain('Error:');
+      expect(result.output).not.toContain('at async');
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('can disable tunnel access without removing saved tunnel details', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    const configPath = path.join(tmp, 'config.yaml');
+    try {
+      await saveConfig(configPath, parseConfig({
+        version: 1,
+        server: {
+          access: 'tunnel',
+          tunnel: {
+            provider: 'custom',
+            command: 'cloudflared tunnel --config ~/.cloudflared/mvmt.yml run',
+            url: 'https://mvmt.example.com',
+          },
+        },
+      }));
+
+      const { stdout } = await runCli(['tunnel', 'disable', '--config', configPath]);
+      expect(stdout).toContain('Tunnel access disabled');
+
+      const updated = readConfig(configPath);
+      expect(updated.server.access).toBe('local');
+      expect(updated.server.tunnel?.url).toBe('https://mvmt.example.com');
     } finally {
       await fs.rm(tmp, { recursive: true, force: true });
     }

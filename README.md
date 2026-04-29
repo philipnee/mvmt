@@ -360,7 +360,9 @@ runtime connector in the current mount-only shape.
 ## Per-client policy
 
 If `clients[]` is absent, mvmt keeps legacy behavior: the session bearer token
-from `mvmt token` can access all configured mounts.
+from `mvmt token` can access all configured mounts. The session token is stored
+at `~/.mvmt/.session-token` with file mode `600`. HTTP `mvmt serve` and
+`mvmt token` create it if it is missing.
 
 Once `clients[]` is present, `/mcp` becomes strict:
 
@@ -428,13 +430,14 @@ manual config feature.
 | `mvmt config` | Show the saved config summary |
 | `mvmt config setup` | Rerun guided setup |
 | `mvmt doctor` | Validate config and startup prerequisites |
-| `mvmt token` | Show the current session bearer token |
+| `mvmt token` | Show the current session bearer token, creating it if missing |
 | `mvmt token rotate` | Regenerate the session bearer token |
 | `mvmt tunnel` | Show tunnel status |
 | `mvmt tunnel config` | Choose and save a tunnel command |
 | `mvmt tunnel start` | Start the configured tunnel |
 | `mvmt tunnel refresh` | Restart the tunnel and print the new URL |
 | `mvmt tunnel stop` | Stop public tunnel exposure |
+| `mvmt tunnel disable` | Switch config back to local-only access |
 | `mvmt tunnel logs` | Show recent tunnel output |
 | `mvmt tunnel logs stream` | Stream live tunnel output |
 | `mvmt --version` | Print version and check for updates |

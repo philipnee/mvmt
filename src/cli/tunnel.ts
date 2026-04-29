@@ -18,6 +18,7 @@ import {
   streamJsonControl,
 } from '../utils/control.js';
 import { readSessionToken } from '../utils/token.js';
+import { tunnelExposureError } from './tunnel-safety.js';
 
 export interface TunnelCommandOptions {
   config?: string;
@@ -29,6 +30,12 @@ export interface TunnelRuntimeStatus {
   command?: string;
   publicUrl?: string;
   recentLogs?: string[];
+}
+
+export interface ApplyTunnelConfigResult {
+  config: MvmtConfig;
+  enabled: boolean;
+  safetyError?: string;
 }
 
 export async function showTunnel(options: TunnelCommandOptions = {}): Promise<void> {
@@ -54,11 +61,14 @@ export async function configureTunnel(options: TunnelCommandOptions = {}): Promi
   if (!loaded) return;
 
   const tunnel = await promptForTunnelConfig(loaded.config.server.port);
-  loaded.config.server.access = 'tunnel';
-  loaded.config.server.tunnel = tunnel;
-  await saveConfig(loaded.configPath, loaded.config);
+  const applied = applyTunnelConfig(loaded.config, tunnel);
+  await saveConfig(loaded.configPath, applied.config);
 
   console.log(chalk.green(`Tunnel config saved to ${loaded.configPath}`));
+  if (!applied.enabled) {
+    printTunnelSavedButDisabled(applied.safetyError);
+    return;
+  }
 
   try {
     const token = requireControlToken();
@@ -103,6 +113,21 @@ export async function stopTunnelCommand(options: TunnelCommandOptions = {}): Pro
     return;
   }
   printTunnelActionResult(runtime);
+}
+
+export async function disableTunnelAccess(options: TunnelCommandOptions = {}): Promise<void> {
+  const loaded = loadConfigSummary(options.config);
+  if (!loaded) return;
+
+  if (loaded.config.server.access !== 'tunnel') {
+    console.log(chalk.dim('Tunnel access is already disabled.'));
+    return;
+  }
+
+  loaded.config.server.access = 'local';
+  await saveConfig(loaded.configPath, loaded.config);
+  console.log(chalk.green(`Tunnel access disabled in ${loaded.configPath}`));
+  console.log(chalk.dim('Saved tunnel details were kept. Restart mvmt to serve locally.'));
 }
 
 export async function showTunnelLogs(options: TunnelCommandOptions = {}): Promise<void> {
@@ -168,7 +193,7 @@ export function printTunnelSummary(config: MvmtConfig, runtime?: TunnelRuntimeSt
   console.log('mvmt tunnel\n');
   console.log('Configured');
   console.log(`  access: ${config.server.access}`);
-  if (config.server.access !== 'tunnel' || !config.server.tunnel) {
+  if (!config.server.tunnel) {
     console.log(`  ${chalk.dim('Tunnel is not configured.')}`);
     return;
   }
@@ -177,6 +202,10 @@ export function printTunnelSummary(config: MvmtConfig, runtime?: TunnelRuntimeSt
   console.log(`  command: ${config.server.tunnel.command}`);
   if (config.server.tunnel.url) {
     console.log(`  public URL: ${formatMcpPublicUrl(config.server.tunnel.url)}`);
+  }
+  if (config.server.access !== 'tunnel') {
+    console.log(`  ${chalk.dim('Tunnel details are saved, but tunnel access is disabled.')}`);
+    return;
   }
 
   console.log('\nLive');
@@ -187,6 +216,45 @@ export function printTunnelSummary(config: MvmtConfig, runtime?: TunnelRuntimeSt
   console.log(`  status: ${runtime.running ? 'running' : 'stopped'}`);
   if (runtime.command) console.log(`  command: ${runtime.command}`);
   if (runtime.publicUrl) console.log(`  public URL: ${formatMcpPublicUrl(runtime.publicUrl)}`);
+}
+
+export function applyTunnelConfig(
+  config: MvmtConfig,
+  tunnel: TunnelConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): ApplyTunnelConfigResult {
+  const enabledConfig: MvmtConfig = {
+    ...config,
+    server: {
+      ...config.server,
+      access: 'tunnel',
+      tunnel,
+    },
+  };
+  const safetyError = tunnelExposureError(enabledConfig, env);
+  if (!safetyError) return { config: enabledConfig, enabled: true };
+
+  return {
+    config: {
+      ...config,
+      server: {
+        ...config.server,
+        access: 'local',
+        tunnel,
+      },
+    },
+    enabled: false,
+    safetyError,
+  };
+}
+
+export function printTunnelSavedButDisabled(safetyError?: string): void {
+  console.log(chalk.yellow('Tunnel settings were saved, but mvmt is still local-only.'));
+  if (safetyError) console.log(chalk.dim(`Reason: ${safetyError}`));
+  console.log(chalk.dim('Next options:'));
+  console.log(chalk.dim('  local only:          mvmt serve -i'));
+  console.log(chalk.dim('  temporary tunnel:    MVMT_ALLOW_LEGACY_TUNNEL=1 mvmt serve -i'));
+  console.log(chalk.dim('  safer public tunnel: add clients[] permissions, then enable tunnel access'));
 }
 
 export async function promptForTunnelConfig(port: number): Promise<TunnelConfig> {

@@ -1,5 +1,4 @@
-import { confirm, input } from '@inquirer/prompts';
-import fs from 'fs/promises';
+import { confirm } from '@inquirer/prompts';
 import path from 'path';
 import {
   DEFAULT_MOUNT_EXCLUDE_PATTERNS,
@@ -9,6 +8,7 @@ import {
 } from '../config/schema.js';
 import type { ConnectorSetupDefinition } from './setup-registry.js';
 import { resolveSetupPath } from './setup-paths.js';
+import { promptForExistingFolder } from '../cli/folder-prompt.js';
 
 export interface FilesystemConfigInput {
   paths: string[];
@@ -47,19 +47,13 @@ export async function promptForFilesystemFolders(): Promise<FilesystemConfigInpu
   const folders = new Set<string>();
 
   while (true) {
-    const folder = await input({
-      message: folders.size === 0 ? 'Folder path to allow:' : 'Another folder path to allow:',
-      validate: async (value) => {
-        if (!value.trim()) return 'Enter a folder path';
-        const resolved = resolveSetupPath(value.trim());
-        try {
-          const stat = await fs.stat(resolved);
-          return stat.isDirectory() ? true : 'Path must be a directory';
-        } catch {
-          return 'Directory does not exist';
-        }
-      },
-    });
+    const folder = await promptForExistingFolder(
+      folders.size === 0
+        ? 'Folder on this computer:'
+        : 'Another folder on this computer (Enter to finish):',
+      { allowEmpty: folders.size > 0 },
+    );
+    if (!folder) break;
 
     folders.add(resolveSetupPath(folder.trim()));
 

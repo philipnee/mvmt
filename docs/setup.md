@@ -80,9 +80,16 @@ For a one-off read-only folder without changing saved config:
 mvmt serve --path ~/Documents -i
 ```
 
+When adding a mount:
+
+- **Folder on this computer** is the real local folder. It must already exist.
+- **Virtual path clients will use** is the mvmt path, such as `/notes` or
+  `/workspace`.
+
 ## Token
 
-Show the current session bearer token:
+Show the current session bearer token. If the token file does not exist yet,
+this command creates it.
 
 ```bash
 mvmt token
@@ -101,6 +108,10 @@ mvmt token rotate
 ```
 
 If a client uses the old token, restart or update that client after rotation.
+
+The session token is stored as a plaintext bearer token at
+`~/.mvmt/.session-token` with file mode `600`. HTTP `mvmt serve` also creates it
+automatically during startup.
 
 ## Rebuild the Index
 
@@ -196,7 +207,8 @@ The exact list depends on client permissions.
 
 ### `No mounts loaded. Nothing to serve.`
 
-Add at least one mount:
+In an interactive terminal, `mvmt serve` will offer to add a mount before
+starting. In scripts or CI, add at least one mount explicitly:
 
 ```bash
 mvmt mounts add workspace ~/code/mvmt --mount-path /workspace --read-only

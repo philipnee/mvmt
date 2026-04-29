@@ -8,7 +8,7 @@ import { formatMcpPublicUrl } from '../utils/tunnel.js';
 import { printTokenSummary, readTokenSummary } from './token.js';
 import { printConfigSummary } from './config.js';
 import { printMounts, promptAndAddMount, promptAndEditMount, promptAndRemoveMount } from './mounts.js';
-import { promptForTunnelConfig } from './tunnel.js';
+import { applyTunnelConfig, printTunnelSavedButDisabled, promptForTunnelConfig } from './tunnel.js';
 import { LoadedConnector } from './connector-loader.js';
 import { TunnelController } from './tunnel-controller.js';
 import { ToolResultPlugin } from '../plugins/types.js';
@@ -343,18 +343,24 @@ async function handleTunnelRefresh(state: InteractivePromptState): Promise<void>
 
 async function handleTunnelConfig(state: InteractivePromptState): Promise<void> {
   const tunnel = await promptForTunnelConfig(state.port);
+  const applied = applyTunnelConfig(state.config, tunnel);
   const wasRunning = state.tunnel.running;
 
   if (wasRunning) {
     await state.tunnel.stop();
   }
 
-  state.tunnel.configure(tunnel);
-  state.config.server.access = 'tunnel';
+  state.config.server.access = applied.config.server.access;
   state.config.server.tunnel = tunnel;
   await state.persistConfig();
 
   console.log(chalk.green(`Tunnel config saved to ${state.configPath}`));
+  if (!applied.enabled) {
+    printTunnelSavedButDisabled(applied.safetyError);
+    return;
+  }
+
+  state.tunnel.configure(tunnel);
   if (!wasRunning) {
     console.log(chalk.dim('Run `tunnel start` or `tunnel refresh` to launch it.'));
     return;

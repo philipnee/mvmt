@@ -12,6 +12,9 @@ mvmt serve --port 4142
 
 mvmt needs at least one enabled mount.
 
+In an interactive terminal, `mvmt serve` offers to add a mount and then
+continues startup. In non-interactive runs, add one first:
+
 ```bash
 mvmt mounts list
 mvmt mounts add workspace ~/code/mvmt --mount-path /workspace --read-only
@@ -49,6 +52,8 @@ Also check that the file type is text-like and smaller than the current text siz
 ## Token rejected by client
 
 The session bearer token is reused across normal `mvmt serve` restarts. It changes only when you rotate it.
+The token is stored at `~/.mvmt/.session-token` with file mode `600`.
+`mvmt serve` and `mvmt token` both create it if it is missing.
 
 ```bash
 mvmt token show

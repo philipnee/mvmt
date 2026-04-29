@@ -17,6 +17,7 @@ import { initializeConnectors, LoadedConnector } from './connector-loader.js';
 import { TunnelController } from './tunnel-controller.js';
 import { InteractiveAuditLogger, startInteractivePrompt, formatHttpRequestEntry } from './interactive.js';
 import { LEGACY_TUNNEL_OVERRIDE_ENV, legacyTunnelOverrideEnabled, tunnelExposureError } from './tunnel-safety.js';
+import { promptAndAddMount } from './mounts.js';
 
 export interface StartOptions {
   port?: string;
@@ -76,11 +77,13 @@ export async function start(options: StartOptions = {}): Promise<void> {
       printNextStep: false,
     });
   }
-  const config = loadConfig(configPath);
+  let config = loadConfig(configPath);
   if (!stdioMode) {
+    config = await ensureStartupMounts(config, configPath, logger);
     const tunnelError = tunnelExposureError(config);
     if (tunnelError) {
       logger.error(tunnelError);
+      logger.error('Run `mvmt tunnel disable` to return to local-only mode, or add clients[] before serving a public tunnel.');
       process.exit(1);
     }
     if (config.server.access === 'tunnel' && legacyTunnelOverrideEnabled()) {
@@ -98,8 +101,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
   }
 
   if (loaded.length === 0 && !textIndex) {
-    emit('No mounts loaded. Nothing to serve.', stdioMode, logger, 'error');
-    emit('Check your config with `mvmt config` or rerun `mvmt config setup`.', stdioMode, logger, 'error');
+    emitNoMountsGuidance(stdioMode, logger);
     process.exit(1);
   }
 
@@ -259,6 +261,49 @@ export async function start(options: StartOptions = {}): Promise<void> {
     await Promise.all(cleanupTasks.map((task) => task().catch(() => undefined)));
     process.exit(1);
   }
+}
+
+export function hasEnabledMounts(config: Pick<MvmtConfig, 'mounts'>): boolean {
+  return config.mounts.some((mount) => mount.enabled !== false);
+}
+
+async function ensureStartupMounts(
+  config: MvmtConfig,
+  configPath: string,
+  logger: Logger,
+): Promise<MvmtConfig> {
+  if (hasEnabledMounts(config)) return config;
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return config;
+
+  logger.warn('No mounts configured. Add a mount to continue startup.');
+  const nextConfig = await promptAndAddMount(config);
+  if (!nextConfig || !hasEnabledMounts(nextConfig)) {
+    logger.error('No mount added. Startup cannot continue without at least one enabled mount.');
+    logger.error('Run `mvmt mounts add <name> <folder>` or `mvmt config setup` first.');
+    process.exit(1);
+  }
+
+  await saveConfig(configPath, nextConfig);
+  logger.info(`Saved mount config to ${configPath}`);
+  logger.info(formatPermissionMode(nextConfig));
+  logger.info(`The HTTP session token is stored at ${TOKEN_PATH} and is created automatically when the server starts.`);
+  return nextConfig;
+}
+
+function formatPermissionMode(config: MvmtConfig): string {
+  if (config.clients && config.clients.length > 0) {
+    return 'Permissions: using configured clients[] path/action policy.';
+  }
+  return 'Permissions: no clients[] policy is configured, so the session token can access configured mounts.';
+}
+
+function emitNoMountsGuidance(
+  stdioMode: boolean,
+  logger: Logger,
+): void {
+  emit('No mounts loaded. Nothing to serve.', stdioMode, logger, 'error');
+  emit('Add a mount with `mvmt mounts add <name> <folder>` or rerun `mvmt config setup`.', stdioMode, logger, 'error');
+  emit('For one temporary read-only folder, run `mvmt serve --path <dir>`.', stdioMode, logger, 'error');
 }
 
 // Runs all cleanup tasks on SIGINT/SIGTERM. If any task hangs (e.g. a

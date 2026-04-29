@@ -11,6 +11,7 @@ import { addMount, editMount, listMounts, removeMount } from '../src/cli/mounts.
 import { start } from '../src/cli/start.js';
 import {
   configureTunnel,
+  disableTunnelAccess,
   refreshTunnelCommand,
   showTunnel,
   showTunnelLogs,
@@ -241,6 +242,14 @@ tunnelCommand
   .option('-c, --config <path>', 'Config file path')
   .action(async (options: { config?: string }, command: Command) => {
     await stopTunnelCommand(withInheritedConfig(options, command));
+  });
+
+tunnelCommand
+  .command('disable')
+  .description('Disable tunnel access in config and keep saved tunnel details')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (options: { config?: string }, command: Command) => {
+    await disableTunnelAccess(withInheritedConfig(options, command));
   });
 
 const tunnelLogsCommand = tunnelCommand
