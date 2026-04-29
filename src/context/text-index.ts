@@ -296,14 +296,31 @@ export class TextContextIndex {
   private async readSnapshot(): Promise<TextIndexSnapshot> {
     try {
       return JSON.parse(await fsp.readFile(this.options.indexPath, 'utf-8')) as TextIndexSnapshot;
-    } catch {
-      return { version: 1, indexed_at: new Date(0).toISOString(), files: [], chunks: [] };
+    } catch (err) {
+      if (isNodeError(err) && err.code === 'ENOENT') {
+        return emptySnapshot();
+      }
+      throw new Error(`failed to read text index snapshot: ${err instanceof Error ? err.message : 'unknown error'}`);
     }
   }
 
   private async writeSnapshot(snapshot: TextIndexSnapshot): Promise<void> {
-    await fsp.mkdir(path.dirname(this.options.indexPath), { recursive: true });
-    await fsp.writeFile(this.options.indexPath, JSON.stringify(snapshot, null, 2), { encoding: 'utf-8', mode: 0o600 });
+    const indexDir = path.dirname(this.options.indexPath);
+    const tempPath = path.join(
+      indexDir,
+      `.${path.basename(this.options.indexPath)}.${process.pid}.${Date.now()}.tmp`,
+    );
+    await fsp.mkdir(indexDir, { recursive: true });
+    try {
+      await fsp.writeFile(tempPath, JSON.stringify(snapshot, null, 2), { encoding: 'utf-8', mode: 0o600 });
+      if (process.platform !== 'win32') {
+        await fsp.chmod(tempPath, 0o600);
+      }
+      await fsp.rename(tempPath, this.options.indexPath);
+    } catch (err) {
+      await fsp.rm(tempPath, { force: true });
+      throw err;
+    }
     if (process.platform !== 'win32') {
       await fsp.chmod(this.options.indexPath, 0o600);
     }
@@ -366,4 +383,12 @@ function escapeRegExp(value: string): string {
 
 export function defaultTextIndexRoot(): string {
   return path.join(os.homedir(), '.mvmt');
+}
+
+function emptySnapshot(): TextIndexSnapshot {
+  return { version: 1, indexed_at: new Date(0).toISOString(), files: [], chunks: [] };
+}
+
+function isNodeError(err: unknown): err is NodeJS.ErrnoException {
+  return err instanceof Error && 'code' in err;
 }

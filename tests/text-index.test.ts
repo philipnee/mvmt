@@ -119,6 +119,32 @@ describe('TextContextIndex', () => {
       await fs.rm(outside, { recursive: true, force: true });
     }
   });
+
+  it('returns no search results when the snapshot has not been built yet', async () => {
+    const index = createIndex(tmp);
+
+    await expect(index.search('missing')).resolves.toEqual([]);
+  });
+
+  it('fails clearly when the snapshot is corrupt', async () => {
+    await fs.writeFile(path.join(tmp, 'index.json'), '{not-json', 'utf-8');
+    const index = createIndex(tmp);
+
+    await expect(index.search('alpha')).rejects.toThrow(/failed to read text index snapshot/);
+  });
+
+  it('writes a complete snapshot without leaving temp files behind', async () => {
+    await fs.writeFile(path.join(tmp, 'note.md'), 'alpha project note', 'utf-8');
+    const index = createIndex(tmp);
+
+    await index.rebuild();
+
+    const entries = await fs.readdir(tmp);
+    expect(entries.filter((entry) => entry.endsWith('.tmp'))).toEqual([]);
+    const snapshot = JSON.parse(await fs.readFile(path.join(tmp, 'index.json'), 'utf-8'));
+    expect(snapshot).toMatchObject({ version: 1 });
+    expect(snapshot.files).toHaveLength(1);
+  });
 });
 
 function createIndex(root: string): TextContextIndex {
