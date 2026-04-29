@@ -90,10 +90,10 @@ Scope: local-first mount runtime, CLI command layer, text index, router, tests, 
 - Evidence from the code: `src/server/router.ts` defines tools, parses arguments, checks permissions, dispatches storage calls, applies plugins, and records audit entries.
 - User/developer impact: small changes to one concern are harder to review and test in isolation.
 - Risk level: Medium.
-- Proposed fix: split pure permission helpers and tool definition builders into small modules.
-- Acceptance criteria: router tests remain behavior-focused and helper modules have focused unit coverage.
-- Files likely involved: `src/server/router.ts`, `src/server/*`, `tests/router.test.ts`.
-- Status: Backlog.
+- Proposed fix: split context tool definitions and handlers into per-tool modules with a small registry.
+- Acceptance criteria: router tests remain behavior-focused; adding a new tool requires adding a module and registering it in `src/server/context-tools/index.ts`.
+- Files likely involved: `src/server/router.ts`, `src/server/context-tools/*`, `tests/router.test.ts`.
+- Status: Completed for context tool definitions and handlers. Permission helpers, plugin application, and audit remain in `ToolRouter`.
 
 ### 9. CLI command registration is concentrated in one large file
 
@@ -156,4 +156,7 @@ Scope: local-first mount runtime, CLI command layer, text index, router, tests, 
 - 2026-04-29: `npm run verify` passed.
 - 2026-04-29: `npm run verify` passed after final audit update.
 - 2026-04-29: removed leaked non-project audit finding.
+- 2026-04-29: `npm test -- --run tests/router.test.ts` passed after context tool registry extraction.
+- 2026-04-29: `npm test -- --run tests/context-tools.test.ts tests/router.test.ts tests/server.test.ts` passed after per-tool module extraction.
+- 2026-04-29: `npm run verify` passed after per-tool module extraction.
 - New findings discovered during implementation: none.

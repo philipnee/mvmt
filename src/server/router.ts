@@ -1,27 +1,23 @@
 import { CallToolResult } from '../connectors/types.js';
-import { PermissionConfig } from '../config/schema.js';
 import { normalizePathSeparators, stripTrailingSlashes } from '../context/mount-registry.js';
 import { TextContextIndex } from '../context/text-index.js';
 import { PatternRedactorAuditEvent, ToolResultPlugin } from '../plugins/types.js';
 import { AuditLogger, summarizeArgs } from '../utils/audit.js';
 import { ClientIdentity } from './client-identity.js';
+import { accessDeniedResult } from './context-tools/helpers.js';
+import {
+  CONTEXT_TOOL_BY_NAME,
+  CONTEXT_TOOLS,
+  isContextToolName,
+  type ContextToolName,
+  type NamespacedTool,
+  type PermissionAction,
+} from './context-tools/index.js';
 
-type PermissionAction = PermissionConfig['actions'][number];
-type ContextToolName = 'search' | 'list' | 'read' | 'write' | 'remove';
+export type { NamespacedTool } from './context-tools/index.js';
 
 export interface ToolRouterOptions {
   contextIndex?: TextContextIndex;
-}
-
-export interface NamespacedTool {
-  namespacedName: string;
-  originalName: string;
-  connectorId: string;
-  sourceId: string;
-  requiredAction: PermissionAction;
-  toolKind: 'semantic';
-  description: string;
-  inputSchema: Record<string, unknown>;
 }
 
 export class ToolRouter {
@@ -41,7 +37,7 @@ export class ToolRouter {
     if (this.initialized) return;
     this.initialized = true;
     if (this.contextIndex) {
-      this.contextToolDefinitions.push(...buildContextToolDefinitions());
+      this.contextToolDefinitions.push(...CONTEXT_TOOLS.map((tool) => tool.definition));
     }
   }
 
@@ -120,63 +116,21 @@ export class ToolRouter {
     identity?: ClientIdentity,
   ): Promise<CallToolResult> {
     if (!this.contextIndex) return accessDeniedResult('text_index_disabled');
-    if (name === 'search') {
-      const query = requireString(args.query, 'query');
-      const requested = optionalStringArray(args.mounts);
-      const mountNames = this.allowedContextMounts('search', identity, requested);
-      const limit = normalizeLimit(args.limit);
-      return jsonResult({
-        query,
-        ranking: 'prototype_keyword_count',
-        results: (await this.contextIndex.search(query, mountNames, limit))
-          .filter((entry) => pathAllowed(entry.path, 'search', identity)),
-      });
-    }
-
-    if (name === 'list') {
-      const inputPath = optionalString(args.path) ?? '/';
-      const mountName = inputPath === '/' ? undefined : this.contextIndex.mountNameForPath(inputPath);
-      if (mountName && !pathMayExposeEntry(inputPath, 'read', identity)) {
-        return accessDeniedResult(`missing_permission path=${inputPath} action=read`);
-      }
-      const entries = await this.contextIndex.list(inputPath);
-      return jsonResult({
-        path: inputPath,
-        entries: entries.filter((entry) => pathMayExposeEntry(entry.path, 'read', identity)),
-      });
-    }
-
-    if (name === 'read') {
-      const inputPath = requireString(args.path, 'path');
-      const mountName = this.contextIndex.mountNameForPath(inputPath);
-      if (!mountName || !pathAllowed(inputPath, 'read', identity)) {
-        return accessDeniedResult(`missing_permission path=${inputPath} action=read`);
-      }
-      return jsonResult(await this.contextIndex.read(inputPath));
-    }
-
-    if (name === 'write') {
-      const inputPath = requireString(args.path, 'path');
-      const content = requireText(args.content, 'content');
-      const expectedHash = optionalString(args.expected_hash);
-      const mountName = this.contextIndex.mountNameForPath(inputPath);
-      if (!mountName || !pathAllowed(inputPath, 'write', identity)) {
-        return accessDeniedResult(`missing_permission path=${inputPath} action=write`);
-      }
-      return jsonResult(await this.contextIndex.write(inputPath, content, expectedHash));
-    }
-
-    const inputPath = requireString(args.path, 'path');
-    const mountName = this.contextIndex.mountNameForPath(inputPath);
-    if (!mountName || !pathAllowed(inputPath, 'write', identity)) {
-      return accessDeniedResult(`missing_permission path=${inputPath} action=write`);
-    }
-    return jsonResult(await this.contextIndex.remove(inputPath));
+    return CONTEXT_TOOL_BY_NAME.get(name)!.handle(args, {
+      index: this.contextIndex,
+      identity,
+      access: {
+        allowedMounts: (action, requestedMountNames) => this.allowedContextMounts(action, identity, requestedMountNames),
+        pathAllowed: (inputPath, action) => pathAllowed(inputPath, action, identity),
+        pathMayExposeEntry: (inputPath, action) => pathMayExposeEntry(inputPath, action, identity),
+      },
+    });
   }
 
   private isContextToolVisible(name: string, identity?: ClientIdentity): boolean {
-    if (!isContextToolName(name) || !this.contextIndex) return false;
-    return actionAvailable(contextToolRequiredAction(name), identity);
+    const tool = CONTEXT_TOOL_BY_NAME.get(name as ContextToolName);
+    if (!tool || !this.contextIndex) return false;
+    return actionAvailable(tool.definition.requiredAction, identity);
   }
 
   private allowedContextMounts(
@@ -221,102 +175,6 @@ export class ToolRouter {
   }
 }
 
-function buildContextToolDefinitions(): NamespacedTool[] {
-  return [
-    {
-      namespacedName: 'search',
-      originalName: 'search',
-      connectorId: 'mvmt',
-      sourceId: 'mvmt',
-      requiredAction: 'search',
-      toolKind: 'semantic',
-      description: 'Search permitted text-file mounts and return ranked chunks from the local index.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          query: { type: 'string', description: 'Keyword or phrase to search for' },
-          mounts: { type: 'array', items: { type: 'string' }, description: 'Optional mount names to search' },
-          limit: { type: 'number', description: 'Maximum total results. Default 8, max 20' },
-        },
-        required: ['query'],
-      },
-    },
-    {
-      namespacedName: 'list',
-      originalName: 'list',
-      connectorId: 'mvmt',
-      sourceId: 'mvmt',
-      requiredAction: 'read',
-      toolKind: 'semantic',
-      description: 'List permitted mounts or a directory within one mount.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Optional path such as /workspace or /workspace/docs' },
-        },
-      },
-    },
-    {
-      namespacedName: 'read',
-      originalName: 'read',
-      connectorId: 'mvmt',
-      sourceId: 'mvmt',
-      requiredAction: 'read',
-      toolKind: 'semantic',
-      description: 'Read one permitted text file by path.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Path such as /workspace/README.md' },
-        },
-        required: ['path'],
-      },
-    },
-    {
-      namespacedName: 'write',
-      originalName: 'write',
-      connectorId: 'mvmt',
-      sourceId: 'mvmt',
-      requiredAction: 'write',
-      toolKind: 'semantic',
-      description: 'Create or overwrite one permitted text file. Optionally pass expected_hash to avoid stale writes.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Path such as /workspace/notes.md' },
-          content: { type: 'string', description: 'Full file content to write' },
-          expected_hash: { type: 'string', description: 'Optional SHA-256 hash from a previous read' },
-        },
-        required: ['path', 'content'],
-      },
-    },
-    {
-      namespacedName: 'remove',
-      originalName: 'remove',
-      connectorId: 'mvmt',
-      sourceId: 'mvmt',
-      requiredAction: 'write',
-      toolKind: 'semantic',
-      description: 'Remove one permitted text file. Protected paths are always blocked.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Path such as /workspace/old-note.md' },
-        },
-        required: ['path'],
-      },
-    },
-  ];
-}
-
-function isContextToolName(value: string): value is ContextToolName {
-  return value === 'search' || value === 'list' || value === 'read' || value === 'write' || value === 'remove';
-}
-
-function contextToolRequiredAction(name: ContextToolName): PermissionAction {
-  return name === 'search' ? 'search' : name === 'write' || name === 'remove' ? 'write' : 'read';
-}
-
 function pathAllowed(inputPath: string, action: PermissionAction, identity?: ClientIdentity): boolean {
   if (!identity || identity.isLegacyDefault) return true;
   const normalized = normalizePermissionPath(inputPath);
@@ -356,47 +214,6 @@ function normalizePermissionPath(inputPath: string): string {
   const trimmed = stripTrailingSlashes(normalizePathSeparators(inputPath.trim()));
   if (!trimmed || trimmed === '/') return '/';
   return trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
-}
-
-function requireString(value: unknown, field: string): string {
-  if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new Error(`${field} is required`);
-  }
-  return value.trim();
-}
-
-function requireText(value: unknown, field: string): string {
-  if (typeof value !== 'string') {
-    throw new Error(`${field} is required`);
-  }
-  return value;
-}
-
-function optionalString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
-}
-
-function optionalStringArray(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  return value
-    .filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
-    .map((entry) => entry.trim());
-}
-
-function normalizeLimit(value: unknown): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return 8;
-  return Math.max(1, Math.min(20, Math.floor(value)));
-}
-
-function jsonResult(value: unknown): CallToolResult {
-  return { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }] };
-}
-
-function accessDeniedResult(reason: string): CallToolResult {
-  return {
-    content: [{ type: 'text', text: `Error: access denied (${reason}).` }],
-    isError: true,
-  };
 }
 
 function extractToolText(raw: CallToolResult): string {
