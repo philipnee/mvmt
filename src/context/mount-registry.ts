@@ -72,22 +72,39 @@ export class MountRegistry {
 export function normalizeVirtualPath(inputPath: string): string {
   const trimmed = inputPath.trim();
   if (!trimmed || trimmed === '/') return '/';
-  return `/${trimmed.replace(/^\/+/, '').replace(/\\/g, '/')}`;
+  return `/${stripLeadingSlashes(normalizePathSeparators(trimmed))}`;
 }
 
 export function toVirtualRelative(inputPath: string): string {
-  return inputPath.replace(/\\/g, '/').split('/').filter(Boolean).join('/');
+  return normalizePathSeparators(inputPath).split('/').filter(Boolean).join('/');
 }
 
 export function joinVirtualPath(mountPath: string, relativePath: string): string {
-  return [mountPath.replace(/\/+$/, ''), toVirtualRelative(relativePath)].filter(Boolean).join('/');
+  return [stripTrailingSlashes(mountPath), toVirtualRelative(relativePath)].filter(Boolean).join('/');
 }
 
 function pathMatchesMount(inputPath: string, mountPath: string): boolean {
-  return inputPath === mountPath || inputPath.startsWith(`${mountPath.replace(/\/+$/, '')}/`);
+  const normalizedMountPath = stripTrailingSlashes(mountPath) || '/';
+  return inputPath === normalizedMountPath || inputPath.startsWith(`${normalizedMountPath}/`);
 }
 
 function isWithin(root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+export function normalizePathSeparators(value: string): string {
+  return value.replaceAll('\\', '/');
+}
+
+export function stripLeadingSlashes(value: string): string {
+  let start = 0;
+  while (start < value.length && value[start] === '/') start += 1;
+  return value.slice(start);
+}
+
+export function stripTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value[end - 1] === '/') end -= 1;
+  return value.slice(0, end);
 }

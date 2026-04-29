@@ -1,6 +1,6 @@
 import fsp from 'fs/promises';
 import path from 'path';
-import { joinVirtualPath, RegisteredMount, toVirtualRelative } from './mount-registry.js';
+import { joinVirtualPath, normalizePathSeparators, RegisteredMount, toVirtualRelative } from './mount-registry.js';
 
 export interface StorageProviderFile {
   mount: string;
@@ -198,7 +198,7 @@ interface ResolvedProviderPath {
 }
 
 function joinRelative(base: string, leaf: string): string {
-  return [base, leaf].filter(Boolean).join('/').replace(/\\/g, '/');
+  return normalizePathSeparators([base, leaf].filter(Boolean).join('/'));
 }
 
 function matchesAny(relativePath: string, patterns: string[]): boolean {

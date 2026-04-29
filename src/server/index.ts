@@ -837,11 +837,17 @@ function normalizeResourceUrl(value: string): string | undefined {
   try {
     const parsed = new URL(value);
     if (parsed.username || parsed.password || parsed.hash) return undefined;
-    const pathname = parsed.pathname.replace(/\/+$/, '') || '/';
+    const pathname = stripTrailingSlashes(parsed.pathname) || '/';
     return `${parsed.protocol.toLowerCase()}//${parsed.host.toLowerCase()}${pathname}${parsed.search}`;
   } catch {
     return undefined;
   }
+}
+
+function stripTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value[end - 1] === '/') end -= 1;
+  return value.slice(0, end);
 }
 
 function authorizeErrorRedirect(

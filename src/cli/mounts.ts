@@ -3,6 +3,7 @@ import chalk from 'chalk';
 import { getConfigPath, loadConfig, saveConfig } from '../config/loader.js';
 import { LocalFolderMountConfig, LocalFolderMountSchema, MvmtConfig } from '../config/schema.js';
 import { resolveSetupPath } from '../connectors/setup-paths.js';
+import { normalizePathSeparators, stripTrailingSlashes } from '../context/mount-registry.js';
 
 export interface MountCommandOptions {
   config?: string;
@@ -387,7 +388,7 @@ function assertMountNotReferenced(config: MvmtConfig, name: string): void {
 }
 
 function normalizeMountPath(value: string): string {
-  const trimmed = value.trim().replace(/\\/g, '/').replace(/\/+$/, '');
+  const trimmed = stripTrailingSlashes(normalizePathSeparators(value.trim()));
   const withSlash = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
   return withSlash === '' ? '/' : withSlash;
 }

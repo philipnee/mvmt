@@ -365,6 +365,23 @@ describe('ToolRouter', () => {
     }
   });
 
+  it('normalizes permission paths with trailing slashes without regex backtracking', async () => {
+    const { index, tmp } = await createTextIndexFixture();
+    try {
+      const router = new ToolRouter([], undefined, [], { contextIndex: index });
+      await router.initialize();
+      const identity = client('codex', false, [{ path: '/workspace/**////', actions: ['read'] }]);
+
+      expect(router.getAllTools(identity).map((tool) => tool.namespacedName)).toEqual(['list', 'read']);
+      const result = await router.callTool('read', { path: '/workspace/note.md' }, identity);
+      const parsed = JSON.parse(result.content[0].type === 'text' ? result.content[0].text : '{}');
+
+      expect(parsed).toMatchObject({ path: '/workspace/note.md', content: 'alpha note' });
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('allows targeted reads with an exact file permission', async () => {
     const { index, tmp } = await createTextIndexFixture();
     try {
