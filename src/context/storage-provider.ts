@@ -1,6 +1,7 @@
 import fsp from 'fs/promises';
 import path from 'path';
 import { joinVirtualPath, normalizePathSeparators, RegisteredMount, toVirtualRelative } from './mount-registry.js';
+import { isGloballyDeniedPath, matchesConfiguredOrGlobalPattern } from './path-policy.js';
 
 export interface StorageProviderFile {
   mount: string;
@@ -108,6 +109,9 @@ export class LocalFolderStorageProvider implements StorageProvider {
     const target = this.resolve(relativePath);
     this.assertWritable(target);
     this.assertTextPath(target.virtualPath);
+    if (Buffer.byteLength(content, 'utf-8') > this.options.maxTextBytes) {
+      throw new Error(`${target.virtualPath} is too large to write as text`);
+    }
     await this.assertRealPathWithinMount(target, { allowMissingLeaf: true });
     await fsp.mkdir(path.dirname(target.realPath), { recursive: true });
     await fsp.writeFile(target.realPath, content, 'utf-8');
@@ -160,6 +164,9 @@ export class LocalFolderStorageProvider implements StorageProvider {
     const realPath = this.realPath(normalized);
     if (!isWithin(this.mount.root, realPath)) {
       throw new Error(`${joinVirtualPath(this.mount.config.path, normalized)} escapes mount root`);
+    }
+    if (isGloballyDeniedPath(normalized, realPath)) {
+      throw new Error(`${joinVirtualPath(this.mount.config.path, normalized)} is globally denied`);
     }
     return {
       relativePath: normalized,
@@ -233,11 +240,11 @@ export class LocalFolderStorageProvider implements StorageProvider {
   }
 
   private isExcluded(relativePath: string): boolean {
-    return matchesAny(relativePath, this.mount.config.exclude);
+    return matchesConfiguredOrGlobalPattern(relativePath, this.mount.config.exclude);
   }
 
   private isProtected(relativePath: string): boolean {
-    return matchesAny(relativePath, this.mount.config.protect);
+    return matchesConfiguredOrGlobalPattern(relativePath, this.mount.config.protect);
   }
 }
 
@@ -251,33 +258,9 @@ function joinRelative(base: string, leaf: string): string {
   return normalizePathSeparators([base, leaf].filter(Boolean).join('/'));
 }
 
-function matchesAny(relativePath: string, patterns: string[]): boolean {
-  const normalized = toVirtualRelative(relativePath);
-  return patterns.some((pattern) => {
-    const normalizedPattern = toVirtualRelative(pattern);
-    if (normalizedPattern.endsWith('/**')) {
-      const prefix = normalizedPattern.slice(0, -3);
-      return normalized === prefix || normalized.startsWith(`${prefix}/`);
-    }
-    return globToRegExp(pattern).test(normalized);
-  });
-}
-
-function globToRegExp(pattern: string): RegExp {
-  const normalized = toVirtualRelative(pattern);
-  const escaped = escapeRegExp(normalized)
-    .replace(/\\\*\\\*/g, '.*')
-    .replace(/\\\*/g, '[^/]*');
-  return new RegExp(`^${escaped}$`);
-}
-
 function isWithin(root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function isMissingPathError(err: unknown): boolean {

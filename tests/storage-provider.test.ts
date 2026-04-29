@@ -72,6 +72,30 @@ describe('LocalFolderStorageProvider', () => {
     await expect(provider.write('new.md', 'content')).rejects.toThrow('read-only');
   });
 
+  it('rejects over-size writes before creating the file', async () => {
+    const provider = createProvider(tmp, true, 4);
+
+    await expect(provider.write('large.md', '12345')).rejects.toThrow('too large to write');
+    expect(await provider.exists('large.md')).toBe(false);
+  });
+
+  it('blocks globally sensitive paths even when config omits them', async () => {
+    await fs.mkdir(path.join(tmp, '.mvmt'));
+    await fs.writeFile(path.join(tmp, '.mvmt', '.session-token'), 'secret', 'utf-8');
+    const provider = createProvider(tmp, true);
+
+    await expect(provider.read('.mvmt/.session-token')).rejects.toThrow(/excluded|globally denied/);
+  });
+
+  it('blocks mounts rooted inside globally sensitive directories', async () => {
+    const sensitiveRoot = path.join(tmp, '.mvmt');
+    await fs.mkdir(sensitiveRoot);
+    await fs.writeFile(path.join(sensitiveRoot, 'config.yaml'), 'secret', 'utf-8');
+    const provider = createProvider(sensitiveRoot, true);
+
+    await expect(provider.read('config.yaml')).rejects.toThrow('globally denied');
+  });
+
   itUnlessWindows('blocks symlink escapes for direct and nested paths', async () => {
     const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-storage-provider-outside-'));
     try {
@@ -90,7 +114,7 @@ describe('LocalFolderStorageProvider', () => {
   });
 });
 
-function createProvider(root: string, writeAccess: boolean): LocalFolderStorageProvider {
+function createProvider(root: string, writeAccess: boolean, maxTextBytes = 2 * 1024 * 1024): LocalFolderStorageProvider {
   const config = parseConfig({
     version: 1,
     mounts: [
@@ -108,6 +132,6 @@ function createProvider(root: string, writeAccess: boolean): LocalFolderStorageP
   const mount = new MountRegistry(config.mounts).mounts()[0];
   return new LocalFolderStorageProvider(mount, {
     isTextPath: (inputPath) => ['.md', '.txt'].includes(path.extname(inputPath)),
-    maxTextBytes: 2 * 1024 * 1024,
+    maxTextBytes,
   });
 }

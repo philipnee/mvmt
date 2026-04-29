@@ -12,6 +12,7 @@ import {
   CodeChallengeMethod,
   OAuthClientAlreadyRegisteredError,
   OAuthClientPersistenceError,
+  OAuthClientRegistryLimitError,
   OAuthError,
   OAuthStore,
   getBaseUrl,
@@ -343,6 +344,14 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
         res.status(500).json({
           error: 'server_error',
           error_description: 'Failed to persist OAuth client registration',
+        });
+        return;
+      }
+      if (err instanceof OAuthClientRegistryLimitError) {
+        logHttpRequest(requestLog, req, 429, 'oauth.register', 'registry_limit', clientId);
+        res.status(429).json({
+          error: 'invalid_client_metadata',
+          error_description: err.message,
         });
         return;
       }

@@ -1,5 +1,36 @@
 import { z } from 'zod';
 
+export const GLOBAL_SECRET_PATH_PATTERNS = [
+  '.mvmt/**',
+  '.ssh/**',
+  '.gnupg/**',
+  '.aws/**',
+  '.config/gh/**',
+  '.config/gcloud/**',
+  '.config/azure/**',
+  '.kube/**',
+  '.docker/**',
+  '.docker/config.json',
+  '.npmrc',
+  '.netrc',
+  '.pypirc',
+  '.git-credentials',
+] as const;
+
+export const DEFAULT_MOUNT_EXCLUDE_PATTERNS = [
+  '.git/**',
+  'node_modules/**',
+  '.claude/**',
+  ...GLOBAL_SECRET_PATH_PATTERNS,
+] as const;
+
+export const DEFAULT_MOUNT_PROTECT_PATTERNS = [
+  '.env',
+  '.env.*',
+  '.claude/**',
+  ...GLOBAL_SECRET_PATH_PATTERNS,
+] as const;
+
 export const TunnelSchema = z.object({
   provider: z.enum(['cloudflare-quick', 'pinggy', 'localhost-run', 'custom']),
   command: z.string().min(1),
@@ -126,8 +157,8 @@ export const LocalFolderMountSchema = z.object({
   root: z.string().min(1),
   description: z.string().default(''),
   guidance: z.string().default(''),
-  exclude: z.array(z.string().min(1)).default(['.git/**', 'node_modules/**', '.claude/**']),
-  protect: z.array(z.string().min(1)).default(['.env', '.env.*', '.claude/**']),
+  exclude: z.array(z.string().min(1)).default(() => [...DEFAULT_MOUNT_EXCLUDE_PATTERNS]),
+  protect: z.array(z.string().min(1)).default(() => [...DEFAULT_MOUNT_PROTECT_PATTERNS]),
   writeAccess: z.boolean().default(false),
   enabled: z.boolean().default(true),
 });

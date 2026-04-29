@@ -9,6 +9,8 @@ mvmt is local-first and binds to `127.0.0.1`. Cloud clients such as claude.ai or
 
 Quick tunnels are temporary. Use a named tunnel or reserved domain if you need the same URL across restarts.
 
+Tunnel mode requires `clients[]`. This prevents public tunnel traffic from using the legacy all-mount session-token identity. For temporary debugging only, set `MVMT_ALLOW_LEGACY_TUNNEL=1` to bypass this guard.
+
 ## Built-in tunnel providers
 
 | Provider | Recommendation | Command | Public URL |
@@ -40,6 +42,7 @@ Use a narrow config before exposing mvmt:
 - Read-only mounts.
 - Low-risk folders or throwaway notes.
 - No production secrets in config.
+- No broad home-directory mounts.
 - Stop the tunnel when you are done using remote access.
 
 For a stable URL, use a named tunnel or reserved domain instead of a quick tunnel.

@@ -31,6 +31,9 @@ mounts:
     protect:
       - .claude/**
       - .env
+      - .mvmt/**
+      - .ssh/**
+      - .aws/**
     writeAccess: true
     enabled: true
 ```
@@ -55,6 +58,9 @@ mvmt mounts edit workspace --description 'Read-only notes archive' \
 mvmt mounts edit workspace --root /Users/you/code/other --write
 mvmt mounts remove workspace
 ```
+
+mvmt also enforces a global secret-path deny list for `.mvmt/**`, `.ssh/**`,
+`.aws/**`, `.kube/**`, and common credential files even if a mount omits them.
 
 In interactive mode (`mvmt serve -i`), use:
 

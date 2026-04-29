@@ -87,6 +87,10 @@ For writes, both checks must pass:
 
 Protected paths remain blocked even when both checks pass.
 
+Tunnel mode requires `clients[]` by default so public traffic cannot fall back to the legacy all-mount session-token identity. `MVMT_ALLOW_LEGACY_TUNNEL=1` exists only as a temporary debugging escape hatch.
+
+Mount access has two layers of path filtering: per-mount `exclude`/`protect` patterns and a global secret-path deny list. The global list blocks paths such as `.mvmt/**`, `.ssh/**`, `.aws/**`, `.kube/**`, and common credential files even when an older config omits those patterns.
+
 ## Known Limits
 
 - Localhost traffic is plaintext. The OS user remains the main trust boundary.

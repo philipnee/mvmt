@@ -70,6 +70,8 @@ export interface OAuthStoreOptions {
   codeTtlMs?: number;
   tokenTtlMs?: number;
   refreshTokenTtlMs?: number;
+  maxRegisteredClients?: number;
+  maxRedirectUrisPerClient?: number;
   // Key material used to sign and validate self-contained access tokens.
   // Pass a function when the key can change at runtime (e.g. backed by a
   // file that `mvmt token rotate` rewrites) so rotation invalidates
@@ -82,6 +84,10 @@ export interface OAuthStoreOptions {
 const DEFAULT_CODE_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const DEFAULT_MAX_REGISTERED_CLIENTS = 100;
+const DEFAULT_MAX_REDIRECT_URIS_PER_CLIENT = 10;
+const MAX_CLIENT_ID_LENGTH = 128;
+const MAX_REDIRECT_URI_LENGTH = 2048;
 const ACCESS_TOKEN_PREFIX = 'mvmtv1';
 const REFRESH_TOKEN_PREFIX = 'mvmtr1';
 
@@ -92,6 +98,7 @@ export interface RegisteredClient {
 
 export class OAuthClientAlreadyRegisteredError extends Error {}
 export class OAuthClientPersistenceError extends Error {}
+export class OAuthClientRegistryLimitError extends Error {}
 
 export class OAuthStore {
   private readonly codes = new Map<string, AuthorizationCode>();
@@ -99,6 +106,8 @@ export class OAuthStore {
   private readonly codeTtlMs: number;
   private readonly tokenTtlMs: number;
   private readonly refreshTokenTtlMs: number;
+  private readonly maxRegisteredClients: number;
+  private readonly maxRedirectUrisPerClient: number;
   private readonly resolveSigningKey: () => string;
   private readonly clientsPath?: string;
   private readonly now: () => number;
@@ -107,6 +116,8 @@ export class OAuthStore {
     this.codeTtlMs = options.codeTtlMs ?? DEFAULT_CODE_TTL_MS;
     this.tokenTtlMs = options.tokenTtlMs ?? DEFAULT_TOKEN_TTL_MS;
     this.refreshTokenTtlMs = options.refreshTokenTtlMs ?? DEFAULT_REFRESH_TOKEN_TTL_MS;
+    this.maxRegisteredClients = options.maxRegisteredClients ?? DEFAULT_MAX_REGISTERED_CLIENTS;
+    this.maxRedirectUrisPerClient = options.maxRedirectUrisPerClient ?? DEFAULT_MAX_REDIRECT_URIS_PER_CLIENT;
     const keyOption = options.signingKey;
     if (typeof keyOption === 'function') {
       this.resolveSigningKey = keyOption;
@@ -131,14 +142,8 @@ export class OAuthStore {
   }
 
   registerClient(client: RegisteredClient): RegisteredClient {
-    const normalized: RegisteredClient = {
-      clientId: client.clientId,
-      redirectUris: [...new Set(client.redirectUris.filter((uri) => typeof uri === 'string' && uri.length > 0))],
-    };
-    const existing = this.clients.get(normalized.clientId);
-    if (existing) {
-      throw new OAuthClientAlreadyRegisteredError('OAuth client_id is already registered');
-    }
+    const normalized = this.normalizeRegisteredClient(client);
+    this.assertClientCanBeRegistered(normalized);
     this.clients.set(normalized.clientId, normalized);
     try {
       this.persistClients();
@@ -157,6 +162,31 @@ export class OAuthStore {
     const client = this.clients.get(clientId);
     if (!client) return false;
     return client.redirectUris.includes(redirectUri);
+  }
+
+  private normalizeRegisteredClient(client: RegisteredClient): RegisteredClient {
+    return {
+      clientId: client.clientId,
+      redirectUris: [...new Set(client.redirectUris.filter((uri) => typeof uri === 'string' && uri.length > 0))],
+    };
+  }
+
+  private assertClientCanBeRegistered(client: RegisteredClient): void {
+    if (client.clientId.length > MAX_CLIENT_ID_LENGTH) {
+      throw new OAuthClientRegistryLimitError(`client_id exceeds ${MAX_CLIENT_ID_LENGTH} characters`);
+    }
+    if (client.redirectUris.length > this.maxRedirectUrisPerClient) {
+      throw new OAuthClientRegistryLimitError(`redirect_uris exceeds ${this.maxRedirectUrisPerClient} entries`);
+    }
+    if (client.redirectUris.some((uri) => uri.length > MAX_REDIRECT_URI_LENGTH)) {
+      throw new OAuthClientRegistryLimitError(`redirect_uri exceeds ${MAX_REDIRECT_URI_LENGTH} characters`);
+    }
+    if (this.clients.has(client.clientId)) {
+      throw new OAuthClientAlreadyRegisteredError('OAuth client_id is already registered');
+    }
+    if (this.clients.size >= this.maxRegisteredClients) {
+      throw new OAuthClientRegistryLimitError(`OAuth client registry is limited to ${this.maxRegisteredClients} clients`);
+    }
   }
 
   private loadClientsFromDisk(): void {
