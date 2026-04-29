@@ -103,12 +103,17 @@ does not list them.
 
 ## Quick start
 
-Install and start mvmt:
+Run mvmt from this source checkout:
 
 ```bash
-npm install -g mvmt
+npm install
+npm run build
+npm link
 mvmt serve -i
 ```
+
+The current npm package named `mvmt` is not this CLI release yet. Until this
+package is published with the `mvmt` executable, use the source install above.
 
 On first run, mvmt creates:
 
