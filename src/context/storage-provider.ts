@@ -1,0 +1,231 @@
+import fsp from 'fs/promises';
+import path from 'path';
+import { joinVirtualPath, RegisteredMount, toVirtualRelative } from './mount-registry.js';
+
+export interface StorageProviderFile {
+  mount: string;
+  path: string;
+  relativePath: string;
+  content: string;
+  size: number;
+  mtimeMs: number;
+}
+
+export interface StorageProviderEntry {
+  mount: string;
+  path: string;
+  relativePath: string;
+  type: 'file' | 'directory';
+  size: number;
+  mtimeMs: number;
+}
+
+export interface StorageProvider {
+  readonly mount: RegisteredMount;
+  list(relativePath?: string): Promise<StorageProviderEntry[]>;
+  exists(relativePath: string): Promise<boolean>;
+  read(relativePath: string): Promise<StorageProviderFile>;
+  write(relativePath: string, content: string): Promise<StorageProviderFile>;
+  remove(relativePath: string): Promise<void>;
+  walkTextFiles(): AsyncIterable<StorageProviderFile>;
+}
+
+export interface LocalFolderStorageProviderOptions {
+  isTextPath(path: string): boolean;
+  maxTextBytes: number;
+}
+
+export class LocalFolderStorageProvider implements StorageProvider {
+  constructor(
+    readonly mount: RegisteredMount,
+    private readonly options: LocalFolderStorageProviderOptions,
+  ) {}
+
+  async list(relativePath = ''): Promise<StorageProviderEntry[]> {
+    const target = this.resolve(relativePath);
+    const stat = await fsp.stat(target.realPath);
+    if (!stat.isDirectory()) {
+      return [{
+        mount: this.mount.config.name,
+        path: target.virtualPath,
+        relativePath: target.relativePath,
+        type: 'file',
+        size: stat.size,
+        mtimeMs: stat.mtimeMs,
+      }];
+    }
+
+    const entries = await fsp.readdir(target.realPath, { withFileTypes: true });
+    const result: StorageProviderEntry[] = [];
+    for (const entry of entries) {
+      const childRelative = joinRelative(target.relativePath, entry.name);
+      if (this.isExcluded(childRelative)) continue;
+      if (!entry.isDirectory() && !this.options.isTextPath(entry.name)) continue;
+      const realPath = path.join(target.realPath, entry.name);
+      const itemStat = await fsp.stat(realPath);
+      result.push({
+        mount: this.mount.config.name,
+        path: joinVirtualPath(this.mount.config.path, childRelative),
+        relativePath: childRelative,
+        type: entry.isDirectory() ? 'directory' : 'file',
+        size: itemStat.size,
+        mtimeMs: itemStat.mtimeMs,
+      });
+    }
+    return result.sort((a, b) => a.path.localeCompare(b.path));
+  }
+
+  async exists(relativePath: string): Promise<boolean> {
+    try {
+      await fsp.access(this.resolve(relativePath).realPath);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async read(relativePath: string): Promise<StorageProviderFile> {
+    const target = this.resolve(relativePath);
+    this.assertTextPath(target.virtualPath);
+    const stat = await fsp.stat(target.realPath);
+    if (!stat.isFile()) throw new Error(`${target.virtualPath} is not a file`);
+    if (stat.size > this.options.maxTextBytes) throw new Error(`${target.virtualPath} is too large to read as text`);
+    const content = await fsp.readFile(target.realPath, 'utf-8');
+    return {
+      mount: this.mount.config.name,
+      path: target.virtualPath,
+      relativePath: target.relativePath,
+      content,
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+    };
+  }
+
+  async write(relativePath: string, content: string): Promise<StorageProviderFile> {
+    const target = this.resolve(relativePath);
+    this.assertWritable(target);
+    this.assertTextPath(target.virtualPath);
+    await fsp.mkdir(path.dirname(target.realPath), { recursive: true });
+    await fsp.writeFile(target.realPath, content, 'utf-8');
+    return this.read(relativePath);
+  }
+
+  async remove(relativePath: string): Promise<void> {
+    const target = this.resolve(relativePath);
+    this.assertWritable(target);
+    const stat = await fsp.stat(target.realPath);
+    if (!stat.isFile()) throw new Error(`${target.virtualPath} is not a file`);
+    await fsp.unlink(target.realPath);
+  }
+
+  async *walkTextFiles(): AsyncIterable<StorageProviderFile> {
+    yield* this.walkDirectory('');
+  }
+
+  private async *walkDirectory(relativePath: string): AsyncIterable<StorageProviderFile> {
+    let entries;
+    try {
+      entries = await fsp.readdir(this.realPath(relativePath), { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      const childRelative = joinRelative(relativePath, entry.name);
+      if (this.isExcluded(childRelative)) continue;
+      if (entry.isDirectory()) {
+        yield* this.walkDirectory(childRelative);
+        continue;
+      }
+      if (!entry.isFile() || !this.options.isTextPath(entry.name)) continue;
+
+      try {
+        yield await this.read(childRelative);
+      } catch {
+        // Unsupported, unreadable, and over-size files are skipped by indexing.
+      }
+    }
+  }
+
+  private resolve(relativePath: string): ResolvedProviderPath {
+    const normalized = toVirtualRelative(relativePath);
+    if (this.isExcluded(normalized)) {
+      throw new Error(`${joinVirtualPath(this.mount.config.path, normalized)} is excluded`);
+    }
+    const realPath = this.realPath(normalized);
+    if (!isWithin(this.mount.root, realPath)) {
+      throw new Error(`${joinVirtualPath(this.mount.config.path, normalized)} escapes mount root`);
+    }
+    return {
+      relativePath: normalized,
+      realPath,
+      virtualPath: normalized ? joinVirtualPath(this.mount.config.path, normalized) : this.mount.config.path,
+    };
+  }
+
+  private realPath(relativePath: string): string {
+    return path.resolve(this.mount.root, toVirtualRelative(relativePath));
+  }
+
+  private assertWritable(target: ResolvedProviderPath): void {
+    if (!this.mount.config.writeAccess) {
+      throw new Error(`${this.mount.config.name} is read-only`);
+    }
+    if (this.isProtected(target.relativePath)) {
+      throw new Error(`${target.virtualPath} is protected`);
+    }
+  }
+
+  private assertTextPath(inputPath: string): void {
+    if (!this.options.isTextPath(inputPath)) {
+      throw new Error(`${inputPath} is not a supported text file`);
+    }
+  }
+
+  private isExcluded(relativePath: string): boolean {
+    return matchesAny(relativePath, this.mount.config.exclude);
+  }
+
+  private isProtected(relativePath: string): boolean {
+    return matchesAny(relativePath, this.mount.config.protect);
+  }
+}
+
+interface ResolvedProviderPath {
+  relativePath: string;
+  realPath: string;
+  virtualPath: string;
+}
+
+function joinRelative(base: string, leaf: string): string {
+  return [base, leaf].filter(Boolean).join('/').replace(/\\/g, '/');
+}
+
+function matchesAny(relativePath: string, patterns: string[]): boolean {
+  const normalized = toVirtualRelative(relativePath);
+  return patterns.some((pattern) => {
+    const normalizedPattern = toVirtualRelative(pattern);
+    if (normalizedPattern.endsWith('/**')) {
+      const prefix = normalizedPattern.slice(0, -3);
+      return normalized === prefix || normalized.startsWith(`${prefix}/`);
+    }
+    return globToRegExp(pattern).test(normalized);
+  });
+}
+
+function globToRegExp(pattern: string): RegExp {
+  const normalized = toVirtualRelative(pattern);
+  const escaped = escapeRegExp(normalized)
+    .replace(/\\\*\\\*/g, '.*')
+    .replace(/\\\*/g, '[^/]*');
+  return new RegExp(`^${escaped}$`);
+}
+
+function isWithin(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}

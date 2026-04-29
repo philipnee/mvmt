@@ -1,16 +1,17 @@
 import crypto from 'crypto';
 import fsp from 'fs/promises';
-import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { LocalFolderMountConfig } from '../config/schema.js';
 import {
-  joinVirtualPath,
   MountRegistry,
-  RegisteredMount,
   ResolvedMountPath,
-  toVirtualRelative,
 } from './mount-registry.js';
+import {
+  LocalFolderStorageProvider,
+  StorageProvider,
+  StorageProviderFile,
+} from './storage-provider.js';
 
 const TEXT_EXTENSIONS = new Set([
   '.md',
@@ -124,9 +125,19 @@ export function defaultTextIndexPath(configPath: string): string {
 
 export class TextContextIndex {
   private readonly registry: MountRegistry;
+  private readonly providers: Map<string, StorageProvider>;
 
   constructor(private readonly options: TextContextIndexOptions) {
     this.registry = new MountRegistry(options.mounts);
+    this.providers = new Map(
+      this.registry.mounts().map((mount) => [
+        mount.config.name,
+        new LocalFolderStorageProvider(mount, {
+          isTextPath,
+          maxTextBytes: MAX_TEXT_BYTES,
+        }),
+      ]),
+    );
   }
 
   mountNames(): string[] {
@@ -150,7 +161,10 @@ export class TextContextIndex {
     const chunks: IndexedChunk[] = [];
 
     for (const mount of this.registry.mounts()) {
-      await this.indexDirectory(mount, mount.root, files, chunks);
+      const provider = this.providerForMount(mount.config.name);
+      for await (const file of provider.walkTextFiles()) {
+        this.indexFile(file, files, chunks);
+      }
     }
 
     await this.writeSnapshot({ version: 1, indexed_at: new Date().toISOString(), files, chunks });
@@ -196,58 +210,23 @@ export class TextContextIndex {
     }
 
     const resolved = this.resolvePath(inputPath);
-    const stat = await fsp.stat(resolved.realPath);
-    if (!stat.isDirectory()) {
-      return [{
-        mount: resolved.mount.config.name,
-        path: resolved.virtualPath,
-        type: 'file',
-        size: stat.size,
-        mtime_ms: stat.mtimeMs,
-      }];
-    }
-
-    const entries = await fsp.readdir(resolved.realPath, { withFileTypes: true });
-    const result: TextListEntry[] = [];
-    for (const entry of entries) {
-      const relative = joinVirtualRelative(resolved.relativePath, entry.name);
-      if (this.isExcluded(resolved.mount, relative)) continue;
-      if (!entry.isDirectory() && !isTextPath(entry.name)) continue;
-      const realPath = path.join(resolved.realPath, entry.name);
-      const itemStat = await fsp.stat(realPath);
-      result.push({
-        mount: resolved.mount.config.name,
-        path: joinVirtualPath(resolved.mount.config.path, relative),
-        type: entry.isDirectory() ? 'directory' : 'file',
-        size: itemStat.size,
-        mtime_ms: itemStat.mtimeMs,
-      });
-    }
-    return result.sort((a, b) => a.path.localeCompare(b.path));
+    return (await this.providerForResolved(resolved).list(resolved.relativePath)).map((entry) => ({
+      mount: entry.mount,
+      path: entry.path,
+      type: entry.type,
+      size: entry.size,
+      mtime_ms: entry.mtimeMs,
+    }));
   }
 
   async read(inputPath: string): Promise<TextReadResult> {
     const resolved = this.resolvePath(inputPath);
-    this.assertTextPath(resolved.virtualPath);
-    const stat = await fsp.stat(resolved.realPath);
-    if (!stat.isFile()) throw new Error(`${resolved.virtualPath} is not a file`);
-    if (stat.size > MAX_TEXT_BYTES) throw new Error(`${resolved.virtualPath} is too large to read as text`);
-    const content = await fsp.readFile(resolved.realPath, 'utf-8');
-    return {
-      mount: resolved.mount.config.name,
-      path: resolved.virtualPath,
-      content,
-      mime_type: 'text/plain',
-      size: stat.size,
-      hash: sha256(content),
-      mtime_ms: stat.mtimeMs,
-    };
+    return this.toReadResult(await this.providerForResolved(resolved).read(resolved.relativePath));
   }
 
   async write(inputPath: string, content: string, expectedHash?: string): Promise<TextReadResult> {
     const resolved = this.resolvePath(inputPath);
-    this.assertWritable(resolved);
-    this.assertTextPath(resolved.virtualPath);
+    const provider = this.providerForResolved(resolved);
     if (expectedHash) {
       try {
         const current = await this.read(inputPath);
@@ -255,94 +234,63 @@ export class TextContextIndex {
           throw new Error(`hash mismatch for ${resolved.virtualPath}`);
         }
       } catch (err) {
-        if ((err instanceof Error && err.message.includes('hash mismatch')) || fs.existsSync(resolved.realPath)) {
+        if ((err instanceof Error && err.message.includes('hash mismatch')) || await provider.exists(resolved.relativePath)) {
           throw err;
         }
       }
     }
-    await fsp.mkdir(path.dirname(resolved.realPath), { recursive: true });
-    await fsp.writeFile(resolved.realPath, content, 'utf-8');
-    const read = await this.read(inputPath);
+    const read = this.toReadResult(await provider.write(resolved.relativePath, content));
     await this.rebuild();
     return read;
   }
 
   async delete(inputPath: string): Promise<{ mount: string; path: string; deleted: true }> {
     const resolved = this.resolvePath(inputPath);
-    this.assertWritable(resolved);
-    const stat = await fsp.stat(resolved.realPath);
-    if (!stat.isFile()) throw new Error(`${resolved.virtualPath} is not a file`);
-    await fsp.unlink(resolved.realPath);
+    await this.providerForResolved(resolved).remove(resolved.relativePath);
     await this.rebuild();
     return { mount: resolved.mount.config.name, path: resolved.virtualPath, deleted: true };
   }
 
-  private async indexDirectory(
-    mount: RegisteredMount,
-    directory: string,
+  private indexFile(
+    file: StorageProviderFile,
     files: IndexedFile[],
     chunks: IndexedChunk[],
-  ): Promise<void> {
-    let entries;
-    try {
-      entries = await fsp.readdir(directory, { withFileTypes: true });
-    } catch {
-      return;
-    }
-
-    for (const entry of entries) {
-      const realPath = path.join(directory, entry.name);
-      const relative = toVirtualRelative(path.relative(mount.root, realPath));
-      if (this.isExcluded(mount, relative)) continue;
-      if (entry.isDirectory()) {
-        await this.indexDirectory(mount, realPath, files, chunks);
-        continue;
-      }
-      if (!entry.isFile() || !isTextPath(entry.name)) continue;
-
-      const stat = await fsp.stat(realPath);
-      if (stat.size > MAX_TEXT_BYTES) continue;
-      const text = await fsp.readFile(realPath, 'utf-8');
-      const hash = sha256(text);
-      const virtualPath = joinVirtualPath(mount.config.path, relative);
-      files.push({
-        mount: mount.config.name,
-        path: virtualPath,
-        hash,
-        size: stat.size,
-        mtime_ms: stat.mtimeMs,
-      });
-      chunks.push(...chunkText(mount.config.name, virtualPath, text, hash, stat.mtimeMs));
-    }
+  ): void {
+    const hash = sha256(file.content);
+    files.push({
+      mount: file.mount,
+      path: file.path,
+      hash,
+      size: file.size,
+      mtime_ms: file.mtimeMs,
+    });
+    chunks.push(...chunkText(file.mount, file.path, file.content, hash, file.mtimeMs));
   }
 
   private resolvePath(inputPath: string): ResolvedMountPath {
-    const resolved = this.registry.resolve(inputPath);
-    if (this.isExcluded(resolved.mount, resolved.relativePath)) throw new Error(`${resolved.virtualPath} is excluded`);
-    return resolved;
+    return this.registry.resolve(inputPath);
   }
 
-  private assertWritable(resolved: { mount: RegisteredMount; relativePath: string; virtualPath: string }): void {
-    if (!resolved.mount.config.writeAccess) {
-      throw new Error(`${resolved.mount.config.name} is read-only`);
-    }
-    if (this.isProtected(resolved.mount, resolved.relativePath)) {
-      throw new Error(`${resolved.virtualPath} is protected`);
-    }
+  private providerForResolved(resolved: ResolvedMountPath): StorageProvider {
+    return this.providerForMount(resolved.mount.config.name);
   }
 
-  private assertTextPath(inputPath: string): void {
-    if (!isTextPath(inputPath)) {
-      throw new Error(`${inputPath} is not a supported text file`);
-    }
+  private providerForMount(mountName: string): StorageProvider {
+    const provider = this.providers.get(mountName);
+    if (!provider) throw new Error(`no provider registered for mount: ${mountName}`);
+    return provider;
   }
 
-  private isExcluded(mount: RegisteredMount, relativePath: string): boolean {
-    return matchesAny(relativePath, mount.config.exclude);
-  }
-
-  private isProtected(mount: RegisteredMount, relativePath: string): boolean {
-    return matchesAny(relativePath, mount.config.protect);
+  private toReadResult(file: StorageProviderFile): TextReadResult {
+    return {
+      mount: file.mount,
+      path: file.path,
+      content: file.content,
+      mime_type: 'text/plain',
+      size: file.size,
+      hash: sha256(file.content),
+      mtime_ms: file.mtimeMs,
+    };
   }
 
   private async readSnapshot(): Promise<TextIndexSnapshot> {
@@ -406,30 +354,6 @@ function snippetFor(text: string, terms: string[]): string {
     .sort((a, b) => a - b)[0] ?? 0;
   const start = Math.max(0, first - 160);
   return text.slice(start, start + 500).replace(/\s+/g, ' ').trim();
-}
-
-function joinVirtualRelative(base: string, leaf: string): string {
-  return [base, leaf].filter(Boolean).join('/').replace(/\\/g, '/');
-}
-
-function matchesAny(relativePath: string, patterns: string[]): boolean {
-  const normalized = toVirtualRelative(relativePath);
-  return patterns.some((pattern) => {
-    const normalizedPattern = toVirtualRelative(pattern);
-    if (normalizedPattern.endsWith('/**')) {
-      const prefix = normalizedPattern.slice(0, -3);
-      return normalized === prefix || normalized.startsWith(`${prefix}/`);
-    }
-    return globToRegExp(pattern).test(normalized);
-  });
-}
-
-function globToRegExp(pattern: string): RegExp {
-  const normalized = toVirtualRelative(pattern);
-  const escaped = escapeRegExp(normalized)
-    .replace(/\\\*\\\*/g, '.*')
-    .replace(/\\\*/g, '[^/]*');
-  return new RegExp(`^${escaped}$`);
 }
 
 function sha256(value: string): string {
