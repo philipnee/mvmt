@@ -2,7 +2,7 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { describe, expect, it } from 'vitest';
-import { createTemporaryFilesystemConfig, readFilesystemPaths } from '../src/cli/config.js';
+import { createTemporaryFilesystemConfig } from '../src/cli/config.js';
 
 describe('createTemporaryFilesystemConfig', () => {
   it('creates a temporary read-only filesystem config without touching saved config', async () => {
@@ -16,18 +16,25 @@ describe('createTemporaryFilesystemConfig', () => {
         port: 4142,
         access: 'local',
       });
-      expect(result.config.proxy).toHaveLength(1);
-      expect(result.config.proxy[0]).toMatchObject({
-        name: 'filesystem',
-        writeAccess: false,
-      });
-      expect(readFilesystemPaths(result.config.proxy[0])).toEqual([
-        path.join(os.homedir(), 'Documents'),
-        '/tmp/demo',
+      expect(result.config.proxy).toHaveLength(0);
+      expect(result.config.mounts).toEqual([
+        expect.objectContaining({
+          name: 'documents',
+          path: '/documents',
+          root: path.join(os.homedir(), 'Documents'),
+          writeAccess: false,
+        }),
+        expect.objectContaining({
+          name: 'demo',
+          path: '/demo',
+          root: '/tmp/demo',
+          writeAccess: false,
+        }),
       ]);
 
       const raw = await fs.readFile(result.configPath, 'utf-8');
-      expect(raw).toContain('@modelcontextprotocol/server-filesystem');
+      expect(raw).toContain('mounts:');
+      expect(raw).toContain('/tmp/demo');
     } finally {
       await result.cleanup();
     }
@@ -39,9 +46,27 @@ describe('createTemporaryFilesystemConfig', () => {
     });
 
     try {
-      expect(readFilesystemPaths(result.config.proxy[0])).toEqual([
-        path.join(os.homedir(), 'Documents'),
+      expect(result.config.mounts).toEqual([
+        expect.objectContaining({
+          name: 'documents',
+          root: path.join(os.homedir(), 'Documents'),
+        }),
       ]);
+    } finally {
+      await result.cleanup();
+    }
+  });
+
+  it('keeps temporary mounts read-only', async () => {
+    const result = await createTemporaryFilesystemConfig({
+      paths: ['/tmp/demo'],
+    });
+
+    try {
+      expect(result.config.mounts[0]).toMatchObject({
+        name: 'demo',
+        writeAccess: false,
+      });
     } finally {
       await result.cleanup();
     }

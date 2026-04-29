@@ -1,6 +1,5 @@
-import { MvmtConfig, resolveProxySourceId } from '../config/schema.js';
+import { MvmtConfig } from '../config/schema.js';
 import { Connector } from '../connectors/types.js';
-import { createProxyConnector } from '../connectors/factory.js';
 import { Logger } from '../utils/logger.js';
 
 export type LoadedConnector = {
@@ -14,34 +13,10 @@ export async function initializeConnectors(
   stdioMode: boolean,
   logger: Logger,
 ): Promise<LoadedConnector[]> {
-  const loaded: LoadedConnector[] = [];
-
-  for (const proxyConfig of config.proxy) {
-    if (!proxyConfig.enabled) continue;
-
-    const connector = createProxyConnector(proxyConfig);
-    if (!connector) {
-      emit(`Proxy connector "${proxyConfig.name}" has no command or url. Skipping.`, stdioMode, logger, 'warn');
-      continue;
-    }
-
-    try {
-      await connector.initialize();
-      const toolCount = (await connector.listTools()).length;
-      loaded.push({ connector, sourceId: resolveProxySourceId(proxyConfig), toolCount });
-      emit(`Loaded proxy:${proxyConfig.name} (${toolCount} tools)`, stdioMode, logger);
-    } catch (err) {
-      emit(
-        `Proxy connector "${proxyConfig.name}" failed to start: ${formatConnectorError(err)}`,
-        stdioMode,
-        logger,
-        'warn',
-      );
-      emit('Skipping proxy. Other connectors are still available.', stdioMode, logger, 'warn');
-    }
+  if (config.proxy.some((proxyConfig) => proxyConfig.enabled !== false)) {
+    emit('Legacy proxy connectors are ignored by the mount-only runtime.', stdioMode, logger, 'warn');
   }
-
-  return loaded;
+  return [];
 }
 
 export function formatConnectorError(err: unknown): string {

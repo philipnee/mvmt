@@ -2,14 +2,11 @@ import fs from 'fs';
 import yaml from 'yaml';
 import { expandHome, getConfigPath, parseConfig } from '../config/loader.js';
 import { LocalFolderMountConfig, MvmtConfig } from '../config/schema.js';
-import { createProxyConnector } from '../connectors/factory.js';
-import { Connector } from '../connectors/types.js';
 import { checkForUpdate, PackageInfo, readPackageInfo, UpdateCheckResult } from '../utils/version.js';
 
 export interface DoctorOptions {
   config?: string;
   json?: boolean;
-  timeoutMs?: string | number;
   updateCheck?: boolean;
   packageInfo?: PackageInfo;
   fetchImpl?: typeof fetch;
@@ -21,8 +18,7 @@ export type DoctorStatus = 'ok' | 'warn' | 'fail' | 'skip';
 export interface DoctorConnectorReport {
   name: string;
   id?: string;
-  kind: 'proxy' | 'mount';
-  transport?: 'stdio' | 'http';
+  kind: 'mount';
   enabled: boolean;
   status: DoctorStatus;
   message: string;
@@ -79,8 +75,6 @@ export async function collectDoctorReport(options: DoctorOptions = {}): Promise<
     env: options.updateCheck === false ? { ...(options.env ?? process.env), MVMT_NO_UPDATE_CHECK: '1' } : options.env,
   });
   const configPath = expandHome(options.config ?? getConfigPath());
-  const timeoutMs = parseTimeout(options.timeoutMs);
-
   const report: DoctorReport = {
     ok: true,
     version: {
@@ -130,46 +124,17 @@ export async function collectDoctorReport(options: DoctorOptions = {}): Promise<
     report.config.errors.push('Config file is readable or writable by group/others. Recommended mode is 600.');
   }
 
-  for (const proxyConfig of config.proxy) {
-    if (!proxyConfig.enabled) {
-      report.connectors.push({
-        name: proxyConfig.name,
-        kind: 'proxy',
-        transport: proxyConfig.transport,
-        enabled: false,
-        status: 'skip',
-        message: 'disabled in config',
-      });
-      continue;
-    }
-
-    const connector = createProxyConnector(proxyConfig);
-    if (!connector) {
-      report.connectors.push({
-        name: proxyConfig.name,
-        kind: 'proxy',
-        transport: proxyConfig.transport,
-        enabled: true,
-        status: 'fail',
-        message: 'missing command or URL',
-      });
-      continue;
-    }
-
-    report.connectors.push(await checkConnector(connector, proxyConfig.name, 'proxy', proxyConfig.transport, timeoutMs));
-  }
-
   for (const mount of config.mounts) {
     report.connectors.push(checkMount(mount));
   }
 
   if (report.connectors.length === 0 || report.connectors.every((connector) => connector.status === 'skip')) {
     report.connectors.push({
-      name: 'connectors',
-      kind: 'proxy',
+      name: 'mounts',
+      kind: 'mount',
       enabled: false,
       status: 'fail',
-      message: 'no enabled connectors found',
+      message: 'no enabled mounts found',
     });
   }
 
@@ -255,7 +220,7 @@ export function printDoctorReport(report: DoctorReport): void {
     console.log(`  warning: ${error}`);
   }
 
-  console.log('\nConnectors');
+  console.log('\nMounts');
   for (const connector of report.connectors) {
     const label = connector.id ?? connector.name;
     const detail =
@@ -271,44 +236,6 @@ export function printDoctorReport(report: DoctorReport): void {
   );
 }
 
-async function checkConnector(
-  connector: Connector,
-  name: string,
-  kind: DoctorConnectorReport['kind'],
-  transport: DoctorConnectorReport['transport'],
-  timeoutMs: number,
-): Promise<DoctorConnectorReport> {
-  const start = Date.now();
-  try {
-    await withTimeout(connector.initialize(), timeoutMs, `${name} timed out during initialize after ${timeoutMs}ms`);
-    const tools = await withTimeout(connector.listTools(), timeoutMs, `${name} timed out during listTools after ${timeoutMs}ms`);
-    return {
-      name,
-      id: connector.id,
-      kind,
-      transport,
-      enabled: true,
-      status: 'ok',
-      message: 'healthy',
-      toolCount: tools.length,
-      durationMs: Date.now() - start,
-    };
-  } catch (err) {
-    return {
-      name,
-      id: connector.id,
-      kind,
-      transport,
-      enabled: true,
-      status: 'fail',
-      message: err instanceof Error ? err.message : 'health check failed',
-      durationMs: Date.now() - start,
-    };
-  } finally {
-    await withTimeout(connector.shutdown(), 1000, `${name} timed out during shutdown`).catch(() => undefined);
-  }
-}
-
 function summarize(report: DoctorReport): void {
   report.summary = { ok: 0, warn: 0, fail: 0, skip: 0 };
 
@@ -317,15 +244,6 @@ function summarize(report: DoctorReport): void {
   for (const connector of report.connectors) {
     report.summary[connector.status] += 1;
   }
-}
-
-function parseTimeout(value: string | number | undefined): number {
-  if (value === undefined) return 10_000;
-  const parsed = typeof value === 'number' ? value : Number(value);
-  if (!Number.isInteger(parsed) || parsed < 100 || parsed > 120_000) {
-    throw new Error(`Invalid timeout: ${value}`);
-  }
-  return parsed;
 }
 
 function readMode(configPath: string): string | undefined {
@@ -338,20 +256,4 @@ function checkConfigPermissions(configPath: string): DoctorStatus | undefined {
   if (process.platform === 'win32') return undefined;
   const mode = fs.statSync(configPath).mode & 0o777;
   return mode & 0o077 ? 'warn' : 'ok';
-}
-
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
-  promise.catch(() => undefined);
-
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
 }
