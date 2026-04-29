@@ -1,11 +1,11 @@
 # Remote Access
 
 > [!WARNING]
-> Remote access is authenticated, but it still exposes your configured local tools beyond your machine. Keep connector scopes narrow before exposing mvmt over a tunnel.
+> Remote access is authenticated, but it still exposes configured local mounts beyond your machine. Keep mounts narrow before exposing mvmt over a tunnel.
 
 mvmt is local-first and binds to `127.0.0.1`. Cloud clients such as claude.ai or ChatGPT web cannot reach your local machine directly.
 
-`mvmt init` can configure a tunnel. When `mvmt start` runs, mvmt starts the tunnel command, watches its output for a public URL, and prints the MCP URL.
+`mvmt config setup` can configure a tunnel. When `mvmt serve` runs, mvmt starts the tunnel command, watches its output for a public URL, and prints the MCP URL.
 
 Quick tunnels are temporary. Use a named tunnel or reserved domain if you need the same URL across restarts.
 
@@ -20,7 +20,7 @@ Quick tunnels are temporary. Use a named tunnel or reserved domain if you need t
 
 Cloudflare requires `cloudflared`. Install it with `brew install cloudflared`.
 
-For a stable Cloudflare hostname, create a named tunnel and DNS route first, then choose **Cloudflare Named Tunnel** in `mvmt init` or interactive `tunnel config`. mvmt asks for:
+For a stable Cloudflare hostname, create a named tunnel and DNS route first, then choose **Cloudflare Named Tunnel** in `mvmt config setup` or interactive `tunnel config`. mvmt asks for:
 
 - the `cloudflared` config file path,
 - the public base URL, such as `https://pnee.gofrieda.org`.
@@ -29,7 +29,7 @@ mvmt stores that as a `custom` tunnel because Cloudflare named tunnels are user-
 
 ## Managing tunnels at runtime
 
-If a quick tunnel drops while `mvmt start -i` is running, run `tunnel refresh`. This restarts only the tunnel process; the local mvmt server and bearer token stay the same.
+If a quick tunnel drops while `mvmt serve -i` is running, run `tunnel refresh`. This restarts only the tunnel process; the local mvmt server and bearer token stay the same.
 
 To switch tunnel providers while mvmt is running, run `tunnel config`. mvmt saves the selected tunnel back to `~/.mvmt/config.yaml`. The same menu supports quick tunnels, Cloudflare named tunnels, and raw custom commands.
 
@@ -37,8 +37,8 @@ To switch tunnel providers while mvmt is running, run `tunnel config`. mvmt save
 
 Use a narrow config before exposing mvmt:
 
-- Read-only filesystem access.
-- A low-risk folder or throwaway vault.
+- Read-only mounts.
+- Low-risk folders or throwaway notes.
 - No production secrets in config.
 - Stop the tunnel when you are done using remote access.
 

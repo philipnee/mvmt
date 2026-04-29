@@ -1,22 +1,28 @@
 # Audit Log
 
-Every tool call routed through mvmt is appended to `~/.mvmt/audit.log` as JSONL. mvmt creates the file with mode `600` (owner-only read/write).
+Every tool call routed through mvmt is appended to:
+
+```text
+~/.mvmt/audit.log
+```
+
+The file is JSONL and is created with mode `600` on non-Windows systems.
 
 > [!WARNING]
-> `argPreview` can include truncated argument values. Do not store secrets in tool arguments unless you are comfortable with those values appearing in `~/.mvmt/audit.log`.
+> `argPreview` can include truncated argument values. Do not place secrets in tool arguments unless you are comfortable with those values appearing in the local audit log.
 
-## Log format
+## Format
 
-Each tool call appends one JSON object:
+Example mount-tool call:
 
 ```json
 {
   "ts": "2026-04-14T14:23:01.442Z",
-  "connectorId": "obsidian",
-  "tool": "obsidian__search_notes",
+  "connectorId": "mvmt",
+  "tool": "search",
   "clientId": "chatgpt",
-  "argKeys": ["query", "maxResults"],
-  "argPreview": "{\"query\":\"meeting notes\",\"maxResults\":10}",
+  "argKeys": ["query", "limit"],
+  "argPreview": "{\"query\":\"meeting notes\",\"limit\":10}",
   "redactions": [
     {
       "pluginId": "pattern-redactor",
@@ -33,17 +39,17 @@ Each tool call appends one JSON object:
 | Field | Description |
 | --- | --- |
 | `ts` | ISO 8601 timestamp. |
-| `connectorId` | Which connector handled the call (e.g. `obsidian`, `proxy_filesystem`). |
-| `tool` | The namespaced tool name the MCP client used. |
+| `connectorId` | Runtime surface that handled the call. Mount tools use `mvmt`. |
+| `tool` | Tool name used by the MCP client, such as `search` or `read`. |
 | `clientId` | Present when HTTP auth resolved to a configured or legacy client identity. |
 | `argKeys` | Argument key names, without values. |
-| `argPreview` | Truncated JSON of the arguments (max 512 characters). Can contain values. |
-| `redactions` | Present when `pattern-redactor` matched. Records the plugin, mode, pattern name, and match count. |
-| `isError` | `true` if the connector returned an error or the call threw. |
-| `deniedReason` | Present when mvmt denied a tool call before it reached a connector. |
+| `argPreview` | Truncated JSON of the arguments, max 512 characters. Can contain values. |
+| `redactions` | Present when `pattern-redactor` matched. |
+| `isError` | `true` if the tool returned an error or the call threw. |
+| `deniedReason` | Present when mvmt denied a tool call before data access. |
 | `durationMs` | Time from call start to result, in milliseconds. |
 
-## Querying the log
+## Querying
 
 View recent activity:
 
@@ -51,21 +57,40 @@ View recent activity:
 tail -20 ~/.mvmt/audit.log | jq .
 ```
 
-Filter by connector:
+Filter denied calls:
 
 ```bash
-jq 'select(.connectorId == "obsidian")' ~/.mvmt/audit.log
+jq 'select(.deniedReason != null)' ~/.mvmt/audit.log
 ```
 
-Count tool calls per connector:
+Count tool calls:
 
 ```bash
-jq -r '.connectorId' ~/.mvmt/audit.log | sort | uniq -c | sort -rn
+jq -r '.tool' ~/.mvmt/audit.log | sort | uniq -c | sort -rn
 ```
 
-## Log rotation
+Filter by client:
 
-mvmt never truncates or rotates the audit log. To archive it manually:
+```bash
+jq 'select(.clientId == "codex")' ~/.mvmt/audit.log
+```
+
+## HTTP/OAuth Logs
+
+OAuth discovery, registration, token exchange, and MCP session setup failures happen before a tool call exists. Those events do not go into `audit.log`.
+
+Use interactive mode for sanitized request logs:
+
+```bash
+mvmt serve -i
+> logs on
+```
+
+## Rotation
+
+mvmt does not rotate the audit log automatically.
+
+Archive manually:
 
 ```bash
 mv ~/.mvmt/audit.log ~/.mvmt/audit.log.bak
