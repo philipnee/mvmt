@@ -1,9 +1,8 @@
 import { MvmtConfig } from '../config/schema.js';
 import { filesystemSetupDefinition } from './filesystem-setup.js';
 import { memPalaceSetupDefinition } from './mempalace-setup.js';
-import { obsidianSetupDefinition } from './obsidian-setup.js';
 
-export type ConnectorSetupId = 'filesystem' | 'obsidian' | 'mempalace';
+export type ConnectorSetupId = 'filesystem' | 'mempalace';
 
 export interface ConnectorSetupDefinition<TDetected, TInput, TId extends ConnectorSetupId = ConnectorSetupId> {
   id: TId;
@@ -21,7 +20,6 @@ export type AnyConnectorSetupDefinition = ConnectorSetupDefinition<unknown, unkn
 // display order shown by the CLI.
 const setupRegistry = [
   filesystemSetupDefinition,
-  obsidianSetupDefinition,
   memPalaceSetupDefinition,
 ] satisfies AnyConnectorSetupDefinition[];
 

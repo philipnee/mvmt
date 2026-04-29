@@ -115,7 +115,6 @@ export function printConfigSummary(
 
   printFilesystemSummary(config.proxy);
   printMountSummary(config);
-  printObsidianSummary(config);
   printMemPalaceSummary(config.proxy);
   printPluginSummary(config);
 }
@@ -152,16 +151,6 @@ function printFilesystemSummary(proxy: ProxyConfig[]): void {
   for (const folder of paths) {
     console.log(`  ${folder}  ${filesystem.writeAccess ? 'writable' : 'read-only'}`);
   }
-}
-
-function printObsidianSummary(config: MvmtConfig): void {
-  console.log('\nObsidian');
-  if (!config.obsidian?.enabled) {
-    console.log(`  ${chalk.dim('not configured')}`);
-    return;
-  }
-  console.log(`  path: ${config.obsidian.path}`);
-  console.log(`  write access: ${config.obsidian.writeAccess ? 'yes' : 'no'}`);
 }
 
 function printMemPalaceSummary(proxy: ProxyConfig[]): void {

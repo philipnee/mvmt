@@ -76,8 +76,8 @@ describe('ToolRouter', () => {
 
   it('applies result plugins before returning connector output', async () => {
     const connector: Connector = {
-      id: 'obsidian',
-      displayName: 'obsidian',
+      id: 'notes',
+      displayName: 'notes',
       initialize: vi.fn(),
       shutdown: vi.fn(),
       listTools: vi.fn(async () => [
@@ -106,7 +106,7 @@ describe('ToolRouter', () => {
     );
     await router.initialize();
 
-    await expect(router.callTool('obsidian__read_note', {})).resolves.toEqual({
+    await expect(router.callTool('notes__read_note', {})).resolves.toEqual({
       content: [{ type: 'text', text: 'scrubbed' }],
     });
   });
@@ -114,8 +114,8 @@ describe('ToolRouter', () => {
   it('records plugin redaction counts in the audit log', async () => {
     const audit = { record: vi.fn() };
     const connector: Connector = {
-      id: 'obsidian',
-      displayName: 'obsidian',
+      id: 'notes',
+      displayName: 'notes',
       initialize: vi.fn(),
       shutdown: vi.fn(),
       listTools: vi.fn(async () => [
@@ -148,7 +148,7 @@ describe('ToolRouter', () => {
     );
     await router.initialize();
 
-    await router.callTool('obsidian__read_note', {});
+    await router.callTool('notes__read_note', {});
 
     expect(audit.record).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -190,8 +190,8 @@ describe('ToolRouter', () => {
     const audit = { record: vi.fn() };
     const callTool = vi.fn();
     const connector: Connector = {
-      id: 'obsidian',
-      displayName: 'obsidian',
+      id: 'notes',
+      displayName: 'notes',
       initialize: vi.fn(),
       shutdown: vi.fn(),
       listTools: vi.fn(async () => [
@@ -203,10 +203,10 @@ describe('ToolRouter', () => {
     const router = new ToolRouter([connector], audit);
     await router.initialize();
 
-    expect(router.getAllTools(client('chatgpt', false, [{ path: '/obsidian/**', actions: ['read'] }]))).toEqual([]);
+    expect(router.getAllTools(client('chatgpt', false, [{ path: '/notes/**', actions: ['read'] }]))).toEqual([]);
     await expect(
-      router.callTool('obsidian__read_note', { notePath: 'Project' }, client('chatgpt', false, [
-        { path: '/obsidian/**', actions: ['read'] },
+      router.callTool('notes__read_note', { notePath: 'Project' }, client('chatgpt', false, [
+        { path: '/notes/**', actions: ['read'] },
       ])),
     ).resolves.toMatchObject({ isError: true });
     expect(callTool).not.toHaveBeenCalled();
@@ -254,8 +254,8 @@ describe('ToolRouter', () => {
   it('records clientId for authorized raw tool calls', async () => {
     const audit = { record: vi.fn() };
     const connector: Connector = {
-      id: 'obsidian',
-      displayName: 'obsidian',
+      id: 'notes',
+      displayName: 'notes',
       initialize: vi.fn(),
       shutdown: vi.fn(),
       listTools: vi.fn(async () => [
@@ -267,25 +267,25 @@ describe('ToolRouter', () => {
     const router = new ToolRouter([connector], audit);
     await router.initialize();
 
-    await router.callTool('obsidian__read_note', {}, client('codex', true, [
-      { path: '/obsidian/**', actions: ['read'] },
+    await router.callTool('notes__read_note', {}, client('codex', true, [
+      { path: '/notes/**', actions: ['read'] },
     ]));
 
     expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ clientId: 'codex', isError: false }));
   });
 
   it('lists semantic tools even when raw tools are disabled', async () => {
-    const connector = obsidianFixtureConnector();
+    const connector = notesFixtureConnector();
     const router = new ToolRouter([connector], undefined, [], {
       semanticTools: {
-        searchPersonalContext: { enabled: true, sourceIds: ['obsidian'] },
-        readContextItem: { enabled: true, sourceIds: ['obsidian'] },
+        searchPersonalContext: { enabled: true, sourceIds: ['notes'] },
+        readContextItem: { enabled: true, sourceIds: ['notes'] },
       },
     });
     await router.initialize();
 
     expect(router.getAllTools(client('chatgpt', false, [
-      { path: '/obsidian/**', actions: ['search', 'read'] },
+      { path: '/notes/**', actions: ['search', 'read'] },
     ])).map((tool) => tool.namespacedName)).toEqual([
       'search_personal_context',
       'read_context_item',
@@ -293,16 +293,16 @@ describe('ToolRouter', () => {
   });
 
   it('searches allowed semantic sources and returns source-attributed results', async () => {
-    const connector = obsidianFixtureConnector();
+    const connector = notesFixtureConnector();
     const router = new ToolRouter([connector], undefined, [], {
       semanticTools: {
-        searchPersonalContext: { enabled: true, sourceIds: ['obsidian'] },
+        searchPersonalContext: { enabled: true, sourceIds: ['notes'] },
       },
     });
     await router.initialize();
 
     const result = await router.callTool('search_personal_context', { query: 'launch' }, client('chatgpt', false, [
-      { path: '/obsidian/**', actions: ['search'] },
+      { path: '/notes/**', actions: ['search'] },
     ]));
     const parsed = JSON.parse(result.content[0].type === 'text' ? result.content[0].text : '{}');
 
@@ -312,8 +312,8 @@ describe('ToolRouter', () => {
       results: [
         {
           item_id: 'projects/launch.md',
-          source_id: 'obsidian',
-          source_type: 'obsidian',
+          source_id: 'notes',
+          source_type: 'generic',
           actions: ['read_context_item'],
         },
       ],
@@ -321,25 +321,25 @@ describe('ToolRouter', () => {
   });
 
   it('reads allowed semantic context items without enabling raw tools', async () => {
-    const connector = obsidianFixtureConnector();
+    const connector = notesFixtureConnector();
     const router = new ToolRouter([connector], undefined, [], {
       semanticTools: {
-        readContextItem: { enabled: true, sourceIds: ['obsidian'] },
+        readContextItem: { enabled: true, sourceIds: ['notes'] },
       },
     });
     await router.initialize();
 
     const result = await router.callTool(
       'read_context_item',
-      { source_id: 'obsidian', item_id: 'projects/launch.md' },
-      client('chatgpt', false, [{ path: '/obsidian/**', actions: ['read'] }]),
+      { source_id: 'notes', item_id: 'projects/launch.md' },
+      client('chatgpt', false, [{ path: '/notes/**', actions: ['read'] }]),
     );
     const parsed = JSON.parse(result.content[0].type === 'text' ? result.content[0].text : '{}');
 
     expect(parsed).toMatchObject({
-      source_id: 'obsidian',
+      source_id: 'notes',
       item_id: 'projects/launch.md',
-      mime_type: 'text/markdown',
+      mime_type: 'text/plain',
       content: '# Launch\nShip it.',
     });
   });
@@ -443,10 +443,10 @@ function client(
   };
 }
 
-function obsidianFixtureConnector(): Connector {
+function notesFixtureConnector(): Connector {
   return {
-    id: 'obsidian',
-    displayName: 'obsidian',
+    id: 'notes',
+    displayName: 'notes',
     initialize: vi.fn(),
     shutdown: vi.fn(),
     listTools: vi.fn(async () => [

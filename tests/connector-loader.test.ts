@@ -1,18 +1,9 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { initializeConnectors, formatConnectorError } from '../src/cli/connector-loader.js';
 import * as factory from '../src/connectors/factory.js';
-import { ObsidianConnector } from '../src/connectors/obsidian.js';
 
 vi.mock('../src/connectors/factory.js', () => ({
   createProxyConnector: vi.fn(),
-}));
-
-vi.mock('../src/connectors/obsidian.js', () => ({
-  ObsidianConnector: vi.fn().mockImplementation(() => ({
-    initialize: vi.fn(),
-    listTools: vi.fn().mockResolvedValue([]),
-    id: 'obsidian',
-  })),
 }));
 
 describe('connector-loader', () => {

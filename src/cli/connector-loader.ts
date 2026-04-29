@@ -1,6 +1,5 @@
-import { MvmtConfig, OBSIDIAN_SOURCE_ID, resolveProxySourceId } from '../config/schema.js';
+import { MvmtConfig, resolveProxySourceId } from '../config/schema.js';
 import { Connector } from '../connectors/types.js';
-import { ObsidianConnector } from '../connectors/obsidian.js';
 import { createProxyConnector } from '../connectors/factory.js';
 import { Logger } from '../utils/logger.js';
 
@@ -39,23 +38,6 @@ export async function initializeConnectors(
         'warn',
       );
       emit('Skipping proxy. Other connectors are still available.', stdioMode, logger, 'warn');
-    }
-  }
-
-  if (config.obsidian?.enabled) {
-    const connector = new ObsidianConnector(config.obsidian);
-    try {
-      await connector.initialize();
-      const toolCount = (await connector.listTools()).length;
-      loaded.push({ connector, sourceId: OBSIDIAN_SOURCE_ID, toolCount });
-      emit(`Loaded obsidian (${toolCount} tools)`, stdioMode, logger);
-    } catch (err) {
-      emit(
-        `Native Obsidian connector failed to start: ${formatConnectorError(err)}`,
-        stdioMode,
-        logger,
-        'warn',
-      );
     }
   }
 

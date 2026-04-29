@@ -40,12 +40,6 @@ export const ProxySchema = z
     }
   });
 
-export const ObsidianSchema = z.object({
-  path: z.string().min(1),
-  enabled: z.boolean().default(true),
-  writeAccess: z.boolean().default(false),
-});
-
 export const PatternRedactorPatternSchema = z
   .object({
     name: z.string().min(1),
@@ -124,10 +118,6 @@ export const PatternRedactorPluginSchema = z.object({
 export const PluginSchema = z.discriminatedUnion('name', [
   PatternRedactorPluginSchema,
 ]);
-
-// OBSIDIAN_SOURCE_ID is the conventional source id for the native Obsidian
-// connector. Used by raw-tool virtual policy paths and semantic source lists.
-export const OBSIDIAN_SOURCE_ID = 'obsidian';
 
 export const LocalFolderMountSchema = z.object({
   name: z.string().min(1).regex(/^[a-z0-9][a-z0-9_-]*$/, 'mount name must be lowercase alphanum/dash/underscore'),
@@ -210,7 +200,6 @@ export const ConfigSchema = z
       .default({}),
     proxy: z.array(ProxySchema).default([]),
     mounts: z.array(LocalFolderMountSchema).default([]),
-    obsidian: ObsidianSchema.optional(),
     plugins: z.array(PluginSchema).default([]),
     // clients and semanticTools are additive to the v1 schema. When
     // absent, the runtime synthesizes a single default client that maps
@@ -278,7 +267,7 @@ export const ConfigSchema = z
           if (!knownSourceIds.has(sourceId)) {
             ctx.addIssue({
               code: z.ZodIssueCode.custom,
-              message: `unknown sourceId "${sourceId}"; configure a proxy or obsidian first`,
+              message: `unknown sourceId "${sourceId}"; configure a proxy or mount first`,
               path: ['semanticTools', toolKey, 'sourceIds', sourceIndex],
             });
           }
@@ -287,10 +276,7 @@ export const ConfigSchema = z
     }
   });
 
-function validateUniqueSourceIds(
-  data: { proxy: ProxyConfig[]; mounts: LocalFolderMountConfig[]; obsidian?: ObsidianConfig },
-  ctx: z.RefinementCtx,
-): void {
+function validateUniqueSourceIds(data: { proxy: ProxyConfig[]; mounts: LocalFolderMountConfig[] }, ctx: z.RefinementCtx): void {
   const seen = new Map<string, { path: (string | number)[] }>();
   const track = (sourceId: string, issuePath: (string | number)[]) => {
     const previous = seen.get(sourceId);
@@ -322,9 +308,6 @@ function validateUniqueSourceIds(
       seenMountPaths.set(mount.path, index);
     }
   }
-  if (data.obsidian) {
-    track(OBSIDIAN_SOURCE_ID, ['obsidian']);
-  }
 }
 
 function validatePermissionPath(pathPattern: string, ctx: z.RefinementCtx, issuePath: (string | number)[]): void {
@@ -345,7 +328,7 @@ export function resolveProxySourceId(proxy: ProxyConfig): string {
   return proxy.id ?? proxy.name;
 }
 
-function collectKnownSourceIds(data: { proxy: ProxyConfig[]; mounts: LocalFolderMountConfig[]; obsidian?: ObsidianConfig }): Set<string> {
+function collectKnownSourceIds(data: { proxy: ProxyConfig[]; mounts: LocalFolderMountConfig[] }): Set<string> {
   const ids = new Set<string>();
   for (const proxy of data.proxy) {
     ids.add(resolveProxySourceId(proxy));
@@ -353,16 +336,12 @@ function collectKnownSourceIds(data: { proxy: ProxyConfig[]; mounts: LocalFolder
   for (const mount of data.mounts) {
     ids.add(mount.name);
   }
-  if (data.obsidian) {
-    ids.add(OBSIDIAN_SOURCE_ID);
-  }
   return ids;
 }
 
 export type TunnelConfig = z.infer<typeof TunnelSchema>;
 export type ProxyConfig = z.infer<typeof ProxySchema>;
 export type LocalFolderMountConfig = z.infer<typeof LocalFolderMountSchema>;
-export type ObsidianConfig = z.infer<typeof ObsidianSchema>;
 export type PatternRedactorPatternConfig = z.infer<typeof PatternRedactorPatternSchema>;
 export type PatternRedactorPluginConfig = z.infer<typeof PatternRedactorPluginSchema>;
 export type PluginConfig = z.infer<typeof PluginSchema>;
