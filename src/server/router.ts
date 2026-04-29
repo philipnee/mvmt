@@ -9,7 +9,7 @@ import { ClientIdentity } from './client-identity.js';
 type PermissionAction = PermissionConfig['actions'][number];
 type ToolKind = 'raw' | 'semantic';
 type SemanticToolName = 'search_personal_context' | 'read_context_item';
-type ContextToolName = 'search' | 'list' | 'read' | 'write' | 'delete';
+type ContextToolName = 'search' | 'list' | 'read' | 'write' | 'remove';
 
 interface ToolEntry {
   connector: Connector;
@@ -337,7 +337,7 @@ export class ToolRouter {
     if (!mountName || !pathAllowed(inputPath, 'write', identity)) {
       return accessDeniedResult(`missing_permission path=${inputPath} action=write`);
     }
-    return jsonResult(await this.contextIndex.delete(inputPath));
+    return jsonResult(await this.contextIndex.remove(inputPath));
   }
 
   private async searchPersonalContext(
@@ -413,7 +413,7 @@ export class ToolRouter {
   private isVirtualToolVisible(name: string, identity?: ClientIdentity): boolean {
     if (isSemanticToolName(name)) return this.isSemanticToolVisible(name, identity);
     if (isContextToolName(name)) {
-      const action: PermissionAction = name === 'search' ? 'search' : name === 'write' || name === 'delete' ? 'write' : 'read';
+      const action: PermissionAction = name === 'search' ? 'search' : name === 'write' || name === 'remove' ? 'write' : 'read';
       return this.contextIndex !== undefined && actionAvailable(action, identity);
     }
     return false;
@@ -634,13 +634,13 @@ function buildContextToolDefinitions(): NamespacedTool[] {
       },
     },
     {
-      namespacedName: 'delete',
-      originalName: 'delete',
+      namespacedName: 'remove',
+      originalName: 'remove',
       connectorId: 'mvmt',
       sourceId: 'mvmt',
       requiredAction: 'write',
       toolKind: 'semantic',
-      description: 'Delete one permitted text file. Protected paths are always blocked.',
+      description: 'Remove one permitted text file. Protected paths are always blocked.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -657,7 +657,7 @@ function isSemanticToolName(value: string): value is SemanticToolName {
 }
 
 function isContextToolName(value: string): value is ContextToolName {
-  return value === 'search' || value === 'list' || value === 'read' || value === 'write' || value === 'delete';
+  return value === 'search' || value === 'list' || value === 'read' || value === 'write' || value === 'remove';
 }
 
 function semanticSourceAllowed(sourceId: string, action: PermissionAction, identity?: ClientIdentity): boolean {

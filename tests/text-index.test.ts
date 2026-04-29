@@ -78,10 +78,10 @@ describe('TextContextIndex', () => {
     const written = await index.write('/workspace/draft.md', 'new', initial.hash);
     expect(written.content).toBe('new');
 
-    await expect(index.delete('/workspace/draft.md')).resolves.toMatchObject({
+    await expect(index.remove('/workspace/draft.md')).resolves.toMatchObject({
       mount: 'workspace',
       path: '/workspace/draft.md',
-      deleted: true,
+      removed: true,
     });
     await expect(index.read('/workspace/draft.md')).rejects.toThrow();
   });

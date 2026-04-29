@@ -244,11 +244,11 @@ export class TextContextIndex {
     return read;
   }
 
-  async delete(inputPath: string): Promise<{ mount: string; path: string; deleted: true }> {
+  async remove(inputPath: string): Promise<{ mount: string; path: string; removed: true }> {
     const resolved = this.resolvePath(inputPath);
     await this.providerForResolved(resolved).remove(resolved.relativePath);
     await this.rebuild();
-    return { mount: resolved.mount.config.name, path: resolved.virtualPath, deleted: true };
+    return { mount: resolved.mount.config.name, path: resolved.virtualPath, removed: true };
   }
 
   private indexFile(
