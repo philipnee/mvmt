@@ -322,6 +322,7 @@ describe('client policy schema', () => {
     const config = parseConfig({
       version: 1,
       proxy: [{ name: 'workspace', command: 'npx' }],
+      mounts: [{ name: 'notes', type: 'local_folder', path: '/notes', root: '/vault' }],
       clients: [
         {
           id: 'codex',
@@ -348,6 +349,7 @@ describe('client policy schema', () => {
   it('parses an oauth-auth client with mapped client ids', () => {
     const config = parseConfig({
       version: 1,
+      mounts: [{ name: 'notes', type: 'local_folder', path: '/notes', root: '/vault' }],
       clients: [
         {
           id: 'chatgpt',
@@ -369,6 +371,7 @@ describe('client policy schema', () => {
     expect(() =>
       parseConfig({
         version: 1,
+        mounts: [{ name: 'workspace', type: 'local_folder', path: '/workspace', root: '/workspace' }],
         clients: [
           {
             id: 'codex',
@@ -383,6 +386,7 @@ describe('client policy schema', () => {
     expect(() =>
       parseConfig({
         version: 1,
+        mounts: [{ name: 'workspace', type: 'local_folder', path: '/workspace', root: '/workspace' }],
         clients: [
           {
             id: 'codex',
@@ -392,7 +396,88 @@ describe('client policy schema', () => {
           },
         ],
       }),
-    ).toThrow(/permission path may only use \*\* as a trailing subtree wildcard/);
+    ).toThrow(/permission path may only use \/\*\* as a trailing subtree wildcard/);
+
+    expect(() =>
+      parseConfig({
+        version: 1,
+        mounts: [{ name: 'workspace', type: 'local_folder', path: '/workspace', root: '/workspace' }],
+        clients: [
+          {
+            id: 'codex',
+            name: 'Codex',
+            auth: { type: 'token', tokenHash: SHA256_HEX_64 },
+            permissions: [{ path: '/workspace/*.md', actions: ['read'] }],
+          },
+        ],
+      }),
+    ).toThrow(/permission path may only use \/\*\* as a trailing subtree wildcard/);
+  });
+
+  it('rejects empty client permission actions', () => {
+    expect(() =>
+      parseConfig({
+        version: 1,
+        mounts: [{ name: 'workspace', type: 'local_folder', path: '/workspace', root: '/workspace' }],
+        clients: [
+          {
+            id: 'codex',
+            name: 'Codex',
+            auth: { type: 'token', tokenHash: SHA256_HEX_64 },
+            permissions: [{ path: '/workspace/**', actions: [] }],
+          },
+        ],
+      }),
+    ).toThrow(/permission actions must include at least one action/);
+  });
+
+  it('rejects permission paths that do not target a configured mount or proxy source', () => {
+    expect(() =>
+      parseConfig({
+        version: 1,
+        mounts: [{ name: 'workspace', type: 'local_folder', path: '/workspace', root: '/workspace' }],
+        clients: [
+          {
+            id: 'codex',
+            name: 'Codex',
+            auth: { type: 'token', tokenHash: SHA256_HEX_64 },
+            permissions: [{ path: '/notes/**', actions: ['read'] }],
+          },
+        ],
+      }),
+    ).toThrow(/permission path "\/notes\/\*\*" does not target any configured mount or proxy source/);
+  });
+
+  it('allows global and nested mount permissions', () => {
+    const config = parseConfig({
+      version: 1,
+      mounts: [{ name: 'project', type: 'local_folder', path: '/workspace/project', root: '/workspace/project' }],
+      clients: [
+        {
+          id: 'codex',
+          name: 'Codex',
+          auth: { type: 'token', tokenHash: SHA256_HEX_64 },
+          permissions: [
+            { path: '/workspace/project/src/**', actions: ['read'] },
+            { path: '/**', actions: ['search'] },
+          ],
+        },
+      ],
+    });
+
+    expect(config.clients?.[0].permissions).toEqual([
+      { path: '/workspace/project/src/**', actions: ['read'] },
+      { path: '/**', actions: ['search'] },
+    ]);
+  });
+
+  it('rejects wildcard mount paths', () => {
+    expect(() =>
+      parseConfig({
+        version: 1,
+        mounts: [{ name: 'workspace', type: 'local_folder', path: '/workspace/*', root: '/workspace' }],
+      }),
+    ).toThrow(/mount path must be a literal virtual path/);
   });
 
   it('rejects duplicate client ids', () => {

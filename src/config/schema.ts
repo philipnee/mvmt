@@ -136,7 +136,7 @@ export const PermissionAction = z.enum(['search', 'read', 'write']);
 
 export const PermissionSchema = z.object({
   path: z.string().min(1).regex(/^\/(?!$)/, 'permission path must be absolute and cannot be /'),
-  actions: z.array(PermissionAction).default([]),
+  actions: z.array(PermissionAction).min(1, 'permission actions must include at least one action').default([]),
 });
 
 export const ClientAuthTokenSchema = z.object({
@@ -209,6 +209,7 @@ export const ConfigSchema = z
   })
   .superRefine((data, ctx) => {
     const knownSourceIds = collectKnownSourceIds(data);
+    const knownPolicyRoots = collectKnownPolicyRoots(data);
     validateUniqueSourceIds(data, ctx);
     const seenClientIds = new Set<string>();
     // Track auth bindings across clients so config order does not silently
@@ -256,7 +257,12 @@ export const ConfigSchema = z
       }
 
       for (const [permIndex, permission] of client.permissions.entries()) {
-        validatePermissionPath(permission.path, ctx, ['clients', clientIndex, 'permissions', permIndex, 'path']);
+        validatePermissionPath(
+          permission.path,
+          knownPolicyRoots,
+          ctx,
+          ['clients', clientIndex, 'permissions', permIndex, 'path'],
+        );
       }
     }
 
@@ -297,25 +303,50 @@ function validateUniqueSourceIds(data: { proxy: ProxyConfig[]; mounts: LocalFold
   const seenMountPaths = new Map<string, number>();
   for (const [index, mount] of data.mounts.entries()) {
     track(mount.name, ['mounts', index, 'name']);
-    const firstMountPath = seenMountPaths.get(mount.path);
+    validateMountPath(mount.path, ctx, ['mounts', index, 'path']);
+    const normalizedMountPath = normalizePolicyPath(mount.path);
+    const firstMountPath = seenMountPaths.get(normalizedMountPath);
     if (firstMountPath !== undefined) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: `duplicate mount path "${mount.path}"; first seen at mounts.${firstMountPath}.path`,
+        message: `duplicate mount path "${normalizedMountPath}"; first seen at mounts.${firstMountPath}.path`,
         path: ['mounts', index, 'path'],
       });
     } else {
-      seenMountPaths.set(mount.path, index);
+      seenMountPaths.set(normalizedMountPath, index);
     }
   }
 }
 
-function validatePermissionPath(pathPattern: string, ctx: z.RefinementCtx, issuePath: (string | number)[]): void {
-  if (pathPattern === '/**') return;
-  if (pathPattern.includes('**') && !pathPattern.endsWith('/**')) {
+function validateMountPath(pathPattern: string, ctx: z.RefinementCtx, issuePath: (string | number)[]): void {
+  if (pathPattern.includes('*')) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: 'permission path may only use ** as a trailing subtree wildcard',
+      message: 'mount path must be a literal virtual path and cannot include wildcards',
+      path: issuePath,
+    });
+  }
+}
+
+function validatePermissionPath(
+  pathPattern: string,
+  knownPolicyRoots: string[],
+  ctx: z.RefinementCtx,
+  issuePath: (string | number)[],
+): void {
+  if (!hasSupportedPermissionWildcard(pathPattern)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'permission path may only use /** as a trailing subtree wildcard',
+      path: issuePath,
+    });
+    return;
+  }
+
+  if (!permissionTargetsKnownRoot(pathPattern, knownPolicyRoots)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `permission path "${pathPattern}" does not target any configured mount or proxy source`,
       path: issuePath,
     });
   }
@@ -337,6 +368,39 @@ function collectKnownSourceIds(data: { proxy: ProxyConfig[]; mounts: LocalFolder
     ids.add(mount.name);
   }
   return ids;
+}
+
+function collectKnownPolicyRoots(data: { proxy: ProxyConfig[]; mounts: LocalFolderMountConfig[] }): string[] {
+  const roots = new Set<string>();
+  for (const proxy of data.proxy) {
+    roots.add(normalizePolicyPath(`/${resolveProxySourceId(proxy)}`));
+  }
+  for (const mount of data.mounts) {
+    roots.add(normalizePolicyPath(mount.path));
+  }
+  return [...roots];
+}
+
+function hasSupportedPermissionWildcard(pathPattern: string): boolean {
+  if (pathPattern === '/**') return true;
+  if (!pathPattern.includes('*')) return true;
+  return pathPattern.endsWith('/**') && !pathPattern.slice(0, -3).includes('*');
+}
+
+function permissionTargetsKnownRoot(pathPattern: string, knownPolicyRoots: string[]): boolean {
+  if (pathPattern === '/**') return true;
+  const base = pathPattern.endsWith('/**')
+    ? normalizePolicyPath(pathPattern.slice(0, -3))
+    : normalizePolicyPath(pathPattern);
+  return knownPolicyRoots.some((root) => base === root || base.startsWith(`${root}/`));
+}
+
+function normalizePolicyPath(value: string): string {
+  const withForwardSlashes = value.replaceAll('\\', '/');
+  let end = withForwardSlashes.length;
+  while (end > 0 && withForwardSlashes[end - 1] === '/') end -= 1;
+  const normalized = withForwardSlashes.slice(0, end);
+  return normalized || '/';
 }
 
 export type TunnelConfig = z.infer<typeof TunnelSchema>;
