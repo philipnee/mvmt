@@ -63,7 +63,11 @@ export interface HttpServerOptions {
   // empty, requests authenticated via the session token resolve to a
   // synthesized default identity that preserves pre-PR single-token
   // behavior. Pass an array to enable per-client identity resolution.
-  clients?: readonly ClientConfig[];
+  clients?: readonly ClientConfig[] | (() => readonly ClientConfig[] | undefined);
+  // Defaults to true for local backward compatibility. Tunnel mode passes
+  // false unless MVMT_ALLOW_LEGACY_TUNNEL is set, so a public endpoint can
+  // start with no API tokens while exposing no data.
+  allowLegacyDefaultClient?: boolean | (() => boolean);
 }
 
 export interface StartedHttpServer {
@@ -221,9 +225,10 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     });
     const identity = resolveClientIdentity({
       authHeader,
-      clients: options.clients ?? [],
+      clients: resolveClients(options.clients),
       oauthAccessToken,
       validateSession: (header) => validateSessionToken(header, tokenPath),
+      allowLegacyDefault: resolveAllowLegacyDefaultClient(options.allowLegacyDefaultClient),
     });
     if (identity && isQuarantined(identity)) {
       // Quarantined identities are authenticated (the OAuth access token
@@ -701,6 +706,14 @@ function authLogKind(req: Request): string {
   if (req.path === '/mcp') return 'mcp.auth';
   if (req.path === '/health') return 'health.auth';
   return 'http.auth';
+}
+
+function resolveAllowLegacyDefaultClient(value: HttpServerOptions['allowLegacyDefaultClient']): boolean | undefined {
+  return typeof value === 'function' ? value() : value;
+}
+
+function resolveClients(value: HttpServerOptions['clients']): readonly ClientConfig[] {
+  return (typeof value === 'function' ? value() : value) ?? [];
 }
 
 function logHttpRequest(

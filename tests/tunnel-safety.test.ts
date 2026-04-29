@@ -1,14 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseConfig } from '../src/config/loader.js';
-import { tunnelExposureError } from '../src/cli/tunnel-safety.js';
-import { applyTunnelConfig, printTunnelSavedButDisabled } from '../src/cli/tunnel.js';
+import { tunnelLegacyAccessWarning } from '../src/cli/tunnel-safety.js';
+import { applyTunnelConfig, printTunnelEnabledWithNoTokens } from '../src/cli/tunnel.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('tunnelExposureError', () => {
-  it('requires scoped clients before enabling tunnel access', () => {
+describe('tunnelLegacyAccessWarning', () => {
+  it('warns when tunnel access has no scoped API tokens', () => {
     const config = parseConfig({
       version: 1,
       server: {
@@ -20,10 +20,10 @@ describe('tunnelExposureError', () => {
       },
     });
 
-    expect(tunnelExposureError(config, {})).toContain('requires clients[]');
+    expect(tunnelLegacyAccessWarning(config, {})).toContain('No API tokens are configured');
   });
 
-  it('allows tunnel access with client policy or explicit unsafe override', () => {
+  it('does not warn with API-token policy or explicit unsafe override', () => {
     const config = parseConfig({
       version: 1,
       server: {
@@ -44,18 +44,18 @@ describe('tunnelExposureError', () => {
       ],
     });
 
-    expect(tunnelExposureError(config, {})).toBeUndefined();
+    expect(tunnelLegacyAccessWarning(config, {})).toBeUndefined();
 
     const legacy = parseConfig({
       version: 1,
       server: config.server,
     });
-    expect(tunnelExposureError(legacy, { MVMT_ALLOW_LEGACY_TUNNEL: '1' })).toBeUndefined();
+    expect(tunnelLegacyAccessWarning(legacy, { MVMT_ALLOW_LEGACY_TUNNEL: '1' })).toBeUndefined();
   });
 });
 
 describe('applyTunnelConfig', () => {
-  it('saves tunnel details without enabling unsafe tunnel access', () => {
+  it('enables tunnel details and warns when no API tokens exist', () => {
     const config = parseConfig({ version: 1 });
     const tunnel = {
       provider: 'custom' as const,
@@ -65,9 +65,9 @@ describe('applyTunnelConfig', () => {
 
     const applied = applyTunnelConfig(config, tunnel, {});
 
-    expect(applied.enabled).toBe(false);
-    expect(applied.safetyError).toContain('requires clients[]');
-    expect(applied.config.server.access).toBe('local');
+    expect(applied.enabled).toBe(true);
+    expect(applied.warning).toContain('No API tokens are configured');
+    expect(applied.config.server.access).toBe('tunnel');
     expect(applied.config.server.tunnel).toEqual(tunnel);
   });
 
@@ -93,19 +93,18 @@ describe('applyTunnelConfig', () => {
     const applied = applyTunnelConfig(config, tunnel, {});
 
     expect(applied.enabled).toBe(true);
-    expect(applied.safetyError).toBeUndefined();
+    expect(applied.warning).toBeUndefined();
     expect(applied.config.server.access).toBe('tunnel');
     expect(applied.config.server.tunnel).toEqual(tunnel);
   });
 
-  it('prints concrete next steps when tunnel settings are saved but disabled', () => {
+  it('prints concrete next steps when tunnel has no API tokens', () => {
     const output = vi.spyOn(console, 'log').mockImplementation(() => undefined);
 
-    printTunnelSavedButDisabled('Tunnel access requires clients[].');
+    printTunnelEnabledWithNoTokens('No API tokens are configured.');
 
     const lines = output.mock.calls.map((call) => String(call[0])).join('\n');
-    expect(lines).toContain('mvmt is still local-only');
-    expect(lines).toContain('MVMT_ALLOW_LEGACY_TUNNEL=1 mvmt serve -i');
-    expect(lines).toContain('add clients[] permissions');
+    expect(lines).toContain('No API tokens are configured');
+    expect(lines).toContain('mvmt tokens add');
   });
 });

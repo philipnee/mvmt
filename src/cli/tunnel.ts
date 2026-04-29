@@ -18,7 +18,7 @@ import {
   streamJsonControl,
 } from '../utils/control.js';
 import { readSessionToken } from '../utils/token.js';
-import { tunnelExposureError } from './tunnel-safety.js';
+import { tunnelLegacyAccessWarning } from './tunnel-safety.js';
 
 export interface TunnelCommandOptions {
   config?: string;
@@ -35,7 +35,7 @@ export interface TunnelRuntimeStatus {
 export interface ApplyTunnelConfigResult {
   config: MvmtConfig;
   enabled: boolean;
-  safetyError?: string;
+  warning?: string;
 }
 
 export async function showTunnel(options: TunnelCommandOptions = {}): Promise<void> {
@@ -65,9 +65,8 @@ export async function configureTunnel(options: TunnelCommandOptions = {}): Promi
   await saveConfig(loaded.configPath, applied.config);
 
   console.log(chalk.green(`Tunnel config saved to ${loaded.configPath}`));
-  if (!applied.enabled) {
-    printTunnelSavedButDisabled(applied.safetyError);
-    return;
+  if (applied.warning) {
+    printTunnelEnabledWithNoTokens(applied.warning);
   }
 
   try {
@@ -99,11 +98,13 @@ export async function configureTunnel(options: TunnelCommandOptions = {}): Promi
 export async function startTunnelCommand(options: TunnelCommandOptions = {}): Promise<void> {
   const runtime = await sendTunnelRequest(options.config, 'tunnel.start');
   printTunnelActionResult(runtime);
+  if (runtime.configured) printApiTokenWarningForConfig(options.config);
 }
 
 export async function refreshTunnelCommand(options: TunnelCommandOptions = {}): Promise<void> {
   const runtime = await sendTunnelRequest(options.config, 'tunnel.refresh');
   printTunnelActionResult(runtime);
+  if (runtime.configured) printApiTokenWarningForConfig(options.config);
 }
 
 export async function stopTunnelCommand(options: TunnelCommandOptions = {}): Promise<void> {
@@ -231,30 +232,17 @@ export function applyTunnelConfig(
       tunnel,
     },
   };
-  const safetyError = tunnelExposureError(enabledConfig, env);
-  if (!safetyError) return { config: enabledConfig, enabled: true };
-
   return {
-    config: {
-      ...config,
-      server: {
-        ...config.server,
-        access: 'local',
-        tunnel,
-      },
-    },
-    enabled: false,
-    safetyError,
+    config: enabledConfig,
+    enabled: true,
+    warning: tunnelLegacyAccessWarning(enabledConfig, env),
   };
 }
 
-export function printTunnelSavedButDisabled(safetyError?: string): void {
-  console.log(chalk.yellow('Tunnel settings were saved, but mvmt is still local-only.'));
-  if (safetyError) console.log(chalk.dim(`Reason: ${safetyError}`));
-  console.log(chalk.dim('Next options:'));
-  console.log(chalk.dim('  local only:          mvmt serve -i'));
-  console.log(chalk.dim('  temporary tunnel:    MVMT_ALLOW_LEGACY_TUNNEL=1 mvmt serve -i'));
-  console.log(chalk.dim('  safer public tunnel: add clients[] permissions, then enable tunnel access'));
+export function printTunnelEnabledWithNoTokens(warning: string): void {
+  console.log(chalk.yellow(warning));
+  console.log(chalk.dim('The public URL can be reachable before any API token can read data.'));
+  console.log(chalk.dim('Next step: mvmt tokens add'));
 }
 
 export async function promptForTunnelConfig(port: number): Promise<TunnelConfig> {
@@ -416,6 +404,13 @@ function printTunnelActionResult(runtime: TunnelRuntimeStatus): void {
   }
 
   console.log(chalk.dim('Tunnel is running, but no public URL has been detected yet.'));
+}
+
+function printApiTokenWarningForConfig(configOverride: string | undefined): void {
+  const loaded = loadConfigSummary(configOverride);
+  if (!loaded) return;
+  const warning = tunnelLegacyAccessWarning(loaded.config);
+  if (warning) printTunnelEnabledWithNoTokens(warning);
 }
 
 async function pathExists(filePath: string): Promise<boolean> {

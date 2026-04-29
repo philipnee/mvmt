@@ -9,7 +9,10 @@ mvmt is local-first and binds to `127.0.0.1`. Cloud clients such as claude.ai or
 
 Quick tunnels are temporary. Use a named tunnel or reserved domain if you need the same URL across restarts.
 
-Tunnel mode requires `clients[]`. This prevents public tunnel traffic from using the legacy all-mount session-token identity. For temporary debugging only, set `MVMT_ALLOW_LEGACY_TUNNEL=1` to bypass this guard.
+Tunnel mode can start without API tokens, but `/mcp` rejects the legacy
+all-mount session token in that state. Create scoped access with
+`mvmt tokens add`. For temporary debugging only, set
+`MVMT_ALLOW_LEGACY_TUNNEL=1` to allow the legacy session token over a tunnel.
 
 ## Built-in tunnel providers
 

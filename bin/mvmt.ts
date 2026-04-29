@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { Command } from 'commander';
+import { addApiToken, listApiTokens, removeApiToken } from '../src/cli/api-tokens.js';
 import { withInheritedConfig } from '../src/cli/command-options.js';
 import { addConnector, listConnectors } from '../src/cli/connectors.js';
 import { runConfigSetup, showConfig } from '../src/cli/config.js';
@@ -46,6 +47,7 @@ program.addHelpText('after', examples([
   ['mvmt serve -i', 'start locally with the interactive prompt'],
   ['mvmt serve --path ~/Documents', 'serve one read-only folder for this run'],
   ['mvmt mounts add notes ~/notes --mount-path /notes --read-only', 'add a read-only mount'],
+  ['mvmt tokens add codex --read /notes', 'create a scoped API token'],
   ['mvmt doctor', 'validate config and mount roots'],
 ]));
 
@@ -204,6 +206,50 @@ tokenCommand
     await rotateToken();
   });
 
+const apiTokensCommand = program
+  .command('tokens')
+  .description('Manage scoped API tokens')
+  .option('-c, --config <path>', 'Config file path')
+  .option('--json', 'Output as JSON')
+  .action(async (options: { config?: string; json?: boolean }) => {
+    await listApiTokens(options);
+  });
+
+apiTokensCommand
+  .command('list')
+  .description('List scoped API tokens')
+  .option('-c, --config <path>', 'Config file path')
+  .option('--json', 'Output as JSON')
+  .action(async (options: { config?: string; json?: boolean }, command: Command) => {
+    await listApiTokens(withInheritedConfig(options, command));
+  });
+
+apiTokensCommand
+  .command('add [id]')
+  .alias('create')
+  .description('Create or update a scoped API token')
+  .option('-c, --config <path>', 'Config file path')
+  .option('--name <text>', 'Display name')
+  .option('--read <mount>', 'Grant search/read on a mount name or path (repeatable)', collectValues)
+  .option('--write <mount>', 'Grant search/read/write/remove on a writable mount (repeatable)', collectValues)
+  .addHelpText('after', examples([
+    ['mvmt tokens add codex --read /notes', 'create a token that can search/read /notes'],
+    ['mvmt tokens add codex --write workspace', 'grant write/remove on the workspace mount'],
+    ['mvmt tokens add', 'interactive token setup'],
+  ]))
+  .action(async (id: string | undefined, options: { config?: string; name?: string; read?: string[]; write?: string[] }, command: Command) => {
+    await addApiToken(id, withInheritedConfig(options, command));
+  });
+
+apiTokensCommand
+  .command('remove [id]')
+  .description('Remove a scoped API token')
+  .option('-c, --config <path>', 'Config file path')
+  .option('-y, --yes', 'Remove without prompting for confirmation')
+  .action(async (id: string | undefined, options: { config?: string; yes?: boolean }, command: Command) => {
+    await removeApiToken(id, withInheritedConfig(options, command));
+  });
+
 const tunnelCommand = program
   .command('tunnel')
   .description('Show tunnel status or manage the active tunnel')
@@ -327,7 +373,7 @@ await program.parseAsync(['node', process.argv[1] ?? 'mvmt', ...argv]);
 function isTokenCommand(command: Command): boolean {
   let current: Command | null = command;
   while (current) {
-    if (current.name() === 'token') return true;
+    if (current.name() === 'token' || current.name() === 'tokens') return true;
     current = current.parent;
   }
   return false;

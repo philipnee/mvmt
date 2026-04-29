@@ -120,6 +120,19 @@ describe('resolveClientIdentity', () => {
       expect(identity?.isLegacyDefault).toBe(true);
     });
 
+    it('quarantines OAuth tokens when legacy default access is disabled', () => {
+      const identity = resolveClientIdentity({
+        authHeader: 'Bearer mvmtv1.something',
+        clients: [],
+        oauthAccessToken: fakeOauthAccessToken('legacy-oauth-client'),
+        validateSession: ALWAYS_FALSE,
+        allowLegacyDefault: false,
+      });
+
+      expect(identity?.source).toBe('quarantine');
+      expect(identity?.id).toBe('quarantine:legacy-oauth-client');
+    });
+
     it('does not fall through to client-token or session paths when OAuth token is present (and policy is configured)', () => {
       // Even if a token client matches the bearer string, the OAuth path
       // takes precedence for OAuth-authenticated requests.
@@ -205,6 +218,18 @@ describe('resolveClientIdentity', () => {
       expect(identity?.source).toBe('session');
       expect(identity?.id).toBe('default');
       expect(identity?.isLegacyDefault).toBe(true);
+    });
+
+    it('rejects the legacy session token when legacy default access is disabled', () => {
+      const identity = resolveClientIdentity({
+        authHeader: 'Bearer session-token',
+        clients: [],
+        oauthAccessToken: undefined,
+        validateSession: ALWAYS_TRUE,
+        allowLegacyDefault: false,
+      });
+
+      expect(identity).toBeUndefined();
     });
 
     it('does NOT fall back to default when clients[] is non-empty (session token is admin-only once policy is configured)', () => {

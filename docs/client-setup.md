@@ -1,6 +1,7 @@
 # Client Setup
 
-All clients connect to the same mvmt endpoint. Start mvmt first, then get your token:
+All clients connect to the same mvmt endpoint. For local testing, start mvmt
+first, then get the legacy session token:
 
 ```bash
 mvmt serve
@@ -12,11 +13,20 @@ Or `token` in interactive mode.
 Most MCP clients let you add servers through their settings UI. You only need two pieces of information:
 
 - **URL**: `http://127.0.0.1:4141/mcp`
-- **Authorization header**: `Bearer <token from mvmt token>`
+- **Authorization header**: `Bearer <token>`
 
 Stdio mode (Claude Desktop) is the exception — it launches mvmt directly and does not need a token.
 
-If `clients[]` is configured in `~/.mvmt/config.yaml`, HTTP clients should use their configured client token instead of the owner/session token. The owner/session token remains the legacy data-plane credential only when no `clients[]` policy exists.
+For repeatable access, create a scoped API token and use that value instead of
+the session token:
+
+```bash
+mvmt tokens add codex --read /notes
+```
+
+Once API tokens are configured, HTTP clients must use one of those tokens. The
+owner/session token remains the legacy data-plane credential only when no API
+tokens or OAuth client policy exists.
 
 ## Remote OAuth clients
 
@@ -40,7 +50,9 @@ curl -X POST https://your-public-mvmt-host/register \
   }'
 ```
 
-Use the same `client_id` and exact `redirect_uri` during `/authorize`. When `clients[]` is configured, map that OAuth `client_id` to a named client before expecting access to tools; unknown OAuth client IDs are rejected as quarantined.
+Use the same `client_id` and exact `redirect_uri` during `/authorize`. When API
+tokens or OAuth client policy is configured, map that OAuth `client_id` before
+expecting access to tools; unknown OAuth client IDs are rejected as quarantined.
 
 ## Claude Desktop
 

@@ -27,7 +27,7 @@ export class TunnelController {
   ) {}
 
   get configured(): boolean {
-    return this.serverConfig.access === 'tunnel' && Boolean(this.serverConfig.tunnel);
+    return Boolean(this.serverConfig.tunnel);
   }
 
   get running(): boolean {
@@ -71,10 +71,13 @@ export class TunnelController {
     };
   }
 
-  async start(): Promise<RunningTunnel | undefined> {
+  async start(options: { enable?: boolean } = {}): Promise<RunningTunnel | undefined> {
     if (this.current) return this.current;
 
-    if (this.serverConfig.access !== 'tunnel') return undefined;
+    if (this.serverConfig.access !== 'tunnel') {
+      if (!options.enable || !this.serverConfig.tunnel) return undefined;
+      this.serverConfig.access = 'tunnel';
+    }
 
     if (!this.serverConfig.tunnel) {
       this.logger.warn('Tunnel access is enabled, but no tunnel command is configured.');
@@ -111,9 +114,9 @@ export class TunnelController {
     }
   }
 
-  async refresh(): Promise<RunningTunnel | undefined> {
+  async refresh(options: { enable?: boolean } = {}): Promise<RunningTunnel | undefined> {
     await this.stop();
-    return this.start();
+    return this.start(options);
   }
 
   async stop(): Promise<void> {

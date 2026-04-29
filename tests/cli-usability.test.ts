@@ -154,6 +154,85 @@ describe('CLI usability', () => {
       await fs.rm(tmp, { recursive: true, force: true });
     }
   });
+
+  it('creates and lists scoped API tokens non-interactively', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    const configPath = path.join(tmp, 'config.yaml');
+    const mountRoot = path.join(tmp, 'notes');
+    try {
+      await fs.mkdir(mountRoot);
+      await saveConfig(configPath, parseConfig({
+        version: 1,
+        mounts: [{ name: 'notes', type: 'local_folder', path: '/notes', root: mountRoot }],
+      }));
+
+      const { stdout } = await runCli([
+        'tokens',
+        'add',
+        'codex',
+        '--config',
+        configPath,
+        '--read',
+        '/notes',
+        '--name',
+        'Codex CLI',
+      ]);
+      expect(stdout).toContain('API token codex created');
+      expect(stdout).toContain('API token (shown once)');
+      expect(stdout).toContain('id: codex');
+      expect(stdout).toContain('token: mvmt_');
+
+      const { stdout: list } = await runCli(['tokens', '--config', configPath]);
+      expect(list).toContain('API tokens');
+      expect(list).toContain('    codex');
+      expect(list).toContain('      name: Codex CLI');
+      expect(list).toContain('      can: search, read');
+      expect(list).toContain('      path: /notes/**');
+      expect(list).toContain('      token: hidden, remove/add to replace');
+
+      const { stdout: json } = await runCli(['tokens', '--config', configPath, '--json']);
+      expect(JSON.parse(json)).toMatchObject({
+        tokens: [
+          {
+            id: 'codex',
+            name: 'Codex CLI',
+            permissions: [{ path: '/notes/**', actions: ['search', 'read'] }],
+          },
+        ],
+      });
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects API-token write access that exceeds the mount base permission', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    const configPath = path.join(tmp, 'config.yaml');
+    const mountRoot = path.join(tmp, 'notes');
+    try {
+      await fs.mkdir(mountRoot);
+      await saveConfig(configPath, parseConfig({
+        version: 1,
+        mounts: [{ name: 'notes', type: 'local_folder', path: '/notes', root: mountRoot }],
+      }));
+
+      const result = await runCliAllowFailure([
+        'tokens',
+        'add',
+        'codex',
+        '--config',
+        configPath,
+        '--write',
+        '/notes',
+      ]);
+      expect(result.code).toBe(1);
+      expect(result.output).toContain('Mount /notes is read-only');
+      expect(result.output).not.toContain('Error:');
+      expect(result.output).not.toContain('at async');
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
 });
 
 async function runCli(args: string[]): Promise<{ stdout: string; stderr: string }> {

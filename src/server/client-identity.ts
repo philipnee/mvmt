@@ -57,6 +57,11 @@ export interface ResolveClientIdentityInput {
   clients: readonly ClientConfig[];
   oauthAccessToken: AccessToken | undefined;
   validateSession: (authHeader: string) => boolean;
+  // When false, the pre-policy session-token/OAuth compatibility path is
+  // disabled even if clients[] is empty. Tunnel mode uses this so a public
+  // endpoint can be reachable without giving the legacy session token
+  // all-mount data access.
+  allowLegacyDefault?: boolean;
 }
 
 // resolveClientIdentity returns the ClientIdentity for an authenticated
@@ -65,6 +70,7 @@ export interface ResolveClientIdentityInput {
 // permitted to do nothing" (enforcement in a follow-up PR).
 export function resolveClientIdentity(input: ResolveClientIdentityInput): ClientIdentity | undefined {
   const policyConfigured = input.clients.length > 0;
+  const allowLegacyDefault = input.allowLegacyDefault ?? true;
 
   // OAuth access token: the bearer was already verified by the caller.
   // Map its OAuth client_id to a named client. Behavior depends on
@@ -82,7 +88,7 @@ export function resolveClientIdentity(input: ResolveClientIdentityInput): Client
       (c) => c.auth.type === 'oauth' && c.auth.oauthClientIds.includes(oauthClientId),
     );
     if (named) return identityFromConfig(named, 'oauth', oauthClientId);
-    if (!policyConfigured) return synthesizeDefaultClient();
+    if (!policyConfigured && allowLegacyDefault) return synthesizeDefaultClient();
     return quarantineIdentity(oauthClientId);
   }
 
@@ -107,7 +113,7 @@ export function resolveClientIdentity(input: ResolveClientIdentityInput): Client
   // and control endpoints, but data-plane access must come through a
   // configured client. This prevents the session token from being a
   // parallel credential that bypasses per-client policy.
-  if (!policyConfigured && input.validateSession(input.authHeader)) {
+  if (!policyConfigured && allowLegacyDefault && input.validateSession(input.authHeader)) {
     return synthesizeDefaultClient();
   }
 

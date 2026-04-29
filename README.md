@@ -176,7 +176,7 @@ mvmt serve -i
 | Text index | supported as a JSON prototype index |
 | MCP tools | `search`, `list`, `read`, `write`, `remove` |
 | Mount management CLI | supported |
-| Per-client path permissions | supported via `clients[]` config |
+| API-token path permissions | supported via `mvmt tokens add` |
 | Local Streamable HTTP | supported on `127.0.0.1` |
 | Stdio mode | supported |
 | OAuth/PKCE for web clients | supported, including Dynamic Client Registration |
@@ -184,7 +184,7 @@ mvmt serve -i
 | Pattern redactor plugin | supported |
 | Legacy proxy connector config | accepted by the schema for compatibility, ignored by the mount-only CLI runtime |
 | Admin UI | not shipped |
-| Managed client-key issuance | not shipped |
+| API-token issuance | supported for bearer-token clients |
 | Remote mvmt mounts | not shipped |
 | Binary/PDF/image indexing | not shipped |
 
@@ -196,8 +196,8 @@ through tunnel mode.
 | Client | Transport | Status | Auth method | Notes |
 | --- | --- | --- | --- | --- |
 | Claude Desktop | stdio | supported | process launch | Runs its own mvmt process from the client config |
-| Claude Code | Streamable HTTP | supported | bearer token | Update the client after `mvmt token rotate` |
-| Codex CLI | Streamable HTTP | supported | bearer token | Start Codex with the token available to the client |
+| Claude Code | Streamable HTTP | supported | bearer token | Use a scoped API token from `mvmt tokens add` |
+| Codex CLI | Streamable HTTP | supported | bearer token | Use a scoped API token from `mvmt tokens add` |
 | Cursor | Streamable HTTP | expected | bearer token | Behavior depends on Cursor's MCP implementation |
 | VS Code / Copilot | Streamable HTTP | expected | bearer token | Behavior depends on the MCP extension |
 | claude.ai / ChatGPT web | public HTTPS tunnel | supported remote mode | OAuth/PKCE | Requires a reachable tunnel URL |
@@ -210,8 +210,9 @@ URL: http://127.0.0.1:4141/mcp
 Authorization: Bearer <token>
 ```
 
-In legacy mode, `<token>` is the session token from `mvmt token`. When
-`clients[]` is configured, use that client's configured API key instead.
+In local legacy mode, `<token>` can be the session token from `mvmt token`.
+For scoped access, create an API token with `mvmt tokens add` and use that
+token instead.
 
 Remote web clients use the tunnel URL, usually ending in `/mcp`, and authorize
 through OAuth 2.1 + PKCE.
@@ -357,25 +358,37 @@ Mount fields:
 An Obsidian vault is just a local folder mount. There is no special Obsidian
 runtime connector in the current mount-only shape.
 
-## Per-client policy
+## API tokens and policy
 
-If `clients[]` is absent, mvmt keeps legacy behavior: the session bearer token
-from `mvmt token` can access all configured mounts. The session token is stored
-at `~/.mvmt/.session-token` with file mode `600`. HTTP `mvmt serve` and
-`mvmt token` create it if it is missing.
+For local testing, mvmt keeps legacy behavior when no API tokens are configured:
+the session bearer token from `mvmt token` can access all configured mounts.
+The session token is stored at `~/.mvmt/.session-token` with file mode `600`.
+HTTP `mvmt serve` and `mvmt token` create it if it is missing.
 
-Once `clients[]` is present, `/mcp` becomes strict:
+For repeatable client access, create scoped API tokens:
+
+```bash
+mvmt tokens add codex --read /notes
+mvmt tokens add codex --write /workspace
+```
+
+`mvmt tokens add` prints the plaintext token once. mvmt stores only its
+SHA-256 hash in config.
+
+Once API tokens are present, `/mcp` becomes strict:
 
 - bearer tokens must match a configured client `tokenHash`;
 - OAuth access tokens must map to a configured OAuth client id;
 - the session token no longer grants data-plane access;
 - unknown OAuth clients are quarantined with zero permissions.
 
-Tunnel mode requires `clients[]`. This prevents a public tunnel from falling
-back to the legacy all-mount session-token identity. For temporary debugging
-only, set `MVMT_ALLOW_LEGACY_TUNNEL=1` to bypass this startup guard.
+Tunnel mode can start with no API tokens, but MCP data access rejects the
+legacy session token. Add API tokens to grant access. For temporary debugging
+only, set `MVMT_ALLOW_LEGACY_TUNNEL=1` to allow the legacy session token over a
+tunnel.
 
-Client permissions are written against virtual paths, not local disk paths.
+API-token permissions are written against virtual paths, not local disk paths.
+The underlying config field is currently named `clients[]`.
 
 ```yaml
 clients:
@@ -404,14 +417,11 @@ clients:
         actions: [search, read]
 ```
 
-Policy is additive. A call succeeds only when the resolved client has the
+Policy is additive. A call succeeds only when the resolved API token has the
 required action for the target virtual path.
 
 For writes, the mount itself must also have `writeAccess: true`, and the target
 must not match `protect`.
-
-Managed client-token creation is not shipped yet, so `clients[]` is currently a
-manual config feature.
 
 ## Commands
 
@@ -432,6 +442,9 @@ manual config feature.
 | `mvmt doctor` | Validate config and startup prerequisites |
 | `mvmt token` | Show the current session bearer token, creating it if missing |
 | `mvmt token rotate` | Regenerate the session bearer token |
+| `mvmt tokens` | List scoped API tokens |
+| `mvmt tokens add [id]` | Create or update a scoped API token |
+| `mvmt tokens remove [id]` | Remove a scoped API token |
 | `mvmt tunnel` | Show tunnel status |
 | `mvmt tunnel config` | Choose and save a tunnel command |
 | `mvmt tunnel start` | Start the configured tunnel |
@@ -453,6 +466,8 @@ Interactive mode accepts the same command groups:
 > config setup
 > token
 > token rotate
+> tokens
+> tokens add
 > tunnel
 > tunnel refresh
 ```
@@ -493,7 +508,7 @@ Every data operation is gated by path and action.
   and common credential files are denied regardless of per-mount config.
 - Write operations require both client `write` permission and mount
   `writeAccess`.
-- Unknown OAuth clients are quarantined once `clients[]` exists.
+- Unknown OAuth clients are quarantined once API-token/OAuth policy exists.
 - Browser-origin checks block drive-by browser requests from non-local origins.
 - The optional pattern redactor can warn, redact, or block configured regex
   matches before output reaches clients.
@@ -513,11 +528,12 @@ Remote access checklist:
 
 1. Mount only the folders the remote client needs.
 2. Prefer read-only mounts.
-3. Configure `clients[]` before exposing a tunnel. mvmt refuses tunnel startup
-   without client policy unless `MVMT_ALLOW_LEGACY_TUNNEL=1` is set.
-4. Use `protect` for secrets and private folders.
-5. Watch `~/.mvmt/audit.log` when testing a new remote client.
-6. Use a stable tunnel URL for repeatable OAuth flows.
+3. Start the tunnel when ready. Without API tokens, the public endpoint is
+   reachable but cannot read data.
+4. Create scoped API tokens with `mvmt tokens add`.
+5. Use `protect` for secrets and private folders.
+6. Watch `~/.mvmt/audit.log` when testing a new remote client.
+7. Use a stable tunnel URL for repeatable OAuth flows.
 
 Quick tunnels are convenient but temporary.
 
@@ -532,7 +548,7 @@ Quick tunnels are convenient but temporary.
 - Search is prototype keyword scoring, not semantic embedding search.
 - PDFs, images, archives, and other binary files are skipped.
 - There is no file watcher yet.
-- Managed client-key issuance and an admin UI are not shipped.
+- API-token rotation and an admin UI are not shipped.
 - mvmt does not sync, replicate, or resolve conflicts across machines.
 
 ## Coming next
@@ -541,7 +557,7 @@ Near-term:
 
 - SQLite-backed text index.
 - Incremental index updates.
-- Better mount and client management commands.
+- Better mount and API-token management commands.
 - Admin UI for client keys, path permissions, audit, and mount visibility.
 
 Later:

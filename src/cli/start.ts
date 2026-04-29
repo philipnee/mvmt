@@ -16,7 +16,7 @@ import { formatMcpPublicUrl } from '../utils/tunnel.js';
 import { initializeConnectors, LoadedConnector } from './connector-loader.js';
 import { TunnelController } from './tunnel-controller.js';
 import { InteractiveAuditLogger, startInteractivePrompt, formatHttpRequestEntry } from './interactive.js';
-import { LEGACY_TUNNEL_OVERRIDE_ENV, legacyTunnelOverrideEnabled, tunnelExposureError } from './tunnel-safety.js';
+import { LEGACY_TUNNEL_OVERRIDE_ENV, legacyTunnelOverrideEnabled, tunnelLegacyAccessWarning } from './tunnel-safety.js';
 import { promptAndAddMount } from './mounts.js';
 
 export interface StartOptions {
@@ -80,14 +80,12 @@ export async function start(options: StartOptions = {}): Promise<void> {
   let config = loadConfig(configPath);
   if (!stdioMode) {
     config = await ensureStartupMounts(config, configPath, logger);
-    const tunnelError = tunnelExposureError(config);
-    if (tunnelError) {
-      logger.error(tunnelError);
-      logger.error('Run `mvmt tunnel disable` to return to local-only mode, or add clients[] before serving a public tunnel.');
-      process.exit(1);
+    const tunnelWarning = tunnelLegacyAccessWarning(config);
+    if (tunnelWarning) {
+      logger.warn(tunnelWarning);
     }
     if (config.server.access === 'tunnel' && legacyTunnelOverrideEnabled()) {
-      logger.warn(`${LEGACY_TUNNEL_OVERRIDE_ENV}=1 is allowing tunnel access without clients[]. Remote clients will use legacy default access.`);
+      logger.warn(`${LEGACY_TUNNEL_OVERRIDE_ENV}=1 is allowing tunnel access without API tokens. Remote clients will use legacy default access.`);
     }
   }
   const port = parsePort(options.port) ?? config.server.port;
@@ -137,7 +135,8 @@ export async function start(options: StartOptions = {}): Promise<void> {
       port,
       allowedOrigins: config.server.allowedOrigins,
       resolvePublicBaseUrl: () => tunnelController.publicUrl,
-      clients: config.clients,
+      clients: () => config.clients,
+      allowLegacyDefaultClient: () => config.server.access !== 'tunnel' || legacyTunnelOverrideEnabled(),
       requestLog: interactiveMode
         ? (entry) => (audit as InteractiveAuditLogger).recordHttp(entry)
         : options.verbose
@@ -154,12 +153,18 @@ export async function start(options: StartOptions = {}): Promise<void> {
           connection.close();
           return;
         case 'tunnel.start':
-          await tunnelController.start();
+          await tunnelController.start({ enable: true });
+          if (config.server.access === 'tunnel') {
+            await saveConfig(configPath, config);
+          }
           connection.send({ ok: true, result: tunnelController.snapshot() });
           connection.close();
           return;
         case 'tunnel.refresh':
-          await tunnelController.refresh();
+          await tunnelController.refresh({ enable: true });
+          if (config.server.access === 'tunnel') {
+            await saveConfig(configPath, config);
+          }
           connection.send({ ok: true, result: tunnelController.snapshot() });
           connection.close();
           return;
@@ -185,20 +190,6 @@ export async function start(options: StartOptions = {}): Promise<void> {
             return;
           }
           const tunnelConfig = parsedTunnel.data;
-          const nextConfig = {
-            ...config,
-            server: {
-              ...config.server,
-              access: 'tunnel' as const,
-              tunnel: tunnelConfig,
-            },
-          };
-          const safetyError = tunnelExposureError(nextConfig);
-          if (safetyError) {
-            connection.send({ ok: false, error: safetyError });
-            connection.close();
-            return;
-          }
           config.server.access = 'tunnel';
           config.server.tunnel = tunnelConfig;
           await saveConfig(configPath, config);
@@ -292,9 +283,12 @@ async function ensureStartupMounts(
 
 function formatPermissionMode(config: MvmtConfig): string {
   if (config.clients && config.clients.length > 0) {
-    return 'Permissions: using configured clients[] path/action policy.';
+    return 'Permissions: using configured API-token/OAuth path-action policy.';
   }
-  return 'Permissions: no clients[] policy is configured, so the session token can access configured mounts.';
+  if (config.server.access === 'tunnel' && !legacyTunnelOverrideEnabled()) {
+    return 'Permissions: no API tokens configured, so tunnel data access is closed.';
+  }
+  return 'Permissions: no API-token policy is configured, so the session token can access configured mounts.';
 }
 
 function emitNoMountsGuidance(

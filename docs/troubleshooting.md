@@ -27,7 +27,7 @@ Check:
 
 - at least one mount is enabled;
 - the client token is current;
-- `clients[]` policy grants the needed virtual path and action;
+- the API token policy grants the needed virtual path and action;
 - the mount itself allows writes when using `write` or `remove`;
 - protected paths are not being targeted.
 

@@ -51,6 +51,28 @@ describe('TunnelController', () => {
     });
   });
 
+  it('treats saved tunnel details as configured even before access is enabled', async () => {
+    serverConfig = {
+      access: 'local',
+      tunnel: { provider: 'localhost-run', command: 'ssh -R 80:localhost:{port} localhost.run' },
+    };
+    const controller = new TunnelController(serverConfig, 4141, logger);
+    const mockTunnel = { url: 'https://test.localhost.run', stop: vi.fn() };
+    vi.mocked(tunnelUtils.startTunnel).mockResolvedValue(mockTunnel as any);
+    vi.mocked(tunnelUtils.missingTunnelDependency).mockReturnValue(undefined);
+
+    expect(controller.snapshot().configured).toBe(true);
+    await controller.start();
+
+    expect(serverConfig.access).toBe('local');
+    expect(controller.snapshot().running).toBe(false);
+
+    await controller.start({ enable: true });
+
+    expect(serverConfig.access).toBe('tunnel');
+    expect(controller.snapshot().running).toBe(true);
+  });
+
   it('updates snapshot fields when starting', async () => {
     const controller = new TunnelController(serverConfig, 4141, logger);
     const tunnelConfig = { provider: 'localhost-run' as const, command: 'ssh -R 80:localhost:{port} localhost.run' };

@@ -271,8 +271,11 @@ function mountPatchFromOptions(options: EditMountOptions): Partial<MountInput> {
 }
 
 async function promptForMountInput(config: MvmtConfig): Promise<MountInput> {
+  const root = await promptForExistingFolder();
+  const defaultName = uniqueMountName(config, mountNameFromRoot(root));
   const name = await input({
-    message: 'Mount name (short id, e.g. notes):',
+    message: 'Mount id (optional stable id):',
+    default: defaultName,
     validate: (value) => {
       const trimmed = value.trim();
       if (!/^[a-z0-9][a-z0-9_-]*$/.test(trimmed)) return 'Use lowercase letters, numbers, dash, or underscore';
@@ -280,7 +283,6 @@ async function promptForMountInput(config: MvmtConfig): Promise<MountInput> {
       return true;
     },
   });
-  const root = await promptForExistingFolder();
   const mountPath = await input({
     message: 'Virtual path clients will use:',
     default: `/${name.trim()}`,
@@ -453,4 +455,26 @@ function validateMountPathInput(value: string, config: MvmtConfig, currentName?:
     return `Mount path already exists: ${normalized}`;
   }
   return true;
+}
+
+function mountNameFromRoot(root: string): string {
+  const resolved = resolveSetupPath(root);
+  const slug = resolved
+    .replaceAll('\\', '/')
+    .split('/')
+    .filter(Boolean)
+    .join('-')
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return slug || 'mount';
+}
+
+function uniqueMountName(config: MvmtConfig, baseName: string): string {
+  if (!config.mounts.some((mount) => mount.name === baseName)) return baseName;
+  for (let index = 2; ; index += 1) {
+    const candidate = `${baseName}-${index}`;
+    if (!config.mounts.some((mount) => mount.name === candidate)) return candidate;
+  }
 }
