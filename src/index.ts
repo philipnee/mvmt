@@ -2,8 +2,6 @@ export { doctor, collectDoctorReport } from './cli/doctor.js';
 export type { DoctorOptions, DoctorReport, DoctorStatus } from './cli/doctor.js';
 export { printConfigSummary, runConfigSetup, showConfig } from './cli/config.js';
 export type { ConfigCommandOptions, ConfigSummaryRuntime } from './cli/config.js';
-export { addConnector, getConnectorSetupStatuses, listConnectors } from './cli/connectors.js';
-export type { ConnectorCommandOptions, ConnectorSetupStatus } from './cli/connectors.js';
 export { setupConfig } from './cli/init.js';
 export { start } from './cli/start.js';
 export type { StartOptions } from './cli/start.js';
@@ -21,7 +19,7 @@ export {
 export type { TunnelCommandOptions, TunnelRuntimeStatus } from './cli/tunnel.js';
 export { printTokenSummary, readTokenSummary, rotateToken, showToken, showTokenSummary } from './cli/token.js';
 export type { TokenSummary } from './cli/token.js';
-export { ConfigSchema, LocalFolderMountSchema, ProxySchema, TunnelSchema } from './config/schema.js';
+export { ConfigSchema, LocalFolderMountSchema, TunnelSchema } from './config/schema.js';
 export {
   DEFAULT_PATTERN_REDACTOR_PATTERNS,
   PatternRedactorPatternSchema,
@@ -34,14 +32,11 @@ export type {
   PatternRedactorPatternConfig,
   PatternRedactorPluginConfig,
   PluginConfig,
-  ProxyConfig,
   TunnelConfig,
 } from './config/schema.js';
 export { configExists, expandHome, getConfigPath, loadConfig, parseConfig, readConfig, resolveConfigPath, saveConfig } from './config/loader.js';
 
-export { createProxyConnector } from './connectors/factory.js';
-export { upsertProxyConfig } from './connectors/setup-utils.js';
-export type { CallToolResult, Connector, ToolDefinition } from './connectors/types.js';
+export type { CallToolResult } from './connectors/types.js';
 export { createMcpServer, startHttpServer, startStdioServer } from './server/index.js';
 export type { HttpServerOptions, StartedHttpServer } from './server/index.js';
 export { ToolRouter } from './server/router.js';
