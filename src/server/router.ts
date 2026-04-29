@@ -1,5 +1,6 @@
 import { CallToolResult, Connector, ToolDefinition } from '../connectors/types.js';
 import { isLikelyWriteTool } from '../connectors/write-policy.js';
+import { normalizePathSeparators, stripTrailingSlashes } from '../context/mount-registry.js';
 import { TextContextIndex } from '../context/text-index.js';
 import { PermissionConfig, SemanticToolsConfig } from '../config/schema.js';
 import { PatternRedactorAuditEvent, ToolResultPlugin } from '../plugins/types.js';
@@ -699,7 +700,7 @@ function pathMatchesPermission(inputPath: string, pattern: string): boolean {
 }
 
 function normalizePermissionPath(inputPath: string): string {
-  const trimmed = inputPath.trim().replace(/\\/g, '/').replace(/\/+$/, '');
+  const trimmed = stripTrailingSlashes(normalizePathSeparators(inputPath.trim()));
   if (!trimmed || trimmed === '/') return '/';
   return trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
 }
@@ -815,7 +816,7 @@ function stringValue(value: unknown): string | undefined {
 }
 
 function titleFromLocator(locator: string): string {
-  const normalized = locator.replace(/\\/g, '/');
+  const normalized = normalizePathSeparators(locator);
   const leaf = normalized.split('/').filter(Boolean).at(-1) ?? normalized;
   return leaf.replace(/\.md$/i, '') || locator;
 }

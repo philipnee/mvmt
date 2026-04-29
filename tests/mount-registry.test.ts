@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { parseConfig } from '../src/config/loader.js';
-import { MountRegistry } from '../src/context/mount-registry.js';
+import { joinVirtualPath, MountRegistry, normalizeVirtualPath } from '../src/context/mount-registry.js';
 
 describe('MountRegistry', () => {
   it('resolves global paths to the matching mount and relative path', () => {
@@ -45,5 +45,10 @@ describe('MountRegistry', () => {
     const registry = new MountRegistry(config.mounts);
 
     expect(() => registry.resolve('/notebook/todo.md')).toThrow('unknown mount for path: /notebook/todo.md');
+  });
+
+  it('normalizes virtual path separators without regex backtracking', () => {
+    expect(normalizeVirtualPath('////notes\\projects\\mvmt.md')).toBe('/notes/projects/mvmt.md');
+    expect(joinVirtualPath('/notes////', '\\projects\\mvmt.md')).toBe('/notes/projects/mvmt.md');
   });
 });
