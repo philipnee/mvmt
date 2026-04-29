@@ -142,26 +142,8 @@ export class OAuthStore {
   }
 
   registerClient(client: RegisteredClient): RegisteredClient {
-    if (client.clientId.length > MAX_CLIENT_ID_LENGTH) {
-      throw new OAuthClientRegistryLimitError(`client_id exceeds ${MAX_CLIENT_ID_LENGTH} characters`);
-    }
-    const normalized: RegisteredClient = {
-      clientId: client.clientId,
-      redirectUris: [...new Set(client.redirectUris.filter((uri) => typeof uri === 'string' && uri.length > 0))],
-    };
-    if (normalized.redirectUris.length > this.maxRedirectUrisPerClient) {
-      throw new OAuthClientRegistryLimitError(`redirect_uris exceeds ${this.maxRedirectUrisPerClient} entries`);
-    }
-    if (normalized.redirectUris.some((uri) => uri.length > MAX_REDIRECT_URI_LENGTH)) {
-      throw new OAuthClientRegistryLimitError(`redirect_uri exceeds ${MAX_REDIRECT_URI_LENGTH} characters`);
-    }
-    const existing = this.clients.get(normalized.clientId);
-    if (existing) {
-      throw new OAuthClientAlreadyRegisteredError('OAuth client_id is already registered');
-    }
-    if (this.clients.size >= this.maxRegisteredClients) {
-      throw new OAuthClientRegistryLimitError(`OAuth client registry is limited to ${this.maxRegisteredClients} clients`);
-    }
+    const normalized = this.normalizeRegisteredClient(client);
+    this.assertClientCanBeRegistered(normalized);
     this.clients.set(normalized.clientId, normalized);
     try {
       this.persistClients();
@@ -180,6 +162,31 @@ export class OAuthStore {
     const client = this.clients.get(clientId);
     if (!client) return false;
     return client.redirectUris.includes(redirectUri);
+  }
+
+  private normalizeRegisteredClient(client: RegisteredClient): RegisteredClient {
+    return {
+      clientId: client.clientId,
+      redirectUris: [...new Set(client.redirectUris.filter((uri) => typeof uri === 'string' && uri.length > 0))],
+    };
+  }
+
+  private assertClientCanBeRegistered(client: RegisteredClient): void {
+    if (client.clientId.length > MAX_CLIENT_ID_LENGTH) {
+      throw new OAuthClientRegistryLimitError(`client_id exceeds ${MAX_CLIENT_ID_LENGTH} characters`);
+    }
+    if (client.redirectUris.length > this.maxRedirectUrisPerClient) {
+      throw new OAuthClientRegistryLimitError(`redirect_uris exceeds ${this.maxRedirectUrisPerClient} entries`);
+    }
+    if (client.redirectUris.some((uri) => uri.length > MAX_REDIRECT_URI_LENGTH)) {
+      throw new OAuthClientRegistryLimitError(`redirect_uri exceeds ${MAX_REDIRECT_URI_LENGTH} characters`);
+    }
+    if (this.clients.has(client.clientId)) {
+      throw new OAuthClientAlreadyRegisteredError('OAuth client_id is already registered');
+    }
+    if (this.clients.size >= this.maxRegisteredClients) {
+      throw new OAuthClientRegistryLimitError(`OAuth client registry is limited to ${this.maxRegisteredClients} clients`);
+    }
   }
 
   private loadClientsFromDisk(): void {

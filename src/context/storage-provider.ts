@@ -1,7 +1,7 @@
 import fsp from 'fs/promises';
 import path from 'path';
-import { GLOBAL_SECRET_PATH_PATTERNS } from '../config/schema.js';
 import { joinVirtualPath, normalizePathSeparators, RegisteredMount, toVirtualRelative } from './mount-registry.js';
+import { isGloballyDeniedPath, matchesConfiguredOrGlobalPattern } from './path-policy.js';
 
 export interface StorageProviderFile {
   mount: string;
@@ -240,11 +240,11 @@ export class LocalFolderStorageProvider implements StorageProvider {
   }
 
   private isExcluded(relativePath: string): boolean {
-    return matchesAny(relativePath, [...GLOBAL_SECRET_PATH_PATTERNS, ...this.mount.config.exclude]);
+    return matchesConfiguredOrGlobalPattern(relativePath, this.mount.config.exclude);
   }
 
   private isProtected(relativePath: string): boolean {
-    return matchesAny(relativePath, [...GLOBAL_SECRET_PATH_PATTERNS, ...this.mount.config.protect]);
+    return matchesConfiguredOrGlobalPattern(relativePath, this.mount.config.protect);
   }
 }
 
@@ -258,57 +258,9 @@ function joinRelative(base: string, leaf: string): string {
   return normalizePathSeparators([base, leaf].filter(Boolean).join('/'));
 }
 
-function matchesAny(relativePath: string, patterns: string[]): boolean {
-  const normalized = toVirtualRelative(relativePath);
-  return patterns.some((pattern) => {
-    const normalizedPattern = toVirtualRelative(pattern);
-    if (normalizedPattern.endsWith('/**')) {
-      const prefix = normalizedPattern.slice(0, -3);
-      return normalized === prefix || normalized.startsWith(`${prefix}/`);
-    }
-    return globToRegExp(pattern).test(normalized);
-  });
-}
-
-function isGloballyDeniedPath(relativePath: string, realPath: string): boolean {
-  return matchesAny(relativePath, [...GLOBAL_SECRET_PATH_PATTERNS]) || realPathHasSensitiveSegment(realPath);
-}
-
-const GLOBALLY_DENIED_SEGMENTS = new Set(['.mvmt', '.ssh', '.gnupg', '.aws', '.kube', '.docker']);
-const GLOBALLY_DENIED_SEGMENT_PATHS = [
-  ['.config', 'gh'],
-  ['.config', 'gcloud'],
-  ['.config', 'azure'],
-];
-
-function realPathHasSensitiveSegment(realPath: string): boolean {
-  const segments = normalizePathSeparators(realPath).split('/').filter(Boolean);
-  if (segments.some((segment) => GLOBALLY_DENIED_SEGMENTS.has(segment))) return true;
-  return GLOBALLY_DENIED_SEGMENT_PATHS.some((denied) => containsSegmentSequence(segments, denied));
-}
-
-function containsSegmentSequence(segments: string[], needle: string[]): boolean {
-  for (let start = 0; start <= segments.length - needle.length; start += 1) {
-    if (needle.every((segment, offset) => segments[start + offset] === segment)) return true;
-  }
-  return false;
-}
-
-function globToRegExp(pattern: string): RegExp {
-  const normalized = toVirtualRelative(pattern);
-  const escaped = escapeRegExp(normalized)
-    .replace(/\\\*\\\*/g, '.*')
-    .replace(/\\\*/g, '[^/]*');
-  return new RegExp(`^${escaped}$`);
-}
-
 function isWithin(root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function isMissingPathError(err: unknown): boolean {

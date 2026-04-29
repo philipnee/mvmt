@@ -1,9 +1,7 @@
 import { input, select } from '@inquirer/prompts';
 import chalk from 'chalk';
 import fs from 'fs/promises';
-import path from 'path';
-import yaml from 'yaml';
-import { configExists, expandHome, getConfigPath, readConfig, resolveConfigPath } from '../config/loader.js';
+import { configExists, expandHome, getConfigPath, readConfig, resolveConfigPath, saveConfig } from '../config/loader.js';
 import { MvmtConfig, TunnelConfig } from '../config/schema.js';
 import {
   cloudflareNamedTunnelCommand,
@@ -367,13 +365,5 @@ function validatePublicUrlInput(value: string): true | string {
     return url.protocol === 'https:' ? true : 'Enter an https:// URL';
   } catch {
     return 'Enter a valid public URL, for example https://pnee.gofrieda.org';
-  }
-}
-
-async function saveConfig(configPath: string, config: MvmtConfig): Promise<void> {
-  await fs.mkdir(path.dirname(configPath), { recursive: true });
-  await fs.writeFile(configPath, yaml.stringify(config), 'utf-8');
-  if (process.platform !== 'win32') {
-    await fs.chmod(configPath, 0o600);
   }
 }
