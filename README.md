@@ -1,94 +1,189 @@
-# (mvmt) Multi-Volume Mount Transport
+# mvmt
 
-**One permissioned namespace for agent context.**
+**Multi-Volume Mount Transport.**
 
-mvmt is a local-first MCP server that mounts selected data into one virtual
-namespace for AI agents. Today those mounts are local folders. The same shape is
-intended to extend to other volumes, storage backends, and remote mvmt
-instances.
+mvmt exposes selected local folders through a small, permissioned tool API.
 
-Agents call stable tools against paths such as `/notes`, `/workspace`, or
-eventually `/desktop/projects`; they do not get full-computer access. mvmt
-resolves the path, checks the client's permissions, and routes the allowed
-operation to the right mount.
+Mount folders into stable paths like `/notes`, `/workspace`, or `/research`,
+then allow clients to search, list, read, write, or remove files within those
+mounts. Clients never get full-computer access. They only see the mounts and
+actions you allow.
 
-mvmt is federated access, not sync. Data stays where it lives.
+```txt
+client
+  |
+  v
+mvmt
+  |
+  |-- /notes      -> ~/Documents/Obsidian
+  |-- /workspace  -> ~/code/mvmt
+  |-- /research   -> ~/papers
+```
 
-- **One namespace, many volumes** - expose selected mounts through one endpoint.
-- **Five stable tools** - `search`, `list`, `read`, `write`, and `remove`.
-- **Read-only by default** - writes require both mount-level write access and
-  client-level `write` permission.
-- **Per-client policy** - bind different API keys or OAuth clients to different
-  path/action permissions.
-- **Agent context per mount** - descriptions and guidance are returned from
-  `list("/")` so agents know what each mounted folder is for.
-- **Tunnel-ready** - expose the same endpoint to web clients over HTTPS with
-  OAuth/PKCE.
+mvmt is **not sync**.
+mvmt is **not cloud storage**.
+mvmt is **not a general-purpose filesystem server**.
 
-> [!WARNING]
-> Tunnel mode exposes your configured mvmt endpoint beyond your machine. Keep
-> mounts narrow, keep writes disabled unless needed, and use per-client policy
-> before giving remote clients access.
+It is a local-first access layer for exposing specific parts of your machine
+through explicit mounts, narrow tools, and per-client permissions.
 
 ![mvmt running in interactive mode](docs/assets/mvmt-start-interactive.png)
 
-## Quick Start
+## Why mvmt exists
+
+Many tools need controlled access to local files.
+
+Giving a tool broad filesystem access is risky. Uploading everything into a
+cloud workspace is often unnecessary. Ad hoc local servers usually lack a clear
+permission model.
+
+mvmt takes a narrower approach:
+
+- Mount only the folders you want clients to see.
+- Expose those folders through stable virtual paths.
+- Give each client its own path/action permissions.
+- Keep data on your machine.
+- Audit what clients search, read, write, and remove.
+
+## Core ideas
+
+### One local namespace
+
+Clients operate on virtual paths:
+
+```txt
+/notes
+/workspace
+/research
+```
+
+They do not need to know where those folders live on disk.
+
+### Explicit mounts
+
+Each mount maps a virtual path to a real local folder.
+
+```yaml
+mounts:
+  - name: notes
+    path: /notes
+    root: /Users/you/Documents/Obsidian
+    writeAccess: false
+```
+
+### Per-client permissions
+
+Different clients can see different parts of the namespace.
+
+```yaml
+clients:
+  - id: codex
+    permissions:
+      - path: /workspace/**
+        actions: [search, read, write]
+
+  - id: readonly-client
+    permissions:
+      - path: /notes/**
+        actions: [search, read]
+```
+
+### Read-only by default
+
+A write requires both:
+
+1. the client has `write` permission for the path; and
+2. the mount has `writeAccess: true`.
+
+Protected paths such as `.env`, `.claude/**`, or other configured patterns
+cannot be written or removed.
+
+## Quick start
+
+Install and start mvmt:
 
 ```bash
 npm install -g mvmt
 mvmt serve -i
 ```
 
-On first run, `mvmt serve` creates `~/.mvmt/config.yaml`, asks which local
-folders to mount, optionally enables the pattern redactor, then starts the MCP
-server.
+On first run, mvmt creates:
 
-For a one-off read-only folder without changing the saved config:
+```txt
+~/.mvmt/config.yaml
+```
+
+It then walks through:
+
+- adding local folder mounts;
+- optionally enabling the pattern redactor;
+- starting the MCP server.
+
+For a one-off read-only folder without changing saved config:
 
 ```bash
 mvmt serve --path ~/Documents -i
 ```
 
-For an existing config, add or edit mounts directly:
+At least one enabled mount is required. If no mounts are configured, mvmt has no
+data to serve.
+
+## Example setup
+
+Add a read-only notes mount:
 
 ```bash
-mvmt mounts add notes ~/Documents/Obsidian --mount-path /notes --read-only \
+mvmt mounts add notes ~/Documents/Obsidian \
+  --mount-path /notes \
+  --read-only \
   --description "Personal notes and project journals" \
   --guidance "Search first. Read specific files before answering."
+```
 
-mvmt mounts add workspace ~/code/mvmt --mount-path /workspace --write \
+Add a writable project mount:
+
+```bash
+mvmt mounts add workspace ~/code/mvmt \
+  --mount-path /workspace \
+  --write \
   --protect ".env" \
   --protect ".env.*" \
-  --protect ".claude/**"
+  --protect ".claude/**" \
+  --description "mvmt source code and design docs" \
+  --guidance "Read README.md and docs before changing code."
+```
 
-mvmt mounts list
+Then rebuild the index and serve:
+
+```bash
 mvmt reindex
 mvmt serve -i
 ```
-
-At least one enabled mount is required. If no mounts are configured, mvmt has no
-data to serve.
 
 ## Status
 
 | Area | Status |
 | --- | --- |
 | Local folder mounts | supported |
-| Text index | supported as a JSON prototype index beside the config file |
+| Text index | supported as a JSON prototype index |
 | MCP tools | `search`, `list`, `read`, `write`, `remove` |
-| Mount management CLI | `mvmt mounts add/edit/remove/list` |
+| Mount management CLI | supported |
 | Per-client path permissions | supported via `clients[]` config |
 | Local Streamable HTTP | supported on `127.0.0.1` |
-| Stdio mode | supported for clients that launch mvmt directly |
+| Stdio mode | supported |
 | OAuth/PKCE for web clients | supported, including Dynamic Client Registration |
 | Tunnel mode | supported for personal remote access |
-| Pattern redactor plugin | supported and opt-in during setup |
-| Legacy proxy connectors | accepted by the schema for compatibility, ignored by the mount-only CLI runtime |
-| Admin UI and managed key issuance | not shipped |
-| Remote/federated mvmt mounts | not shipped |
+| Pattern redactor plugin | supported |
+| Legacy proxy connector config | accepted by the schema for compatibility, ignored by the mount-only CLI runtime |
+| Admin UI | not shipped |
+| Managed client-key issuance | not shipped |
+| Remote mvmt mounts | not shipped |
 | Binary/PDF/image indexing | not shipped |
 
-## Client Compatibility
+## Client compatibility
+
+mvmt can be used by MCP clients, local HTTP clients, and remote web clients
+through tunnel mode.
 
 | Client | Transport | Status | Auth method | Notes |
 | --- | --- | --- | --- | --- |
@@ -98,57 +193,86 @@ data to serve.
 | Cursor | Streamable HTTP | expected | bearer token | Behavior depends on Cursor's MCP implementation |
 | VS Code / Copilot | Streamable HTTP | expected | bearer token | Behavior depends on the MCP extension |
 | claude.ai / ChatGPT web | public HTTPS tunnel | supported remote mode | OAuth/PKCE | Requires a reachable tunnel URL |
-| Raw HTTP/curl | Streamable HTTP | debug only | bearer token | Must follow MCP session initialization rules |
+| Raw HTTP / curl | Streamable HTTP | debug only | bearer token | Must follow MCP session initialization rules |
 
-Most HTTP clients need:
+Most local HTTP clients need:
 
-- **URL**: `http://127.0.0.1:4141/mcp`
-- **Authorization header**: `Bearer <token from mvmt token>`
+```txt
+URL: http://127.0.0.1:4141/mcp
+Authorization: Bearer <token>
+```
+
+In legacy mode, `<token>` is the session token from `mvmt token`. When
+`clients[]` is configured, use that client's configured API key instead.
 
 Remote web clients use the tunnel URL, usually ending in `/mcp`, and authorize
-through OAuth 2.1 + PKCE. mvmt supports RFC 7591 Dynamic Client Registration.
-Issued OAuth access tokens are audience-bound to the current mvmt resource, so a
-token minted for one mvmt instance cannot be replayed against another.
+through OAuth 2.1 + PKCE.
+
+mvmt supports RFC 7591 Dynamic Client Registration. Issued OAuth access tokens
+are audience-bound to the current mvmt resource, so a token minted for one mvmt
+instance cannot be replayed against another.
 
 Claude Desktop is different: it launches mvmt over stdio, so there is no HTTP
 listener and no bearer token header.
 
-## Tool Surface
+## Tool surface
 
-When `mounts[]` is configured, mvmt exposes these MCP tools:
+When `mounts[]` is configured, mvmt exposes five MCP tools:
 
-| Tool | Purpose | Permission |
+| Tool | Purpose | Required permission |
 | --- | --- | --- |
 | `search` | Search indexed text chunks across permitted mounts | `search` |
-| `list` | List permitted mount roots or a directory within one mount | `read` |
+| `list` | List visible mount roots or directories | `read` |
 | `read` | Read one text file by virtual path | `read` |
 | `write` | Create or overwrite one text file | `write` |
 | `remove` | Delete one text file | `write` |
 
 Important behavior:
 
-- `list("/")` returns each visible mount root with its description, guidance,
-  and write-access flag.
-- `search` uses keyword scoring over indexed text chunks. It is intentionally
-  simple today.
+- `list("/")` returns visible mount roots with description, guidance, and
+  write-access status.
+- `search` uses simple keyword scoring over indexed text chunks.
 - `read` and `write` are text-only.
-- `write` accepts `expected_hash` so clients can reject stale writes after a
-  previous `read`.
+- `write` supports `expected_hash` so clients can avoid overwriting stale reads.
 - `remove` deletes files permanently. It does not remove directories.
 - Non-text files are hidden from `list`, skipped by indexing, and rejected by
   `read`/`write`.
 
 Supported text-like files include Markdown, plain text, JSON, YAML, TOML, CSV,
-logs, shell scripts, HTML/CSS/XML, and common source-code extensions. Files over
-2 MiB are skipped by the index and rejected as direct text reads.
+logs, shell scripts, HTML/CSS/XML, and common source-code extensions.
+
+Files over 2 MiB are skipped by the index and rejected by direct text reads.
 
 ## Configuration
 
-The saved config lives at `~/.mvmt/config.yaml`. You can inspect it with
-`mvmt config`, validate it with `mvmt doctor`, and update mounts with
-`mvmt mounts ...`.
+The saved config lives at:
 
-Minimal mount-based config:
+```txt
+~/.mvmt/config.yaml
+```
+
+Inspect it:
+
+```bash
+mvmt config
+```
+
+Validate it:
+
+```bash
+mvmt doctor
+```
+
+Manage mounts:
+
+```bash
+mvmt mounts list
+mvmt mounts add
+mvmt mounts edit
+mvmt mounts remove
+```
+
+Minimal config:
 
 ```yaml
 version: 1
@@ -157,8 +281,6 @@ server:
   port: 4141
   allowedOrigins: []
   access: local
-
-proxy: []
 
 mounts:
   - name: notes
@@ -206,19 +328,19 @@ Mount fields:
 | Field | Meaning |
 | --- | --- |
 | `name` | Stable lowercase mount id, such as `notes` |
-| `path` | Virtual path visible to agents, such as `/notes` |
+| `path` | Virtual path visible to clients, such as `/notes` |
 | `root` | Local folder on disk |
 | `description` | Short summary returned from `list("/")` |
-| `guidance` | Human-authored instructions returned from `list("/")` |
-| `exclude` | Glob-like paths hidden from listing, reads, writes, and indexing |
-| `protect` | Glob-like paths that cannot be written or removed |
+| `guidance` | Optional client-facing guidance returned from `list("/")` |
+| `exclude` | Paths hidden from listing, reads, writes, removal, and indexing |
+| `protect` | Paths that cannot be written or removed |
 | `writeAccess` | Mount-level write gate; defaults to `false` |
 | `enabled` | Whether the mount is active |
 
 An Obsidian vault is just a local folder mount. There is no special Obsidian
 runtime connector in the current mount-only shape.
 
-## Per-Client Policy
+## Per-client policy
 
 If `clients[]` is absent, mvmt keeps legacy behavior: the session bearer token
 from `mvmt token` can access all configured mounts.
@@ -230,8 +352,7 @@ Once `clients[]` is present, `/mcp` becomes strict:
 - the session token no longer grants data-plane access;
 - unknown OAuth clients are quarantined with zero permissions.
 
-Client permissions are written against virtual mount paths, not local disk
-paths:
+Client permissions are written against virtual paths, not local disk paths.
 
 ```yaml
 clients:
@@ -239,7 +360,8 @@ clients:
     name: Codex CLI
     auth:
       type: token
-      # SHA-256 hex of the client API key. Do not store the plaintext key.
+      # SHA-256 hex of the client API key.
+      # Do not store the plaintext key.
       tokenHash: "0000000000000000000000000000000000000000000000000000000000000000"
     rawToolsEnabled: false
     permissions:
@@ -248,12 +370,11 @@ clients:
       - path: /notes/**
         actions: [search, read]
 
-  - id: chatgpt
-    name: ChatGPT
+  - id: readonly-client
+    name: Read-only client
     auth:
-      type: oauth
-      oauthClientIds:
-        - chatgpt-mvmt
+      type: token
+      tokenHash: "1111111111111111111111111111111111111111111111111111111111111111"
     rawToolsEnabled: false
     permissions:
       - path: /notes/**
@@ -261,8 +382,10 @@ clients:
 ```
 
 Policy is additive. A call succeeds only when the resolved client has the
-required action for the target virtual path. For writes, the mount itself must
-also have `writeAccess: true`, and the target must not match `protect`.
+required action for the target virtual path.
+
+For writes, the mount itself must also have `writeAccess: true`, and the target
+must not match `protect`.
 
 Managed client-token creation is not shipped yet, so `clients[]` is currently a
 manual config feature.
@@ -273,119 +396,134 @@ manual config feature.
 | --- | --- |
 | `mvmt serve` | Configure mvmt if needed, then start the MCP server |
 | `mvmt serve -i` | Start with an interactive control prompt |
-| `mvmt serve --path <dir>` | Temporarily serve one read-only folder without changing saved config |
-| `mvmt reindex` | Force a full rebuild of the text index |
+| `mvmt serve --path <dir>` | Temporarily serve one read-only folder |
+| `mvmt reindex` | Rebuild the text index |
 | `mvmt mounts` | List configured mounts |
 | `mvmt mounts add [name] [root]` | Add a local folder mount |
 | `mvmt mounts edit [name]` | Edit a mount |
 | `mvmt mounts remove [name]` | Remove a mount |
 | `mvmt config` | Show the saved config summary |
-| `mvmt config setup` | Rerun guided setup and save config |
+| `mvmt config setup` | Rerun guided setup |
 | `mvmt doctor` | Validate config and startup prerequisites |
-| `mvmt token` | Show the current session bearer token and age |
+| `mvmt token` | Show the current session bearer token |
 | `mvmt token rotate` | Regenerate the session bearer token |
 | `mvmt tunnel` | Show tunnel status |
-| `mvmt tunnel config` | Choose a tunnel command and save it |
-| `mvmt tunnel start` | Start the configured tunnel for the running mvmt process |
-| `mvmt tunnel refresh` | Restart the configured tunnel and print the new URL |
-| `mvmt tunnel stop` | Stop public tunnel exposure without stopping mvmt |
+| `mvmt tunnel config` | Choose and save a tunnel command |
+| `mvmt tunnel start` | Start the configured tunnel |
+| `mvmt tunnel refresh` | Restart the tunnel and print the new URL |
+| `mvmt tunnel stop` | Stop public tunnel exposure |
 | `mvmt tunnel logs` | Show recent tunnel output |
 | `mvmt tunnel logs stream` | Stream live tunnel output |
 | `mvmt --version` | Print version and check for updates |
 
-Interactive mode (`mvmt serve -i`) accepts the same command groups:
+Interactive mode accepts the same command groups:
 
-```text
+```txt
 > mounts
 > mounts add
 > mounts edit
 > mounts remove
-
 > config
 > config setup
-
 > token
 > token rotate
-
 > tunnel
 > tunnel refresh
 ```
 
-## Index Lifecycle
+## Index lifecycle
 
 On `mvmt serve`, mvmt starts serving immediately and rebuilds the text index in
-the background. Calls may return fewer search results until that rebuild
-finishes.
+the background.
 
-Use `mvmt reindex` after changing files outside mvmt or after editing mount
-configuration. Writes and removes performed through mvmt rebuild the index
-automatically.
+Search may return fewer results until the rebuild finishes.
+
+Use:
+
+```bash
+mvmt reindex
+```
+
+after changing files outside mvmt or after editing mount configuration.
+
+Writes and removes performed through mvmt rebuild the index automatically.
 
 The current index is a JSON file beside the config file. SQLite and incremental
-watching are planned, but not shipped.
+file watching are planned but not shipped.
 
-## Security Model
+## Security model
 
 Every data operation is gated by path and action.
 
 - HTTP mode binds to `127.0.0.1`, not `0.0.0.0`.
 - HTTP `/mcp` and `/health` require authentication.
-- The session token is stored at `~/.mvmt/.session-token` with mode `600` and
-  rotates with `mvmt token rotate`.
-- Mount roots are resolved before access, and path traversal outside the mount
-  root is rejected.
+- The session token is stored at `~/.mvmt/.session-token` with mode `600`.
+- Mount roots are resolved before access.
+- Path traversal outside the mount root is rejected.
 - `exclude` hides paths from listing, reading, writing, removal, and indexing.
 - `protect` blocks write/remove for sensitive paths such as `.env` and
   `.claude/**`.
-- Write operations require client `write` permission and mount `writeAccess`.
-- Per-client policy quarantines unknown OAuth clients once `clients[]` exists.
+- Write operations require both client `write` permission and mount
+  `writeAccess`.
+- Unknown OAuth clients are quarantined once `clients[]` exists.
 - Browser-origin checks block drive-by browser requests from non-local origins.
-- Optional pattern redactor can warn, redact, or block configured regex matches
-  before tool output reaches clients.
+- The optional pattern redactor can warn, redact, or block configured regex
+  matches before output reaches clients.
 - Tool calls are appended to `~/.mvmt/audit.log`.
 
 Authentication controls who connects. Mounts and client policy control what they
 can access.
 
-## Remote Access
+## Remote access
 
-mvmt is local-first. Cloud clients such as ChatGPT and claude.ai cannot reach
-`127.0.0.1` directly, so tunnel mode can publish a public HTTPS URL.
+mvmt is local-first.
+
+Remote clients cannot reach `127.0.0.1` directly, so tunnel mode can publish a
+public HTTPS URL.
 
 Remote access checklist:
 
 1. Mount only the folders the remote client needs.
 2. Prefer read-only mounts.
 3. Configure `clients[]` before exposing a tunnel.
-4. Use `protect` for secrets and agent-private folders.
+4. Use `protect` for secrets and private folders.
 5. Watch `~/.mvmt/audit.log` when testing a new remote client.
+6. Use a stable tunnel URL for repeatable OAuth flows.
 
-Quick tunnels are convenient but temporary. For repeatable remote OAuth flows,
-use a stable tunnel URL.
+Quick tunnels are convenient but temporary.
 
-## Current Limits
+## Current limits
 
-- The active CLI runtime is mount-only. Legacy proxy connector config still
-  parses, but proxy connectors are not loaded as runtime tools.
 - Local folders are the only shipped mount provider.
-- The index supports text-like files only. PDFs, images, archives, and other
-  binary files are skipped.
+- mvmt currently runs as a single instance.
+- Remote mvmt mounts are not shipped.
+- The active CLI runtime is mount-only.
+- Legacy proxy connector config still parses for compatibility, but proxy
+  connectors are not loaded as runtime tools.
 - Search is prototype keyword scoring, not semantic embedding search.
+- PDFs, images, archives, and other binary files are skipped.
 - There is no file watcher yet.
 - Managed client-key issuance and an admin UI are not shipped.
-- Remote/federated mvmt mounts are planned, but not shipped.
 - mvmt does not sync, replicate, or resolve conflicts across machines.
 
-## Coming Next
+## Coming next
 
-- SQLite-backed text index with incremental updates.
+Near-term:
+
+- SQLite-backed text index.
+- Incremental index updates.
 - Better mount and client management commands.
 - Admin UI for client keys, path permissions, audit, and mount visibility.
-- Remote mvmt mounts: one entrypoint namespace over multiple mvmt instances.
-- More storage providers behind the same `search`/`list`/`read`/`write`/`remove`
-  surface.
 
-## Project Docs
+Later:
+
+- Remote mvmt mounts.
+- Multiple mount providers behind the same `search`/`list`/`read`/`write`/`remove`
+  surface.
+- `resolve(path) -> AccessPlan` for routing virtual paths to local or remote
+  backends.
+
+## Project docs
 
 - [Setup guide](docs/setup.md)
 - [Client setup](docs/client-setup.md)
@@ -400,9 +538,10 @@ use a stable tunnel URL.
 
 ## Contributing
 
-Contributions are welcome while the project is early. Keep changes focused and
-security-conscious. Read [CONTRIBUTING.md](CONTRIBUTING.md) and report
-vulnerabilities through [SECURITY.md](SECURITY.md).
+Contributions are welcome while the project is early.
+
+Keep changes focused and security-conscious. Read [CONTRIBUTING.md](CONTRIBUTING.md)
+and report vulnerabilities through [SECURITY.md](SECURITY.md).
 
 ## License
 
