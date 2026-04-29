@@ -1,15 +1,20 @@
-# mvmt
+# (mvmt) Multi-Volume Mount Transport
 
-**Multi-Volume Mount Transport for AI agents.**
+**One permissioned namespace for agent context.**
 
-mvmt is a local-first MCP server that exposes selected local folders through one
-permissioned endpoint. Agents see a virtual namespace such as `/notes` and
-`/workspace`; they do not get your whole computer.
+mvmt is a local-first MCP server that mounts selected data into one virtual
+namespace for AI agents. Today those mounts are local folders. The same shape is
+intended to extend to other volumes, storage backends, and remote mvmt
+instances.
 
-mvmt is not file sync, cloud storage, or a memory system. Data stays where it
-lives. mvmt decides which mounted paths each client can search, read, and write.
+Agents call stable tools against paths such as `/notes`, `/workspace`, or
+eventually `/desktop/projects`; they do not get full-computer access. mvmt
+resolves the path, checks the client's permissions, and routes the allowed
+operation to the right mount.
 
-- **Mounts, not full disk access** - add only the folders you want agents to see.
+mvmt is federated access, not sync. Data stays where it lives.
+
+- **One namespace, many volumes** - expose selected mounts through one endpoint.
 - **Five stable tools** - `search`, `list`, `read`, `write`, and `remove`.
 - **Read-only by default** - writes require both mount-level write access and
   client-level `write` permission.
