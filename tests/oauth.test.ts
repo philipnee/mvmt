@@ -268,6 +268,7 @@ describe('OAuthStore', () => {
       redirectUri: 'https://chatgpt.com/connector/oauth/callback',
       scope: 'mcp offline_access',
       resource: 'https://mcp.example.com/mcp',
+      mvmtClientId: 'codex',
       codeChallenge: challenge,
       codeChallengeMethod: 'S256',
     });
@@ -281,17 +282,23 @@ describe('OAuthStore', () => {
     });
 
     expect(tokens.accessToken.scope).toBe('mcp offline_access');
+    expect(tokens.accessToken.mvmtClientId).toBe('codex');
     expect(tokens.refreshToken.scope).toBe('mcp offline_access');
+    expect(tokens.refreshToken.mvmtClientId).toBe('codex');
     expect(tokens.refreshToken.audience).toBe('https://mcp.example.com/mcp');
     expect(tokens.refreshToken.token).toBeTypeOf('string');
+
+    const validated = store.validateAccessToken(`Bearer ${tokens.accessToken.token}`);
+    expect(validated?.mvmtClientId).toBe('codex');
   });
 
-  it('exchanges refresh tokens for a new access token', () => {
+  it('exchanges refresh tokens for a new access token and preserves selected mvmt client identity', () => {
     const store = new OAuthStore({ signingKey: 'test-secret' });
     const refreshToken = store.issueRefreshToken({
       clientId: 'chatgpt',
       scope: 'mcp offline_access',
       audience: 'https://mcp.example.com/mcp',
+      mvmtClientId: 'codex',
     });
 
     const tokens = store.exchangeRefreshToken({
@@ -302,7 +309,9 @@ describe('OAuthStore', () => {
     expect(tokens.accessToken.token).not.toBe(tokens.refreshToken.token);
     expect(tokens.accessToken.scope).toBe('mcp offline_access');
     expect(tokens.accessToken.audience).toBe('https://mcp.example.com/mcp');
+    expect(tokens.accessToken.mvmtClientId).toBe('codex');
     expect(tokens.refreshToken.scope).toBe('mcp offline_access');
+    expect(tokens.refreshToken.mvmtClientId).toBe('codex');
   });
 
   it('rejects refresh token scope widening', () => {

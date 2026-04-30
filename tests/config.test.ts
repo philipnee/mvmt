@@ -11,8 +11,8 @@ import {
   resolveProxySourceId,
 } from '../src/config/schema.js';
 
-const SHA256_HEX_64 = 'a'.repeat(64);
 const SCRYPT_TOKEN_VERIFIER = 'scrypt:v1:AAAAAAAAAAAAAAAAAAAAAA:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+const SCRYPT_TOKEN_VERIFIER_2 = 'scrypt:v1:BBBBBBBBBBBBBBBBBBBBBB:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB';
 
 describe('saveConfig', () => {
   it('writes a config file that loadConfig can read back', async () => {
@@ -352,19 +352,19 @@ describe('client policy schema', () => {
     });
   });
 
-  it('parses a legacy SHA-256 token verifier for existing configs', () => {
-    const config = parseConfig({
-      version: 1,
-      clients: [
-        {
-          id: 'codex',
-          name: 'Codex CLI',
-          auth: { type: 'token', tokenHash: SHA256_HEX_64 },
-        },
-      ],
-    });
-
-    expect(config.clients?.[0].auth).toEqual({ type: 'token', tokenHash: SHA256_HEX_64 });
+  it('rejects legacy SHA-256 token verifiers', () => {
+    expect(() =>
+      parseConfig({
+        version: 1,
+        clients: [
+          {
+            id: 'codex',
+            name: 'Codex CLI',
+            auth: { type: 'token', tokenHash: 'a'.repeat(64) },
+          },
+        ],
+      }),
+    ).toThrow(/scrypt verifier/);
   });
 
   it('parses an oauth-auth client with mapped client ids', () => {
@@ -397,7 +397,7 @@ describe('client policy schema', () => {
           {
             id: 'codex',
             name: 'Codex',
-            auth: { type: 'token', tokenHash: SHA256_HEX_64 },
+            auth: { type: 'token', tokenHash: SCRYPT_TOKEN_VERIFIER },
             permissions: [{ path: 'relative/path', actions: ['read'] }],
           },
         ],
@@ -412,7 +412,7 @@ describe('client policy schema', () => {
           {
             id: 'codex',
             name: 'Codex',
-            auth: { type: 'token', tokenHash: SHA256_HEX_64 },
+            auth: { type: 'token', tokenHash: SCRYPT_TOKEN_VERIFIER },
             permissions: [{ path: '/workspace/**/secrets', actions: ['read'] }],
           },
         ],
@@ -427,7 +427,7 @@ describe('client policy schema', () => {
           {
             id: 'codex',
             name: 'Codex',
-            auth: { type: 'token', tokenHash: SHA256_HEX_64 },
+            auth: { type: 'token', tokenHash: SCRYPT_TOKEN_VERIFIER },
             permissions: [{ path: '/workspace/*.md', actions: ['read'] }],
           },
         ],
@@ -444,7 +444,7 @@ describe('client policy schema', () => {
           {
             id: 'codex',
             name: 'Codex',
-            auth: { type: 'token', tokenHash: SHA256_HEX_64 },
+            auth: { type: 'token', tokenHash: SCRYPT_TOKEN_VERIFIER },
             permissions: [{ path: '/workspace/**', actions: [] }],
           },
         ],
@@ -461,7 +461,7 @@ describe('client policy schema', () => {
           {
             id: 'codex',
             name: 'Codex',
-            auth: { type: 'token', tokenHash: SHA256_HEX_64 },
+            auth: { type: 'token', tokenHash: SCRYPT_TOKEN_VERIFIER },
             permissions: [{ path: '/notes/**', actions: ['read'] }],
           },
         ],
@@ -477,7 +477,7 @@ describe('client policy schema', () => {
         {
           id: 'codex',
           name: 'Codex',
-          auth: { type: 'token', tokenHash: SHA256_HEX_64 },
+          auth: { type: 'token', tokenHash: SCRYPT_TOKEN_VERIFIER },
           permissions: [
             { path: '/workspace/project/src/**', actions: ['read'] },
             { path: '/**', actions: ['search'] },
@@ -506,8 +506,8 @@ describe('client policy schema', () => {
       parseConfig({
         version: 1,
         clients: [
-          { id: 'codex', name: 'A', auth: { type: 'token', tokenHash: SHA256_HEX_64 } },
-          { id: 'codex', name: 'B', auth: { type: 'token', tokenHash: 'b'.repeat(64) } },
+          { id: 'codex', name: 'A', auth: { type: 'token', tokenHash: SCRYPT_TOKEN_VERIFIER } },
+          { id: 'codex', name: 'B', auth: { type: 'token', tokenHash: SCRYPT_TOKEN_VERIFIER_2 } },
         ],
       }),
     ).toThrow(/duplicate client id "codex"/);
@@ -518,20 +518,8 @@ describe('client policy schema', () => {
       parseConfig({
         version: 1,
         clients: [
-          { id: 'codex', name: 'Codex', auth: { type: 'token', tokenHash: SHA256_HEX_64 } },
-          { id: 'cursor', name: 'Cursor', auth: { type: 'token', tokenHash: SHA256_HEX_64 } },
-        ],
-      }),
-    ).toThrow(/duplicate tokenHash/);
-  });
-
-  it('rejects duplicate tokenHash even when one is uppercase hex', () => {
-    expect(() =>
-      parseConfig({
-        version: 1,
-        clients: [
-          { id: 'codex', name: 'Codex', auth: { type: 'token', tokenHash: SHA256_HEX_64 } },
-          { id: 'cursor', name: 'Cursor', auth: { type: 'token', tokenHash: SHA256_HEX_64.toUpperCase() } },
+          { id: 'codex', name: 'Codex', auth: { type: 'token', tokenHash: SCRYPT_TOKEN_VERIFIER } },
+          { id: 'cursor', name: 'Cursor', auth: { type: 'token', tokenHash: SCRYPT_TOKEN_VERIFIER } },
         ],
       }),
     ).toThrow(/duplicate tokenHash/);
@@ -580,7 +568,7 @@ describe('client policy schema', () => {
           {
             id: 'Has Spaces',
             name: 'bad',
-            auth: { type: 'token', tokenHash: SHA256_HEX_64 },
+            auth: { type: 'token', tokenHash: SCRYPT_TOKEN_VERIFIER },
           },
         ],
       }),
@@ -599,7 +587,7 @@ describe('client policy schema', () => {
           },
         ],
       }),
-    ).toThrow(/scrypt verifier or legacy 64-char SHA-256/);
+    ).toThrow(/scrypt verifier/);
   });
 
   it('parses semanticTools and validates source references', () => {
@@ -638,7 +626,7 @@ describe('client policy schema', () => {
         {
           id: 'codex',
           name: 'Codex',
-          auth: { type: 'token', tokenHash: SHA256_HEX_64 },
+          auth: { type: 'token', tokenHash: SCRYPT_TOKEN_VERIFIER },
           permissions: [{ path: '/workspace/**', actions: ['read'] }],
         },
       ],

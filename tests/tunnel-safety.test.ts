@@ -3,6 +3,8 @@ import { parseConfig } from '../src/config/loader.js';
 import { tunnelLegacyAccessWarning } from '../src/cli/tunnel-safety.js';
 import { applyTunnelConfig, printTunnelEnabledWithNoTokens } from '../src/cli/tunnel.js';
 
+const EXISTING_TOKEN_VERIFIER = 'scrypt:v1:AAAAAAAAAAAAAAAAAAAAAA:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -38,7 +40,7 @@ describe('tunnelLegacyAccessWarning', () => {
         {
           id: 'codex',
           name: 'Codex',
-          auth: { type: 'token', tokenHash: 'a'.repeat(64) },
+          auth: { type: 'token', tokenHash: EXISTING_TOKEN_VERIFIER },
           permissions: [{ path: '/workspace/**', actions: ['search', 'read'] }],
         },
       ],
@@ -79,7 +81,7 @@ describe('applyTunnelConfig', () => {
         {
           id: 'codex',
           name: 'Codex',
-          auth: { type: 'token', tokenHash: 'a'.repeat(64) },
+          auth: { type: 'token', tokenHash: EXISTING_TOKEN_VERIFIER },
           permissions: [{ path: '/workspace/**', actions: ['search', 'read'] }],
         },
       ],
@@ -105,6 +107,6 @@ describe('applyTunnelConfig', () => {
 
     const lines = output.mock.calls.map((call) => String(call[0])).join('\n');
     expect(lines).toContain('No API tokens are configured');
-    expect(lines).toContain('mvmt tokens add');
+    expect(lines).toContain('mvmt token add');
   });
 });

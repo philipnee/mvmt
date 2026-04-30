@@ -8,6 +8,7 @@ export type CodeChallengeMethod = 'S256';
 export interface AuthorizationCode {
   code: string;
   clientId: string;
+  mvmtClientId?: string;
   redirectUri: string;
   resource?: string;
   codeChallenge: string;
@@ -20,6 +21,7 @@ export interface AuthorizationCode {
 export interface AccessToken {
   token: string;
   clientId: string;
+  mvmtClientId?: string;
   scope?: string;
   // RFC 8707 audience — the resource this token was minted for. Set
   // to the `resource` parameter the client sent during the authorize
@@ -33,6 +35,7 @@ export interface AccessToken {
 export interface RefreshToken {
   token: string;
   clientId: string;
+  mvmtClientId?: string;
   scope?: string;
   audience?: string;
   expiresAt: number;
@@ -45,6 +48,7 @@ export interface TokenGrant {
 
 export interface IssueCodeInput {
   clientId: string;
+  mvmtClientId?: string;
   redirectUri: string;
   resource?: string;
   codeChallenge: string;
@@ -74,7 +78,7 @@ export interface OAuthStoreOptions {
   maxRedirectUrisPerClient?: number;
   // Key material used to sign and validate self-contained access tokens.
   // Pass a function when the key can change at runtime (e.g. backed by a
-  // file that `mvmt token rotate` rewrites) so rotation invalidates
+  // file that internal session-token rotation rewrites) so rotation invalidates
   // outstanding tokens without requiring a server restart.
   signingKey?: string | (() => string);
   clientsPath?: string;
@@ -235,6 +239,7 @@ export class OAuthStore {
     const entry: AuthorizationCode = {
       code,
       clientId: input.clientId,
+      mvmtClientId: input.mvmtClientId,
       redirectUri: input.redirectUri,
       resource: input.resource,
       codeChallenge: input.codeChallenge,
@@ -286,6 +291,7 @@ export class OAuthStore {
 
     return this.issueTokenGrant({
       clientId: entry.clientId,
+      mvmtClientId: entry.mvmtClientId,
       scope: entry.scope,
       audience: entry.resource,
     });
@@ -302,22 +308,24 @@ export class OAuthStore {
 
     return this.issueTokenGrant({
       clientId: refreshToken.clientId,
+      mvmtClientId: refreshToken.mvmtClientId,
       scope: resolveRefreshScope(refreshToken.scope, input.scope),
       audience: refreshToken.audience,
     });
   }
 
-  issueTokenGrant(input: { clientId: string; scope?: string; audience?: string }): TokenGrant {
+  issueTokenGrant(input: { clientId: string; mvmtClientId?: string; scope?: string; audience?: string }): TokenGrant {
     return {
       accessToken: this.issueAccessToken(input),
       refreshToken: this.issueRefreshToken(input),
     };
   }
 
-  issueAccessToken(input: { clientId: string; scope?: string; audience?: string }): AccessToken {
+  issueAccessToken(input: { clientId: string; mvmtClientId?: string; scope?: string; audience?: string }): AccessToken {
     const expiresAt = this.now() + this.tokenTtlMs;
     const token = this.issueSignedToken(ACCESS_TOKEN_PREFIX, {
       clientId: input.clientId,
+      mvmtClientId: input.mvmtClientId,
       scope: input.scope,
       aud: input.audience,
       expiresAt,
@@ -326,16 +334,18 @@ export class OAuthStore {
     return {
       token,
       clientId: input.clientId,
+      mvmtClientId: input.mvmtClientId,
       scope: input.scope,
       audience: input.audience,
       expiresAt,
     };
   }
 
-  issueRefreshToken(input: { clientId: string; scope?: string; audience?: string }): RefreshToken {
+  issueRefreshToken(input: { clientId: string; mvmtClientId?: string; scope?: string; audience?: string }): RefreshToken {
     const expiresAt = this.now() + this.refreshTokenTtlMs;
     const token = this.issueSignedToken(REFRESH_TOKEN_PREFIX, {
       clientId: input.clientId,
+      mvmtClientId: input.mvmtClientId,
       scope: input.scope,
       aud: input.audience,
       expiresAt,
@@ -344,6 +354,7 @@ export class OAuthStore {
     return {
       token,
       clientId: input.clientId,
+      mvmtClientId: input.mvmtClientId,
       scope: input.scope,
       audience: input.audience,
       expiresAt,
@@ -392,6 +403,7 @@ export class OAuthStore {
     return {
       token,
       clientId: parsed.clientId,
+      mvmtClientId: parsed.mvmtClientId,
       scope: parsed.scope,
       audience: parsed.aud,
       expiresAt: parsed.expiresAt,
@@ -404,6 +416,7 @@ export class OAuthStore {
     return {
       token,
       clientId: parsed.clientId,
+      mvmtClientId: parsed.mvmtClientId,
       scope: parsed.scope,
       audience: parsed.aud,
       expiresAt: parsed.expiresAt,
@@ -412,7 +425,7 @@ export class OAuthStore {
 
   private issueSignedToken(
     prefix: string,
-    payloadObject: { clientId: string; scope?: string; aud?: string; expiresAt: number },
+    payloadObject: { clientId: string; mvmtClientId?: string; scope?: string; aud?: string; expiresAt: number },
   ): string {
     const payload = Buffer.from(
       JSON.stringify({
@@ -430,7 +443,7 @@ export class OAuthStore {
   private parseSignedToken(
     token: string,
     expectedPrefix: string,
-  ): { clientId: string; scope?: string; aud?: string; expiresAt: number } | undefined {
+  ): { clientId: string; mvmtClientId?: string; scope?: string; aud?: string; expiresAt: number } | undefined {
     const parts = token.split('.');
     if (parts.length !== 3 || parts[0] !== expectedPrefix) return undefined;
 
@@ -442,17 +455,20 @@ export class OAuthStore {
     try {
       const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8')) as {
         clientId?: unknown;
+        mvmtClientId?: unknown;
         scope?: unknown;
         aud?: unknown;
         expiresAt?: unknown;
       };
       if (typeof decoded.clientId !== 'string') return undefined;
+      if (decoded.mvmtClientId !== undefined && typeof decoded.mvmtClientId !== 'string') return undefined;
       if (decoded.scope !== undefined && typeof decoded.scope !== 'string') return undefined;
       if (decoded.aud !== undefined && typeof decoded.aud !== 'string') return undefined;
       if (typeof decoded.expiresAt !== 'number' || !Number.isFinite(decoded.expiresAt)) return undefined;
       if (decoded.expiresAt < this.now()) return undefined;
       return {
         clientId: decoded.clientId,
+        mvmtClientId: decoded.mvmtClientId,
         scope: decoded.scope,
         aud: decoded.aud,
         expiresAt: decoded.expiresAt,
@@ -600,7 +616,7 @@ export function renderAuthorizePage(params: AuthorizePageParams): string {
   <h1>Authorize connector</h1>
   <p>
     A client (<code>${escapeHtml(params.clientId)}</code>) is requesting access to your local mvmt instance.
-    Paste your mvmt session token to approve. Run <code>mvmt token</code> on the host machine to retrieve it.
+    Paste a scoped mvmt API token to approve. Run <code>mvmt token add</code> on the host machine to create one.
   </p>
   ${error}
   <form method="POST" action="/authorize">
@@ -613,8 +629,8 @@ export function renderAuthorizePage(params: AuthorizePageParams): string {
     ${hidden('scope', params.scope)}
     ${hidden('code_challenge', params.codeChallenge)}
     ${hidden('code_challenge_method', params.codeChallengeMethod)}
-    <label for="session_token">mvmt session token</label>
-    <input id="session_token" name="session_token" type="password" autocomplete="off" required />
+    <label for="api_token">mvmt API token</label>
+    <input id="api_token" name="api_token" type="password" autocomplete="off" required />
     <button type="submit">Approve</button>
   </form>
   <p class="muted">You will be redirected back to <code>${escapeHtml(new URL(params.redirectUri).host)}</code>.</p>

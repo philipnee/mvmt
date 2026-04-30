@@ -1,6 +1,7 @@
 import type { Request } from 'express';
 import { ClientConfig, PermissionConfig } from '../config/schema.js';
 import { verifyApiToken } from '../utils/api-token-hash.js';
+import { isExpired } from '../utils/token-ttl.js';
 import { AccessToken } from './oauth.js';
 
 export type ClientIdentitySource = 'session' | 'token' | 'oauth' | 'quarantine';
@@ -73,8 +74,9 @@ export function resolveClientIdentity(input: ResolveClientIdentityInput): Client
   const allowLegacyDefault = input.allowLegacyDefault ?? true;
 
   // OAuth access token: the bearer was already verified by the caller.
-  // Map its OAuth client_id to a named client. Behavior depends on
-  // whether the operator has configured per-client policy:
+  // New OAuth grants carry the scoped API-token client id selected on
+  // the approval page. Older grants may still map by OAuth client_id.
+  // Behavior depends on whether the operator has configured per-client policy:
   //   - empty clients[]  → legacy mode: synthesized default identity,
   //     same compatibility path used for the session token. Pre-PR
   //     OAuth flows keep working until the operator adds clients[].
@@ -84,8 +86,16 @@ export function resolveClientIdentity(input: ResolveClientIdentityInput): Client
   //     surface.
   if (input.oauthAccessToken) {
     const oauthClientId = input.oauthAccessToken.clientId;
+    if (input.oauthAccessToken.mvmtClientId) {
+      const selected = input.clients.find(
+        (c) => c.id === input.oauthAccessToken?.mvmtClientId && c.auth.type === 'token',
+      );
+      return selected && !clientExpired(selected)
+        ? identityFromConfig(selected, 'oauth', oauthClientId)
+        : undefined;
+    }
     const named = input.clients.find(
-      (c) => c.auth.type === 'oauth' && c.auth.oauthClientIds.includes(oauthClientId),
+      (c) => c.auth.type === 'oauth' && c.auth.oauthClientIds.includes(oauthClientId) && !clientExpired(c),
     );
     if (named) return identityFromConfig(named, 'oauth', oauthClientId);
     if (!policyConfigured && allowLegacyDefault) return synthesizeDefaultClient();
@@ -99,6 +109,7 @@ export function resolveClientIdentity(input: ResolveClientIdentityInput): Client
   if (bearer) {
     for (const client of input.clients) {
       if (client.auth.type !== 'token') continue;
+      if (clientExpired(client)) continue;
       if (verifyApiToken(bearer, client.auth.tokenHash)) {
         return identityFromConfig(client, 'token');
       }
@@ -117,6 +128,10 @@ export function resolveClientIdentity(input: ResolveClientIdentityInput): Client
   }
 
   return undefined;
+}
+
+function clientExpired(client: ClientConfig): boolean {
+  return isExpired(client.expiresAt);
 }
 
 export function isQuarantined(identity: ClientIdentity): boolean {

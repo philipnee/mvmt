@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { Command } from 'commander';
-import { addApiToken, listApiTokens, removeApiToken } from '../src/cli/api-tokens.js';
+import { addApiToken, editApiToken, listApiTokens, removeApiToken, rotateApiToken } from '../src/cli/api-tokens.js';
 import { withInheritedConfig } from '../src/cli/command-options.js';
 import { addConnector, listConnectors } from '../src/cli/connectors.js';
 import { runConfigSetup, showConfig } from '../src/cli/config.js';
@@ -47,7 +47,7 @@ program.addHelpText('after', examples([
   ['mvmt serve -i', 'start locally with the interactive prompt'],
   ['mvmt serve --path ~/Documents', 'serve one read-only folder for this run'],
   ['mvmt mounts add notes ~/notes --mount-path /notes --read-only', 'add a read-only mount'],
-  ['mvmt tokens add codex --read /notes', 'create a scoped API token'],
+  ['mvmt token add codex --read /notes', 'create a scoped API token'],
   ['mvmt doctor', 'validate config and mount roots'],
 ]));
 
@@ -187,21 +187,97 @@ configCommand
 
 const tokenCommand = program
   .command('token')
-  .description('Show the current bearer token and age')
+  .description('Manage scoped API tokens')
+  .option('-c, --config <path>', 'Config file path')
+  .option('--json', 'Output as JSON')
+  .action(async (options: { config?: string; json?: boolean }) => {
+    await listApiTokens(options);
+  });
+
+tokenCommand
+  .command('list')
+  .description('List scoped API tokens')
+  .option('-c, --config <path>', 'Config file path')
+  .option('--json', 'Output as JSON')
+  .action(async (options: { config?: string; json?: boolean }, command: Command) => {
+    await listApiTokens(withInheritedConfig(options, command));
+  });
+
+tokenCommand
+  .command('show')
+  .description('List scoped API tokens')
+  .option('-c, --config <path>', 'Config file path')
+  .option('--json', 'Output as JSON')
+  .action(async (options: { config?: string; json?: boolean }, command: Command) => {
+    await listApiTokens(withInheritedConfig(options, command));
+  });
+
+tokenCommand
+  .command('add [id]')
+  .alias('create')
+  .description('Create or update a scoped API token')
+  .option('-c, --config <path>', 'Config file path')
+  .option('--name <text>', 'Display name')
+  .option('--description <text>', 'Optional description')
+  .option('--ttl <duration>', 'Token lifetime, such as 30m, 7d, 30d, or never')
+  .option('--read <mount>', 'Grant search/read on a mount name or path (repeatable)', collectValues)
+  .option('--write <mount>', 'Grant search/read/write/remove on a writable mount (repeatable)', collectValues)
+  .addHelpText('after', examples([
+    ['mvmt token add codex --read /notes --ttl 7d', 'create a token that can search/read /notes for 7 days'],
+    ['mvmt token add codex --write workspace --ttl never', 'grant write/remove on the workspace mount'],
+    ['mvmt token add', 'interactive token setup'],
+  ]))
+  .action(async (id: string | undefined, options: { config?: string; name?: string; description?: string; ttl?: string; read?: string[]; write?: string[] }, command: Command) => {
+    await addApiToken(id, withInheritedConfig(options, command));
+  });
+
+tokenCommand
+  .command('edit [id]')
+  .description('Edit a scoped API token')
+  .option('-c, --config <path>', 'Config file path')
+  .option('--name <text>', 'Display name')
+  .option('--description <text>', 'Optional description')
+  .option('--ttl <duration>', 'Token lifetime, such as 30m, 7d, 30d, or never')
+  .option('--read <mount>', 'Grant search/read on a mount name or path (repeatable)', collectValues)
+  .option('--write <mount>', 'Grant search/read/write/remove on a writable mount (repeatable)', collectValues)
+  .action(async (id: string | undefined, options: { config?: string; name?: string; description?: string; ttl?: string; read?: string[]; write?: string[] }, command: Command) => {
+    await editApiToken(id, withInheritedConfig(options, command));
+  });
+
+tokenCommand
+  .command('rotate [id]')
+  .description('Rotate a scoped API token and print the replacement once')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (id: string | undefined, options: { config?: string }, command: Command) => {
+    await rotateApiToken(id, withInheritedConfig(options, command));
+  });
+
+tokenCommand
+  .command('remove [id]')
+  .description('Remove a scoped API token')
+  .option('-c, --config <path>', 'Config file path')
+  .option('-y, --yes', 'Remove without prompting for confirmation')
+  .action(async (id: string | undefined, options: { config?: string; yes?: boolean }, command: Command) => {
+    await removeApiToken(id, withInheritedConfig(options, command));
+  });
+
+tokenCommand
+  .command('session', { hidden: true })
+  .description('Show the internal legacy session bearer token summary')
   .action(async () => {
     await showTokenSummary();
   });
 
 tokenCommand
-  .command('show', { hidden: true })
-  .description('Compatibility alias for raw token output')
+  .command('session-raw', { hidden: true })
+  .description('Print the internal legacy session bearer token')
   .action(async () => {
     await showToken();
   });
 
 tokenCommand
-  .command('rotate')
-  .description('Regenerate and print the current bearer token')
+  .command('session-rotate', { hidden: true })
+  .description('Regenerate and print the internal legacy session bearer token')
   .action(async () => {
     await rotateToken();
   });
@@ -230,15 +306,38 @@ apiTokensCommand
   .description('Create or update a scoped API token')
   .option('-c, --config <path>', 'Config file path')
   .option('--name <text>', 'Display name')
+  .option('--description <text>', 'Optional description')
+  .option('--ttl <duration>', 'Token lifetime, such as 30m, 7d, 30d, or never')
   .option('--read <mount>', 'Grant search/read on a mount name or path (repeatable)', collectValues)
   .option('--write <mount>', 'Grant search/read/write/remove on a writable mount (repeatable)', collectValues)
   .addHelpText('after', examples([
-    ['mvmt tokens add codex --read /notes', 'create a token that can search/read /notes'],
-    ['mvmt tokens add codex --write workspace', 'grant write/remove on the workspace mount'],
-    ['mvmt tokens add', 'interactive token setup'],
+    ['mvmt token add codex --read /notes --ttl 7d', 'create a token that can search/read /notes for 7 days'],
+    ['mvmt token add codex --write workspace', 'grant write/remove on the workspace mount'],
+    ['mvmt token add', 'interactive token setup'],
   ]))
-  .action(async (id: string | undefined, options: { config?: string; name?: string; read?: string[]; write?: string[] }, command: Command) => {
+  .action(async (id: string | undefined, options: { config?: string; name?: string; description?: string; ttl?: string; read?: string[]; write?: string[] }, command: Command) => {
     await addApiToken(id, withInheritedConfig(options, command));
+  });
+
+apiTokensCommand
+  .command('edit [id]')
+  .description('Edit a scoped API token')
+  .option('-c, --config <path>', 'Config file path')
+  .option('--name <text>', 'Display name')
+  .option('--description <text>', 'Optional description')
+  .option('--ttl <duration>', 'Token lifetime, such as 30m, 7d, 30d, or never')
+  .option('--read <mount>', 'Grant search/read on a mount name or path (repeatable)', collectValues)
+  .option('--write <mount>', 'Grant search/read/write/remove on a writable mount (repeatable)', collectValues)
+  .action(async (id: string | undefined, options: { config?: string; name?: string; description?: string; ttl?: string; read?: string[]; write?: string[] }, command: Command) => {
+    await editApiToken(id, withInheritedConfig(options, command));
+  });
+
+apiTokensCommand
+  .command('rotate [id]')
+  .description('Rotate a scoped API token and print the replacement once')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (id: string | undefined, options: { config?: string }, command: Command) => {
+    await rotateApiToken(id, withInheritedConfig(options, command));
   });
 
 apiTokensCommand
@@ -363,7 +462,7 @@ program
 
 program
   .command('rotate', { hidden: true })
-  .description('Compatibility alias for `mvmt token rotate`')
+  .description('Compatibility alias for internal session-token rotation')
   .action(async () => {
     await rotateToken();
   });

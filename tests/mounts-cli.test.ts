@@ -7,6 +7,8 @@ import {
 import { parseConfig } from '../src/config/loader.js';
 import { DEFAULT_MOUNT_EXCLUDE_PATTERNS, DEFAULT_MOUNT_PROTECT_PATTERNS } from '../src/config/schema.js';
 
+const EXISTING_TOKEN_VERIFIER = 'scrypt:v1:AAAAAAAAAAAAAAAAAAAAAA:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+
 describe('mount config helpers', () => {
   it('adds mounts with default protection', () => {
     const config = parseConfig({ version: 1 });
@@ -102,7 +104,7 @@ describe('mount config helpers', () => {
         {
           id: 'codex',
           name: 'Codex',
-          auth: { type: 'token', tokenHash: 'a'.repeat(64) },
+          auth: { type: 'token', tokenHash: EXISTING_TOKEN_VERIFIER },
           permissions: [{ path: '/workspace/**', actions: ['read'] }],
         },
       ],

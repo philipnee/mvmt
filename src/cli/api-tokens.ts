@@ -3,6 +3,7 @@ import { confirm, input, select } from '@inquirer/prompts';
 import chalk from 'chalk';
 import { getConfigPath, loadConfig, saveConfig } from '../config/loader.js';
 import { hashApiToken } from '../utils/api-token-hash.js';
+import { defaultTokenTtl, formatTokenExpiry, parseTokenTtl } from './token-ttl.js';
 import {
   ClientConfig,
   ConfigSchema,
@@ -21,13 +22,19 @@ export interface ApiTokensCommandOptions {
 
 export interface AddApiTokenOptions extends ApiTokensCommandOptions {
   name?: string;
+  description?: string;
+  ttl?: string;
   read?: string[];
   write?: string[];
 }
 
+export interface EditApiTokenOptions extends AddApiTokenOptions {}
+
 export interface RemoveApiTokenOptions extends ApiTokensCommandOptions {
   yes?: boolean;
 }
+
+export interface RotateApiTokenOptions extends ApiTokensCommandOptions {}
 
 export type ApiTokenPermissionMode = 'read' | 'write';
 
@@ -39,6 +46,9 @@ export interface ApiTokenPermissionInput {
 export interface ApiTokenInput {
   id: string;
   name?: string;
+  description?: string;
+  ttl?: string;
+  now?: number;
   permissions: ApiTokenPermissionInput[];
   plaintextToken?: string;
 }
@@ -62,17 +72,19 @@ export function printApiTokens(config: MvmtConfig, options: { json?: boolean } =
     return;
   }
 
-  console.log(chalk.bold('API tokens'));
+  console.log(chalk.bold('Tokens'));
   console.log('');
   if (tokens.length === 0) {
     console.log(`    ${chalk.dim('none')}`);
-    console.log(chalk.dim('    Add one with `mvmt tokens add`.'));
+    console.log(chalk.dim('    Add one with `mvmt token add`.'));
     return;
   }
 
   for (const client of tokens) {
     console.log(`    ${client.id}`);
     console.log(`      name: ${client.name}`);
+    if (client.description) console.log(`      description: ${client.description}`);
+    console.log(`      expires: ${formatTokenExpiry(client.expiresAt)}`);
     if (client.permissions.length === 0) {
       console.log(`      ${chalk.dim('no mount permissions')}`);
     } else {
@@ -81,7 +93,7 @@ export function printApiTokens(config: MvmtConfig, options: { json?: boolean } =
         console.log(`      path: ${permission.path}`);
       }
     }
-    console.log(`      ${chalk.dim('token: hidden, remove/add to replace')}`);
+    console.log(`      ${chalk.dim('token: hidden, rotate to replace')}`);
   }
 }
 
@@ -94,6 +106,24 @@ export async function addApiToken(id: string | undefined, options: AddApiTokenOp
       : await promptForApiTokenInput(config, id, options);
 
     const result = addApiTokenToConfig(config, inputValue);
+    await saveConfig(configPath, result.config);
+    printApiTokenSaved(configPath, result);
+    console.log(chalk.dim('Restart mvmt for the running server to load API-token changes.'));
+  } catch (err) {
+    printApiTokenCommandError(err);
+  }
+}
+
+export async function editApiToken(id: string | undefined, options: EditApiTokenOptions = {}): Promise<void> {
+  try {
+    const configPath = resolveApiTokensConfigPath(options.config);
+    const config = loadConfig(configPath);
+    const tokenId = id ?? await promptForApiTokenId(config, 'Edit which API token?');
+    const inputValue = hasEditOptions(options)
+      ? apiTokenInputFromOptions(config, tokenId, options, { requirePermissions: false })
+      : await promptForApiTokenInput(config, tokenId, options);
+
+    const result = editApiTokenInConfig(config, tokenId, inputValue);
     await saveConfig(configPath, result.config);
     printApiTokenSaved(configPath, result);
     console.log(chalk.dim('Restart mvmt for the running server to load API-token changes.'));
@@ -125,9 +155,29 @@ export async function removeApiToken(id: string | undefined, options: RemoveApiT
   }
 }
 
+export async function rotateApiToken(id: string | undefined, options: RotateApiTokenOptions = {}): Promise<void> {
+  try {
+    const configPath = resolveApiTokensConfigPath(options.config);
+    const config = loadConfig(configPath);
+    const tokenId = id ?? await promptForApiTokenId(config, 'Rotate which API token?');
+    const result = rotateApiTokenInConfig(config, tokenId);
+    await saveConfig(configPath, result.config);
+    printApiTokenSaved(configPath, result);
+    console.log(chalk.dim('Restart mvmt for the running server to load API-token changes.'));
+  } catch (err) {
+    printApiTokenCommandError(err);
+  }
+}
+
 export async function promptAndAddApiToken(config: MvmtConfig): Promise<ApiTokenUpdateResult | undefined> {
   const inputValue = await promptForApiTokenInput(config, undefined, {});
   return addApiTokenToConfig(config, inputValue);
+}
+
+export async function promptAndEditApiToken(config: MvmtConfig): Promise<ApiTokenUpdateResult | undefined> {
+  const tokenId = await promptForApiTokenId(config, 'Edit which API token?');
+  const inputValue = await promptForApiTokenInput(config, tokenId, {});
+  return editApiTokenInConfig(config, tokenId, inputValue);
 }
 
 export async function promptAndRemoveApiToken(config: MvmtConfig): Promise<MvmtConfig | undefined> {
@@ -145,6 +195,8 @@ export function addApiTokenToConfig(config: MvmtConfig, inputValue: ApiTokenInpu
 
   const name = (inputValue.name ?? existing?.name ?? id).trim();
   if (!name) throw new Error('API token display name cannot be empty.');
+  const description = (inputValue.description ?? existing?.description ?? '').trim();
+  const expiresAt = resolveExpiresAt(inputValue, existing);
 
   const permissions = applyPermissionInputs(
     config,
@@ -156,6 +208,8 @@ export function addApiTokenToConfig(config: MvmtConfig, inputValue: ApiTokenInpu
   const nextClient: ClientConfig = {
     id,
     name,
+    description,
+    ...(expiresAt ? { expiresAt } : {}),
     auth: existing?.auth ?? {
       type: 'token',
       tokenHash: hashApiToken(plaintextToken!),
@@ -169,6 +223,61 @@ export function addApiTokenToConfig(config: MvmtConfig, inputValue: ApiTokenInpu
   ];
   const nextConfig = ConfigSchema.parse({ ...config, clients });
   return { config: nextConfig, created, plaintextToken, client: nextClient };
+}
+
+export function editApiTokenInConfig(
+  config: MvmtConfig,
+  id: string,
+  inputValue: ApiTokenInput,
+): ApiTokenUpdateResult {
+  const tokenId = normalizeApiTokenId(id);
+  const existing = config.clients?.find((client) => client.id === tokenId);
+  if (!existing || existing.auth.type !== 'token') throw new Error(`Unknown API token: ${tokenId}`);
+  const name = (inputValue.name ?? existing.name).trim();
+  if (!name) throw new Error('API token display name cannot be empty.');
+  const description = (inputValue.description ?? existing.description ?? '').trim();
+  const expiresAt = resolveExpiresAt(inputValue, existing);
+  const permissions = inputValue.permissions.length > 0
+    ? applyPermissionInputs(config, [], inputValue.permissions)
+    : existing.permissions;
+  const nextClient: ClientConfig = {
+    id: tokenId,
+    name,
+    description,
+    ...(expiresAt ? { expiresAt } : {}),
+    auth: existing.auth,
+    rawToolsEnabled: existing.rawToolsEnabled,
+    permissions,
+  };
+  const clients = [
+    ...(config.clients ?? []).filter((client) => client.id !== tokenId),
+    nextClient,
+  ];
+  const nextConfig = ConfigSchema.parse({ ...config, clients });
+  return { config: nextConfig, created: false, client: nextClient };
+}
+
+export function rotateApiTokenInConfig(
+  config: MvmtConfig,
+  id: string,
+  plaintextToken = generateApiToken(),
+): ApiTokenUpdateResult {
+  const tokenId = normalizeApiTokenId(id);
+  const existing = config.clients?.find((client) => client.id === tokenId);
+  if (!existing || existing.auth.type !== 'token') throw new Error(`Unknown API token: ${tokenId}`);
+  const nextClient: ClientConfig = {
+    ...existing,
+    auth: {
+      type: 'token',
+      tokenHash: hashApiToken(plaintextToken),
+    },
+  };
+  const clients = [
+    ...(config.clients ?? []).filter((client) => client.id !== tokenId),
+    nextClient,
+  ];
+  const nextConfig = ConfigSchema.parse({ ...config, clients });
+  return { config: nextConfig, created: false, plaintextToken, client: nextClient };
 }
 
 export function removeApiTokenFromConfig(config: MvmtConfig, id: string): MvmtConfig {
@@ -187,19 +296,22 @@ function apiTokenInputFromOptions(
   config: MvmtConfig,
   id: string | undefined,
   options: AddApiTokenOptions,
+  parseOptions: { requirePermissions?: boolean } = {},
 ): ApiTokenInput {
   if (!id) throw new Error('API token id is required when using --read or --write.');
   const permissions: ApiTokenPermissionInput[] = [
     ...(options.read ?? []).map((mount) => ({ mount, mode: 'read' as const })),
     ...(options.write ?? []).map((mount) => ({ mount, mode: 'write' as const })),
   ];
-  if (permissions.length === 0) {
+  if (permissions.length === 0 && parseOptions.requirePermissions !== false) {
     throw new Error('Add at least one permission with --read <mount> or --write <mount>.');
   }
   assertMountsConfigured(config);
   return {
     id,
     name: options.name,
+    description: options.description,
+    ttl: options.ttl,
     permissions,
   };
 }
@@ -223,8 +335,24 @@ async function promptForApiTokenInput(
     default: existing?.name ?? tokenId,
     validate: (value) => value.trim().length > 0 ? true : 'Enter a display name',
   });
+  const description = options.description ?? await input({
+    message: 'Description (optional):',
+    default: existing?.description ?? '',
+  });
+  const ttl = options.ttl ?? await input({
+    message: 'TTL (examples: 30m, 7d, 30d, never):',
+    default: existing?.expiresAt ? '30d' : defaultTokenTtl(),
+    validate: (value) => {
+      try {
+        parseTokenTtl(value);
+        return true;
+      } catch (err) {
+        return err instanceof Error ? err.message : 'Invalid TTL';
+      }
+    },
+  });
   const permissions = await promptForPermissionInputs(config, existing?.permissions ?? []);
-  return { id: tokenId, name, permissions };
+  return { id: tokenId, name, description, ttl, permissions };
 }
 
 async function promptForPermissionInputs(
@@ -363,6 +491,8 @@ function toApiTokenSummary(client: ClientConfig): Record<string, unknown> {
   return {
     id: client.id,
     name: client.name,
+    description: client.description,
+    expiresAt: client.expiresAt,
     permissions: client.permissions,
   };
 }
@@ -373,6 +503,7 @@ export function printApiTokenSaved(configPath: string, result: ApiTokenUpdateRes
   for (const permission of result.client.permissions) {
     console.log(`  ${permission.path}  ${permission.actions.join(', ')}`);
   }
+  console.log(`  expires: ${formatTokenExpiry(result.client.expiresAt)}`);
   if (result.plaintextToken) {
     console.log('');
     console.log(chalk.bold('API token (shown once)'));
@@ -380,9 +511,7 @@ export function printApiTokenSaved(configPath: string, result: ApiTokenUpdateRes
     console.log(`  token: ${result.plaintextToken}`);
     console.log('');
     console.log(chalk.dim('Use it as: Authorization: Bearer <token>'));
-    console.log(chalk.dim('For Codex CLI, put the token in an environment variable and pass the variable name:'));
-    console.log(`  ${chalk.cyan(`export MVMT_TOKEN="${result.plaintextToken}"`)}`);
-    console.log(`  ${chalk.cyan('codex mcp add mvmt --url http://127.0.0.1:4141/mcp --bearer-token-env-var MVMT_TOKEN')}`);
+    console.log(chalk.dim('Paste this token into the mvmt OAuth approval page when a client asks you to sign in.'));
   } else {
     console.log(chalk.dim('Existing token value was not changed.'));
   }
@@ -390,6 +519,21 @@ export function printApiTokenSaved(configPath: string, result: ApiTokenUpdateRes
 
 function hasPermissionOptions(options: AddApiTokenOptions): boolean {
   return Boolean((options.read?.length ?? 0) > 0 || (options.write?.length ?? 0) > 0);
+}
+
+function hasEditOptions(options: EditApiTokenOptions): boolean {
+  return hasPermissionOptions(options)
+    || options.name !== undefined
+    || options.description !== undefined
+    || options.ttl !== undefined;
+}
+
+function resolveExpiresAt(inputValue: ApiTokenInput, existing?: ClientConfig): string | undefined {
+  if (inputValue.ttl !== undefined) {
+    return parseTokenTtl(inputValue.ttl, inputValue.now).expiresAt;
+  }
+  if (existing) return existing.expiresAt;
+  return parseTokenTtl(defaultTokenTtl(), inputValue.now).expiresAt;
 }
 
 function normalizeApiTokenId(id: string): string {

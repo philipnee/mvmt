@@ -11,7 +11,6 @@ import { hashApiToken } from '../src/utils/api-token-hash.js';
 
 const ALWAYS_FALSE = () => false;
 const ALWAYS_TRUE = () => true;
-const LEGACY_SHA256_FOR_CASE_TOKEN = '68422947E634BBE26EEACDFC99FDAD68E4E5FD75DA9EB717B1DA0F710EC7B0AB';
 
 function tokenClient(id: string, plaintext: string, overrides: Partial<ClientConfig> = {}): ClientConfig {
   return {
@@ -35,10 +34,11 @@ function oauthClient(id: string, oauthClientIds: string[], overrides: Partial<Cl
   };
 }
 
-function fakeOauthAccessToken(clientId: string): AccessToken {
+function fakeOauthAccessToken(clientId: string, mvmtClientId?: string): AccessToken {
   return {
     token: 'access-token-stub',
     clientId,
+    mvmtClientId,
     audience: 'http://127.0.0.1:4141/mcp',
     expiresAt: Date.now() + 60_000,
   };
@@ -101,6 +101,37 @@ describe('resolveClientIdentity', () => {
       expect(identity?.permissions).toEqual([]);
     });
 
+    it('maps an OAuth access token to the scoped API-token client selected at authorization time', () => {
+      const codex = tokenClient('codex', 'codex-token', {
+        permissions: [{ path: '/workspace/**', actions: ['search', 'read'] }],
+      });
+      const identity = resolveClientIdentity({
+        authHeader: 'Bearer mvmtv1.something',
+        clients: [codex],
+        oauthAccessToken: fakeOauthAccessToken('unknown-dcr-client', 'codex'),
+        validateSession: ALWAYS_FALSE,
+      });
+
+      expect(identity?.source).toBe('oauth');
+      expect(identity?.id).toBe('codex');
+      expect(identity?.oauthClientId).toBe('unknown-dcr-client');
+      expect(identity?.permissions).toEqual([{ path: '/workspace/**', actions: ['search', 'read'] }]);
+    });
+
+    it('rejects an OAuth access token when the selected scoped token has expired', () => {
+      const codex = tokenClient('codex', 'codex-token', {
+        expiresAt: '2000-01-01T00:00:00.000Z',
+      });
+      const identity = resolveClientIdentity({
+        authHeader: 'Bearer mvmtv1.something',
+        clients: [codex],
+        oauthAccessToken: fakeOauthAccessToken('dcr-client', 'codex'),
+        validateSession: ALWAYS_FALSE,
+      });
+
+      expect(identity).toBeUndefined();
+    });
+
     it('falls back to the legacy default identity for OAuth tokens when clients[] is empty', () => {
       // Pre-PR OAuth flows keep working in legacy mode (no clients[]
       // configured). The operator opts into the strict quarantine model
@@ -160,6 +191,20 @@ describe('resolveClientIdentity', () => {
       expect(identity?.rawToolsEnabled).toBe(true);
     });
 
+    it('rejects an expired configured token client even when the bearer matches', () => {
+      const codex = tokenClient('codex', 'codex-plaintext-token', {
+        expiresAt: '2000-01-01T00:00:00.000Z',
+      });
+      const identity = resolveClientIdentity({
+        authHeader: 'Bearer codex-plaintext-token',
+        clients: [codex],
+        oauthAccessToken: undefined,
+        validateSession: ALWAYS_FALSE,
+      });
+
+      expect(identity).toBeUndefined();
+    });
+
     it('does not match when bearer hash differs', () => {
       const codex = tokenClient('codex', 'expected-token');
       const identity = resolveClientIdentity({
@@ -184,19 +229,6 @@ describe('resolveClientIdentity', () => {
       expect(identity).toBeUndefined();
     });
 
-    it('matches legacy SHA-256 token verifiers case-insensitively', () => {
-      const codex = tokenClient('codex', 'case-token');
-      codex.auth = { type: 'token', tokenHash: LEGACY_SHA256_FOR_CASE_TOKEN };
-
-      const identity = resolveClientIdentity({
-        authHeader: 'Bearer case-token',
-        clients: [codex],
-        oauthAccessToken: undefined,
-        validateSession: ALWAYS_FALSE,
-      });
-
-      expect(identity?.id).toBe('codex');
-    });
   });
 
   describe('session token path', () => {

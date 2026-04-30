@@ -11,7 +11,7 @@ Quick tunnels are temporary. Use a named tunnel or reserved domain if you need t
 
 Tunnel mode can start without API tokens, but `/mcp` rejects the legacy
 all-mount session token in that state. Create scoped access with
-`mvmt tokens add`. For temporary debugging only, set
+`mvmt token add`. For temporary debugging only, set
 `MVMT_ALLOW_LEGACY_TUNNEL=1` to allow the legacy session token over a tunnel.
 
 ## Built-in tunnel providers

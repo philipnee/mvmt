@@ -242,7 +242,7 @@ export function applyTunnelConfig(
 export function printTunnelEnabledWithNoTokens(warning: string): void {
   console.log(chalk.yellow(warning));
   console.log(chalk.dim('The public URL can be reachable before any API token can read data.'));
-  console.log(chalk.dim('Next step: mvmt tokens add'));
+  console.log(chalk.dim('Next step: mvmt token add'));
 }
 
 export async function promptForTunnelConfig(port: number): Promise<TunnelConfig> {

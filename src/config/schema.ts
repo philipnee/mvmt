@@ -173,10 +173,9 @@ export const PermissionSchema = z.object({
 
 export const ClientAuthTokenSchema = z.object({
   type: z.literal('token'),
-  // Verifier for an issued bearer token. New tokens use scrypt; legacy
-  // 64-char SHA-256 verifiers are still accepted so existing configs keep
-  // working. Plaintext is shown once at issuance and never persisted.
-  tokenHash: z.string().refine(isApiTokenVerifier, 'tokenHash must be a scrypt verifier or legacy 64-char SHA-256 hex'),
+  // Verifier for an issued bearer token. Plaintext is shown once at issuance
+  // and never persisted.
+  tokenHash: z.string().refine(isApiTokenVerifier, 'tokenHash must be a scrypt verifier'),
 });
 
 export const ClientAuthOAuthSchema = z.object({
@@ -192,6 +191,8 @@ export const ClientAuthSchema = z.discriminatedUnion('type', [
 export const ClientSchema = z.object({
   id: z.string().min(1).regex(/^[a-z0-9][a-z0-9_-]*$/, 'client id must be lowercase alphanum/dash/underscore'),
   name: z.string().min(1),
+  description: z.string().default(''),
+  expiresAt: z.string().datetime().optional(),
   auth: ClientAuthSchema,
   rawToolsEnabled: z.boolean().default(false),
   permissions: z.array(PermissionSchema).default([]),
