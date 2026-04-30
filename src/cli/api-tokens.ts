@@ -3,7 +3,7 @@ import { confirm, input, select } from '@inquirer/prompts';
 import chalk from 'chalk';
 import { getConfigPath, loadConfig, saveConfig } from '../config/loader.js';
 import { hashApiToken } from '../utils/api-token-hash.js';
-import { defaultTokenTtl, formatTokenExpiry, parseTokenTtl } from './token-ttl.js';
+import { defaultTokenTtl, formatTokenExpiry, isExpired, parseTokenTtl } from './token-ttl.js';
 import {
   ClientConfig,
   ConfigSchema,
@@ -34,7 +34,9 @@ export interface RemoveApiTokenOptions extends ApiTokensCommandOptions {
   yes?: boolean;
 }
 
-export interface RotateApiTokenOptions extends ApiTokensCommandOptions {}
+export interface RotateApiTokenOptions extends ApiTokensCommandOptions {
+  ttl?: string;
+}
 
 export type ApiTokenPermissionMode = 'read' | 'write';
 
@@ -108,7 +110,7 @@ export async function addApiToken(id: string | undefined, options: AddApiTokenOp
     const result = addApiTokenToConfig(config, inputValue);
     await saveConfig(configPath, result.config);
     printApiTokenSaved(configPath, result);
-    console.log(chalk.dim('Restart mvmt for the running server to load API-token changes.'));
+    console.log(chalk.dim('Running mvmt processes load API-token changes on the next auth request.'));
   } catch (err) {
     printApiTokenCommandError(err);
   }
@@ -126,7 +128,7 @@ export async function editApiToken(id: string | undefined, options: EditApiToken
     const result = editApiTokenInConfig(config, tokenId, inputValue);
     await saveConfig(configPath, result.config);
     printApiTokenSaved(configPath, result);
-    console.log(chalk.dim('Restart mvmt for the running server to load API-token changes.'));
+    console.log(chalk.dim('Running mvmt processes load API-token changes on the next auth request.'));
   } catch (err) {
     printApiTokenCommandError(err);
   }
@@ -149,7 +151,7 @@ export async function removeApiToken(id: string | undefined, options: RemoveApiT
     const nextConfig = removeApiTokenFromConfig(config, tokenId);
     await saveConfig(configPath, nextConfig);
     console.log(chalk.green(`API token ${tokenId} removed from ${configPath}`));
-    console.log(chalk.dim('Restart mvmt for the running server to unload API-token changes.'));
+    console.log(chalk.dim('Running mvmt processes unload API-token changes on the next auth request.'));
   } catch (err) {
     printApiTokenCommandError(err);
   }
@@ -160,10 +162,10 @@ export async function rotateApiToken(id: string | undefined, options: RotateApiT
     const configPath = resolveApiTokensConfigPath(options.config);
     const config = loadConfig(configPath);
     const tokenId = id ?? await promptForApiTokenId(config, 'Rotate which API token?');
-    const result = rotateApiTokenInConfig(config, tokenId);
+    const result = rotateApiTokenInConfig(config, tokenId, undefined, { ttl: options.ttl });
     await saveConfig(configPath, result.config);
     printApiTokenSaved(configPath, result);
-    console.log(chalk.dim('Restart mvmt for the running server to load API-token changes.'));
+    console.log(chalk.dim('Running mvmt processes load API-token changes on the next auth request.'));
   } catch (err) {
     printApiTokenCommandError(err);
   }
@@ -261,12 +263,16 @@ export function rotateApiTokenInConfig(
   config: MvmtConfig,
   id: string,
   plaintextToken = generateApiToken(),
+  options: { ttl?: string; now?: number } = {},
 ): ApiTokenUpdateResult {
   const tokenId = normalizeApiTokenId(id);
   const existing = config.clients?.find((client) => client.id === tokenId);
   if (!existing || existing.auth.type !== 'token') throw new Error(`Unknown API token: ${tokenId}`);
+  const expiresAt = resolveRotatedExpiresAt(existing, options);
+  const { expiresAt: _previousExpiresAt, ...existingWithoutExpiry } = existing;
   const nextClient: ClientConfig = {
-    ...existing,
+    ...existingWithoutExpiry,
+    ...(expiresAt ? { expiresAt } : {}),
     auth: {
       type: 'token',
       tokenHash: hashApiToken(plaintextToken),
@@ -534,6 +540,19 @@ function resolveExpiresAt(inputValue: ApiTokenInput, existing?: ClientConfig): s
   }
   if (existing) return existing.expiresAt;
   return parseTokenTtl(defaultTokenTtl(), inputValue.now).expiresAt;
+}
+
+function resolveRotatedExpiresAt(
+  existing: ClientConfig,
+  options: { ttl?: string; now?: number },
+): string | undefined {
+  if (options.ttl !== undefined) {
+    return parseTokenTtl(options.ttl, options.now).expiresAt;
+  }
+  if (isExpired(existing.expiresAt, options.now)) {
+    return parseTokenTtl(defaultTokenTtl(), options.now).expiresAt;
+  }
+  return existing.expiresAt;
 }
 
 function normalizeApiTokenId(id: string): string {

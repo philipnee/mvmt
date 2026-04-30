@@ -248,7 +248,8 @@ tokenCommand
   .command('rotate [id]')
   .description('Rotate a scoped API token and print the replacement once')
   .option('-c, --config <path>', 'Config file path')
-  .action(async (id: string | undefined, options: { config?: string }, command: Command) => {
+  .option('--ttl <duration>', 'Replacement lifetime, such as 30m, 7d, 30d, or never')
+  .action(async (id: string | undefined, options: { config?: string; ttl?: string }, command: Command) => {
     await rotateApiToken(id, withInheritedConfig(options, command));
   });
 
@@ -336,7 +337,8 @@ apiTokensCommand
   .command('rotate [id]')
   .description('Rotate a scoped API token and print the replacement once')
   .option('-c, --config <path>', 'Config file path')
-  .action(async (id: string | undefined, options: { config?: string }, command: Command) => {
+  .option('--ttl <duration>', 'Replacement lifetime, such as 30m, 7d, 30d, or never')
+  .action(async (id: string | undefined, options: { config?: string; ttl?: string }, command: Command) => {
     await rotateApiToken(id, withInheritedConfig(options, command));
   });
 
