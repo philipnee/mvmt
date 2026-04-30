@@ -16,7 +16,8 @@ import { formatMcpPublicUrl } from '../utils/tunnel.js';
 import { initializeConnectors, LoadedConnector } from './connector-loader.js';
 import { TunnelController } from './tunnel-controller.js';
 import { InteractiveAuditLogger, startInteractivePrompt, formatHttpRequestEntry } from './interactive.js';
-import { LEGACY_TUNNEL_OVERRIDE_ENV, legacyTunnelOverrideEnabled, tunnelExposureError } from './tunnel-safety.js';
+import { LEGACY_TUNNEL_OVERRIDE_ENV, legacyTunnelOverrideEnabled, tunnelLegacyAccessWarning } from './tunnel-safety.js';
+import { promptAndAddMount } from './mounts.js';
 
 export interface StartOptions {
   port?: string;
@@ -76,15 +77,15 @@ export async function start(options: StartOptions = {}): Promise<void> {
       printNextStep: false,
     });
   }
-  const config = loadConfig(configPath);
+  let config = loadConfig(configPath);
   if (!stdioMode) {
-    const tunnelError = tunnelExposureError(config);
-    if (tunnelError) {
-      logger.error(tunnelError);
-      process.exit(1);
+    config = await ensureStartupMounts(config, configPath, logger);
+    const tunnelWarning = tunnelLegacyAccessWarning(config);
+    if (tunnelWarning) {
+      logger.warn(tunnelWarning);
     }
     if (config.server.access === 'tunnel' && legacyTunnelOverrideEnabled()) {
-      logger.warn(`${LEGACY_TUNNEL_OVERRIDE_ENV}=1 is allowing tunnel access without clients[]. Remote clients will use legacy default access.`);
+      logger.warn(`${LEGACY_TUNNEL_OVERRIDE_ENV}=1 is allowing tunnel access without API tokens. Remote clients will use legacy default access.`);
     }
   }
   const port = parsePort(options.port) ?? config.server.port;
@@ -98,8 +99,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
   }
 
   if (loaded.length === 0 && !textIndex) {
-    emit('No mounts loaded. Nothing to serve.', stdioMode, logger, 'error');
-    emit('Check your config with `mvmt config` or rerun `mvmt config setup`.', stdioMode, logger, 'error');
+    emitNoMountsGuidance(stdioMode, logger);
     process.exit(1);
   }
 
@@ -135,7 +135,8 @@ export async function start(options: StartOptions = {}): Promise<void> {
       port,
       allowedOrigins: config.server.allowedOrigins,
       resolvePublicBaseUrl: () => tunnelController.publicUrl,
-      clients: config.clients,
+      clients: () => config.clients,
+      allowLegacyDefaultClient: () => config.server.access !== 'tunnel' || legacyTunnelOverrideEnabled(),
       requestLog: interactiveMode
         ? (entry) => (audit as InteractiveAuditLogger).recordHttp(entry)
         : options.verbose
@@ -152,12 +153,18 @@ export async function start(options: StartOptions = {}): Promise<void> {
           connection.close();
           return;
         case 'tunnel.start':
-          await tunnelController.start();
+          await tunnelController.start({ enable: true });
+          if (config.server.access === 'tunnel') {
+            await saveConfig(configPath, config);
+          }
           connection.send({ ok: true, result: tunnelController.snapshot() });
           connection.close();
           return;
         case 'tunnel.refresh':
-          await tunnelController.refresh();
+          await tunnelController.refresh({ enable: true });
+          if (config.server.access === 'tunnel') {
+            await saveConfig(configPath, config);
+          }
           connection.send({ ok: true, result: tunnelController.snapshot() });
           connection.close();
           return;
@@ -183,20 +190,6 @@ export async function start(options: StartOptions = {}): Promise<void> {
             return;
           }
           const tunnelConfig = parsedTunnel.data;
-          const nextConfig = {
-            ...config,
-            server: {
-              ...config.server,
-              access: 'tunnel' as const,
-              tunnel: tunnelConfig,
-            },
-          };
-          const safetyError = tunnelExposureError(nextConfig);
-          if (safetyError) {
-            connection.send({ ok: false, error: safetyError });
-            connection.close();
-            return;
-          }
           config.server.access = 'tunnel';
           config.server.tunnel = tunnelConfig;
           await saveConfig(configPath, config);
@@ -259,6 +252,52 @@ export async function start(options: StartOptions = {}): Promise<void> {
     await Promise.all(cleanupTasks.map((task) => task().catch(() => undefined)));
     process.exit(1);
   }
+}
+
+export function hasEnabledMounts(config: Pick<MvmtConfig, 'mounts'>): boolean {
+  return config.mounts.some((mount) => mount.enabled !== false);
+}
+
+async function ensureStartupMounts(
+  config: MvmtConfig,
+  configPath: string,
+  logger: Logger,
+): Promise<MvmtConfig> {
+  if (hasEnabledMounts(config)) return config;
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return config;
+
+  logger.warn('No mounts configured. Add a mount to continue startup.');
+  const nextConfig = await promptAndAddMount(config);
+  if (!nextConfig || !hasEnabledMounts(nextConfig)) {
+    logger.error('No mount added. Startup cannot continue without at least one enabled mount.');
+    logger.error('Run `mvmt mounts add <name> <folder>` or `mvmt config setup` first.');
+    process.exit(1);
+  }
+
+  await saveConfig(configPath, nextConfig);
+  logger.info(`Saved mount config to ${configPath}`);
+  logger.info(formatPermissionMode(nextConfig));
+  logger.info(`The HTTP session token is stored at ${TOKEN_PATH} and is created automatically when the server starts.`);
+  return nextConfig;
+}
+
+function formatPermissionMode(config: MvmtConfig): string {
+  if (config.clients && config.clients.length > 0) {
+    return 'Permissions: using configured API-token/OAuth path-action policy.';
+  }
+  if (config.server.access === 'tunnel' && !legacyTunnelOverrideEnabled()) {
+    return 'Permissions: no API tokens configured, so tunnel data access is closed.';
+  }
+  return 'Permissions: no API-token policy is configured, so the session token can access configured mounts.';
+}
+
+function emitNoMountsGuidance(
+  stdioMode: boolean,
+  logger: Logger,
+): void {
+  emit('No mounts loaded. Nothing to serve.', stdioMode, logger, 'error');
+  emit('Add a mount with `mvmt mounts add <name> <folder>` or rerun `mvmt config setup`.', stdioMode, logger, 'error');
+  emit('For one temporary read-only folder, run `mvmt serve --path <dir>`.', stdioMode, logger, 'error');
 }
 
 // Runs all cleanup tasks on SIGINT/SIGTERM. If any task hangs (e.g. a
@@ -335,10 +374,10 @@ function printStartupBanner(
     console.log(`${chalk.bold('Tool-call log')} ${AUDIT_LOG_PATH}`);
     console.log('\nRead token with:');
     console.log(`  ${chalk.cyan('mvmt token')}\n`);
-    console.log('Connect from Claude Desktop:');
-    console.log(`  { "mcpServers": { "mvmt": { "url": "http://127.0.0.1:${port}/mcp", "headers": { "Authorization": "Bearer <token from mvmt token>" } } } }`);
-    console.log('\nOr via Claude Code:');
-    console.log(`  ${chalk.cyan(`claude mcp add --transport http --header "Authorization: Bearer <token from mvmt token>" mvmt http://127.0.0.1:${port}/mcp`)}\n`);
+    console.log('Connect a local HTTP client:');
+    console.log(`  URL: ${chalk.cyan(`http://127.0.0.1:${port}/mcp`)}`);
+    console.log('  Header: Authorization: Bearer <token>');
+    console.log(chalk.dim('  Use `mvmt tokens add` for scoped client access, or `mvmt token` only in legacy mode.'));
   }
 }
 

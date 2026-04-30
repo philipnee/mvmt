@@ -67,7 +67,7 @@ clients:
     name: Codex CLI
     auth:
       type: token
-      tokenHash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      tokenHash: "scrypt:v1:..."
     rawToolsEnabled: false
     permissions:
       - path: /workspace/**
@@ -140,9 +140,12 @@ An Obsidian vault is just a local folder mount. There is no special Obsidian run
 
 ## `clients`
 
-`clients[]` is optional.
+`clients[]` is optional and is managed for token clients by `mvmt tokens add`.
+The field name is internal config terminology; the CLI calls these API tokens.
 
-If absent, mvmt keeps legacy behavior: the session bearer token from `mvmt token` can access all configured mounts.
+If absent, mvmt keeps legacy local behavior: the session bearer token from
+`mvmt token` can access all configured mounts. In tunnel mode, the legacy
+session token is rejected unless `MVMT_ALLOW_LEGACY_TUNNEL=1` is set.
 
 If present, `/mcp` becomes strict:
 
@@ -156,7 +159,7 @@ If present, `/mcp` becomes strict:
 | `id` | Stable client id used in audit entries. Lowercase letters, numbers, `_`, and `-`. |
 | `name` | Human-readable client name. |
 | `auth.type` | `token` or `oauth`. |
-| `auth.tokenHash` | SHA-256 hex hash of the client bearer token. Plaintext tokens are not stored. |
+| `auth.tokenHash` | Verifier for the client bearer token. New tokens use scrypt. Plaintext tokens are not stored. |
 | `auth.oauthClientIds` | OAuth `client_id` values mapped to this client. |
 | `rawToolsEnabled` | Legacy field. The mount-only runtime ignores raw proxy tools. Keep `false`. |
 | `permissions` | Virtual path/action grants. |

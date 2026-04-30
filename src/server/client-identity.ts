@@ -1,6 +1,6 @@
-import crypto from 'crypto';
 import type { Request } from 'express';
 import { ClientConfig, PermissionConfig } from '../config/schema.js';
+import { verifyApiToken } from '../utils/api-token-hash.js';
 import { AccessToken } from './oauth.js';
 
 export type ClientIdentitySource = 'session' | 'token' | 'oauth' | 'quarantine';
@@ -57,6 +57,11 @@ export interface ResolveClientIdentityInput {
   clients: readonly ClientConfig[];
   oauthAccessToken: AccessToken | undefined;
   validateSession: (authHeader: string) => boolean;
+  // When false, the pre-policy session-token/OAuth compatibility path is
+  // disabled even if clients[] is empty. Tunnel mode uses this so a public
+  // endpoint can be reachable without giving the legacy session token
+  // all-mount data access.
+  allowLegacyDefault?: boolean;
 }
 
 // resolveClientIdentity returns the ClientIdentity for an authenticated
@@ -65,6 +70,7 @@ export interface ResolveClientIdentityInput {
 // permitted to do nothing" (enforcement in a follow-up PR).
 export function resolveClientIdentity(input: ResolveClientIdentityInput): ClientIdentity | undefined {
   const policyConfigured = input.clients.length > 0;
+  const allowLegacyDefault = input.allowLegacyDefault ?? true;
 
   // OAuth access token: the bearer was already verified by the caller.
   // Map its OAuth client_id to a named client. Behavior depends on
@@ -82,19 +88,18 @@ export function resolveClientIdentity(input: ResolveClientIdentityInput): Client
       (c) => c.auth.type === 'oauth' && c.auth.oauthClientIds.includes(oauthClientId),
     );
     if (named) return identityFromConfig(named, 'oauth', oauthClientId);
-    if (!policyConfigured) return synthesizeDefaultClient();
+    if (!policyConfigured && allowLegacyDefault) return synthesizeDefaultClient();
     return quarantineIdentity(oauthClientId);
   }
 
-  // Client bearer token: hash the bearer and look for a matching client
-  // tokenHash. Compare uses timing-safe equality so the lookup does not
-  // leak hash data via response time differences.
+  // Client bearer token: verify the bearer against each configured
+  // token verifier. The verifier utility uses timing-safe equality for
+  // stored hashes.
   const bearer = extractBearer(input.authHeader);
   if (bearer) {
-    const incomingHash = sha256Hex(bearer);
     for (const client of input.clients) {
       if (client.auth.type !== 'token') continue;
-      if (timingSafeHexEqual(incomingHash, client.auth.tokenHash)) {
+      if (verifyApiToken(bearer, client.auth.tokenHash)) {
         return identityFromConfig(client, 'token');
       }
     }
@@ -107,7 +112,7 @@ export function resolveClientIdentity(input: ResolveClientIdentityInput): Client
   // and control endpoints, but data-plane access must come through a
   // configured client. This prevents the session token from being a
   // parallel credential that bypasses per-client policy.
-  if (!policyConfigured && input.validateSession(input.authHeader)) {
+  if (!policyConfigured && allowLegacyDefault && input.validateSession(input.authHeader)) {
     return synthesizeDefaultClient();
   }
 
@@ -146,19 +151,6 @@ function extractBearer(authHeader: string): string | undefined {
   if (!authHeader.startsWith('Bearer ')) return undefined;
   const token = authHeader.slice('Bearer '.length).trim();
   return token.length > 0 ? token : undefined;
-}
-
-function sha256Hex(value: string): string {
-  return crypto.createHash('sha256').update(value, 'utf8').digest('hex');
-}
-
-function timingSafeHexEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  try {
-    return crypto.timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
-  } catch {
-    return false;
-  }
 }
 
 function isClientIdentity(value: unknown): value is ClientIdentity {

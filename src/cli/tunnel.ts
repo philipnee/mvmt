@@ -1,6 +1,5 @@
 import { input, select } from '@inquirer/prompts';
 import chalk from 'chalk';
-import fs from 'fs/promises';
 import { configExists, expandHome, getConfigPath, readConfig, resolveConfigPath, saveConfig } from '../config/loader.js';
 import { MvmtConfig, TunnelConfig } from '../config/schema.js';
 import {
@@ -18,6 +17,8 @@ import {
   streamJsonControl,
 } from '../utils/control.js';
 import { readSessionToken } from '../utils/token.js';
+import { tunnelLegacyAccessWarning } from './tunnel-safety.js';
+import { promptForExistingFile } from './folder-prompt.js';
 
 export interface TunnelCommandOptions {
   config?: string;
@@ -29,6 +30,12 @@ export interface TunnelRuntimeStatus {
   command?: string;
   publicUrl?: string;
   recentLogs?: string[];
+}
+
+export interface ApplyTunnelConfigResult {
+  config: MvmtConfig;
+  enabled: boolean;
+  warning?: string;
 }
 
 export async function showTunnel(options: TunnelCommandOptions = {}): Promise<void> {
@@ -54,11 +61,13 @@ export async function configureTunnel(options: TunnelCommandOptions = {}): Promi
   if (!loaded) return;
 
   const tunnel = await promptForTunnelConfig(loaded.config.server.port);
-  loaded.config.server.access = 'tunnel';
-  loaded.config.server.tunnel = tunnel;
-  await saveConfig(loaded.configPath, loaded.config);
+  const applied = applyTunnelConfig(loaded.config, tunnel);
+  await saveConfig(loaded.configPath, applied.config);
 
   console.log(chalk.green(`Tunnel config saved to ${loaded.configPath}`));
+  if (applied.warning) {
+    printTunnelEnabledWithNoTokens(applied.warning);
+  }
 
   try {
     const token = requireControlToken();
@@ -89,11 +98,13 @@ export async function configureTunnel(options: TunnelCommandOptions = {}): Promi
 export async function startTunnelCommand(options: TunnelCommandOptions = {}): Promise<void> {
   const runtime = await sendTunnelRequest(options.config, 'tunnel.start');
   printTunnelActionResult(runtime);
+  if (runtime.configured) printApiTokenWarningForConfig(options.config);
 }
 
 export async function refreshTunnelCommand(options: TunnelCommandOptions = {}): Promise<void> {
   const runtime = await sendTunnelRequest(options.config, 'tunnel.refresh');
   printTunnelActionResult(runtime);
+  if (runtime.configured) printApiTokenWarningForConfig(options.config);
 }
 
 export async function stopTunnelCommand(options: TunnelCommandOptions = {}): Promise<void> {
@@ -103,6 +114,21 @@ export async function stopTunnelCommand(options: TunnelCommandOptions = {}): Pro
     return;
   }
   printTunnelActionResult(runtime);
+}
+
+export async function disableTunnelAccess(options: TunnelCommandOptions = {}): Promise<void> {
+  const loaded = loadConfigSummary(options.config);
+  if (!loaded) return;
+
+  if (loaded.config.server.access !== 'tunnel') {
+    console.log(chalk.dim('Tunnel access is already disabled.'));
+    return;
+  }
+
+  loaded.config.server.access = 'local';
+  await saveConfig(loaded.configPath, loaded.config);
+  console.log(chalk.green(`Tunnel access disabled in ${loaded.configPath}`));
+  console.log(chalk.dim('Saved tunnel details were kept. Restart mvmt to serve locally.'));
 }
 
 export async function showTunnelLogs(options: TunnelCommandOptions = {}): Promise<void> {
@@ -168,7 +194,7 @@ export function printTunnelSummary(config: MvmtConfig, runtime?: TunnelRuntimeSt
   console.log('mvmt tunnel\n');
   console.log('Configured');
   console.log(`  access: ${config.server.access}`);
-  if (config.server.access !== 'tunnel' || !config.server.tunnel) {
+  if (!config.server.tunnel) {
     console.log(`  ${chalk.dim('Tunnel is not configured.')}`);
     return;
   }
@@ -177,6 +203,10 @@ export function printTunnelSummary(config: MvmtConfig, runtime?: TunnelRuntimeSt
   console.log(`  command: ${config.server.tunnel.command}`);
   if (config.server.tunnel.url) {
     console.log(`  public URL: ${formatMcpPublicUrl(config.server.tunnel.url)}`);
+  }
+  if (config.server.access !== 'tunnel') {
+    console.log(`  ${chalk.dim('Tunnel details are saved, but tunnel access is disabled.')}`);
+    return;
   }
 
   console.log('\nLive');
@@ -187,6 +217,32 @@ export function printTunnelSummary(config: MvmtConfig, runtime?: TunnelRuntimeSt
   console.log(`  status: ${runtime.running ? 'running' : 'stopped'}`);
   if (runtime.command) console.log(`  command: ${runtime.command}`);
   if (runtime.publicUrl) console.log(`  public URL: ${formatMcpPublicUrl(runtime.publicUrl)}`);
+}
+
+export function applyTunnelConfig(
+  config: MvmtConfig,
+  tunnel: TunnelConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): ApplyTunnelConfigResult {
+  const enabledConfig: MvmtConfig = {
+    ...config,
+    server: {
+      ...config.server,
+      access: 'tunnel',
+      tunnel,
+    },
+  };
+  return {
+    config: enabledConfig,
+    enabled: true,
+    warning: tunnelLegacyAccessWarning(enabledConfig, env),
+  };
+}
+
+export function printTunnelEnabledWithNoTokens(warning: string): void {
+  console.log(chalk.yellow(warning));
+  console.log(chalk.dim('The public URL can be reachable before any API token can read data.'));
+  console.log(chalk.dim('Next step: mvmt tokens add'));
 }
 
 export async function promptForTunnelConfig(port: number): Promise<TunnelConfig> {
@@ -230,13 +286,8 @@ async function promptForTunnelDetails(
 ): Promise<TunnelConfig> {
   if (provider === 'cloudflare-named') {
     console.log(chalk.dim('Use this after creating a Cloudflare named tunnel and DNS route.'));
-    const configPath = await input({
-      message: 'Cloudflared config file',
-      default: '~/.cloudflared/config.yml',
-      validate: async (value) => {
-        const resolved = expandHome(value.trim());
-        return (await pathExists(resolved)) ? true : `File not found: ${resolved}`;
-      },
+    const configPath = await promptForExistingFile('Cloudflared config file:', {
+      defaultValue: '~/.cloudflared/config.yml',
     });
     const publicUrl = await input({
       message: 'Public base URL',
@@ -350,13 +401,11 @@ function printTunnelActionResult(runtime: TunnelRuntimeStatus): void {
   console.log(chalk.dim('Tunnel is running, but no public URL has been detected yet.'));
 }
 
-async function pathExists(filePath: string): Promise<boolean> {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
+function printApiTokenWarningForConfig(configOverride: string | undefined): void {
+  const loaded = loadConfigSummary(configOverride);
+  if (!loaded) return;
+  const warning = tunnelLegacyAccessWarning(loaded.config);
+  if (warning) printTunnelEnabledWithNoTokens(warning);
 }
 
 function validatePublicUrlInput(value: string): true | string {

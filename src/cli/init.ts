@@ -16,6 +16,7 @@ import {
   missingTunnelDependency,
   normalizeTunnelBaseUrl,
 } from '../utils/tunnel.js';
+import { promptForExistingFile } from './folder-prompt.js';
 
 export interface SetupConfigOptions {
   config?: string;
@@ -216,13 +217,8 @@ async function promptForTunnelDetails(
 ): Promise<TunnelConfig> {
   if (provider === 'cloudflare-named') {
     console.log(chalk.dim('Use this after creating a Cloudflare named tunnel and DNS route.'));
-    const configPath = await input({
-      message: 'Cloudflared config file',
-      default: '~/.cloudflared/config.yml',
-      validate: async (value) => {
-        const resolved = resolveSetupPath(value.trim());
-        return (await pathExists(resolved)) ? true : `File not found: ${resolved}`;
-      },
+    const configPath = await promptForExistingFile('Cloudflared config file:', {
+      defaultValue: '~/.cloudflared/config.yml',
     });
     const publicUrl = await input({
       message: 'Public base URL',

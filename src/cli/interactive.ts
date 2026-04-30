@@ -5,10 +5,11 @@ import { AuditEntry, AuditLogger, AUDIT_LOG_PATH } from '../utils/audit.js';
 import { HttpRequestLogEntry } from '../server/index.js';
 import { generateSessionToken, rotateSigningKey, TOKEN_PATH, defaultSigningKeyPath } from '../utils/token.js';
 import { formatMcpPublicUrl } from '../utils/tunnel.js';
+import { printApiTokenSaved, printApiTokens, promptAndAddApiToken, promptAndRemoveApiToken } from './api-tokens.js';
 import { printTokenSummary, readTokenSummary } from './token.js';
 import { printConfigSummary } from './config.js';
 import { printMounts, promptAndAddMount, promptAndEditMount, promptAndRemoveMount } from './mounts.js';
-import { promptForTunnelConfig } from './tunnel.js';
+import { applyTunnelConfig, printTunnelEnabledWithNoTokens, promptForTunnelConfig } from './tunnel.js';
 import { LoadedConnector } from './connector-loader.js';
 import { TunnelController } from './tunnel-controller.js';
 import { ToolResultPlugin } from '../plugins/types.js';
@@ -84,6 +85,8 @@ export function startInteractivePrompt(state: InteractivePromptState): void {
     handlingCommand = true;
     lastSigintAt = 0;
     const command = line.trim().toLowerCase();
+    const shouldContinue = command !== 'quit' && command !== 'exit';
+    rl.pause();
     try {
       await handleInteractiveCommand(command, state, rl);
     } catch (err) {
@@ -94,8 +97,9 @@ export function startInteractivePrompt(state: InteractivePromptState): void {
       }
     } finally {
       handlingCommand = false;
+      if (shouldContinue) rl.resume();
     }
-    if (command !== 'quit' && command !== 'exit') {
+    if (shouldContinue) {
       rl.prompt();
     }
   });
@@ -170,6 +174,16 @@ async function handleInteractiveCommand(
     case 'token rotate':
       printRotatedToken();
       return;
+    case 'tokens':
+    case 'tokens list':
+      printApiTokens(state.config);
+      return;
+    case 'tokens add':
+      await handleTokensAdd(state);
+      return;
+    case 'tokens remove':
+      await handleTokensRemove(state);
+      return;
     case 'logs':
       printLiveLogState(state);
       return;
@@ -237,6 +251,8 @@ function printInteractiveHelp(): void {
   console.log('  config setup        rerun guided setup in another shell');
   console.log('  token               show current bearer token and age');
   console.log('  token rotate        generate and print a new bearer token');
+  console.log('  tokens              list scoped API tokens');
+  console.log('  tokens add/remove   manage scoped API tokens');
   console.log('  tunnel              show tunnel status');
   console.log('  tunnel config       choose a different tunnel');
   console.log('  tunnel start        start the configured tunnel');
@@ -321,9 +337,16 @@ async function handleTunnelStart(state: InteractivePromptState): Promise<void> {
     printTunnelStatus(state);
     return;
   }
-  const tunnel = await state.tunnel.start();
+  const wasLocalOnly = state.config.server.access !== 'tunnel';
+  const tunnel = await state.tunnel.start({ enable: true });
+  if (wasLocalOnly && state.config.server.access === 'tunnel') {
+    await state.persistConfig();
+  }
   if (tunnel?.url) {
     console.log(`public URL  ${chalk.yellow(formatMcpPublicUrl(tunnel.url))}`);
+  }
+  if ((state.config.clients?.length ?? 0) === 0 && state.config.server.access === 'tunnel') {
+    console.log(chalk.dim('No API tokens are configured. Run `tokens add` before expecting MCP data access over the tunnel.'));
   }
 }
 
@@ -333,7 +356,11 @@ async function handleTunnelRefresh(state: InteractivePromptState): Promise<void>
     return;
   }
   console.log('Refreshing tunnel...');
-  const tunnel = await state.tunnel.refresh();
+  const wasLocalOnly = state.config.server.access !== 'tunnel';
+  const tunnel = await state.tunnel.refresh({ enable: true });
+  if (wasLocalOnly && state.config.server.access === 'tunnel') {
+    await state.persistConfig();
+  }
   if (tunnel?.url) {
     console.log(`public URL  ${chalk.yellow(formatMcpPublicUrl(tunnel.url))}`);
   } else {
@@ -343,18 +370,23 @@ async function handleTunnelRefresh(state: InteractivePromptState): Promise<void>
 
 async function handleTunnelConfig(state: InteractivePromptState): Promise<void> {
   const tunnel = await promptForTunnelConfig(state.port);
+  const applied = applyTunnelConfig(state.config, tunnel);
   const wasRunning = state.tunnel.running;
 
   if (wasRunning) {
     await state.tunnel.stop();
   }
 
-  state.tunnel.configure(tunnel);
-  state.config.server.access = 'tunnel';
+  state.config.server.access = applied.config.server.access;
   state.config.server.tunnel = tunnel;
   await state.persistConfig();
 
   console.log(chalk.green(`Tunnel config saved to ${state.configPath}`));
+  if (applied.warning) {
+    printTunnelEnabledWithNoTokens(applied.warning);
+  }
+
+  state.tunnel.configure(tunnel);
   if (!wasRunning) {
     console.log(chalk.dim('Run `tunnel start` or `tunnel refresh` to launch it.'));
     return;
@@ -424,6 +456,25 @@ async function handleMountsRemove(state: InteractivePromptState): Promise<void> 
   await state.persistConfig();
   console.log(chalk.green(`Mounts saved to ${state.configPath}`));
   console.log(chalk.dim('Restart mvmt for the running server to load mount changes. Run `mvmt reindex` to rebuild the index.'));
+}
+
+async function handleTokensAdd(state: InteractivePromptState): Promise<void> {
+  const result = await promptAndAddApiToken(state.config);
+  if (!result) return;
+  state.config.clients = result.config.clients;
+  await state.persistConfig();
+  printApiTokenSaved(state.configPath, result);
+}
+
+async function handleTokensRemove(state: InteractivePromptState): Promise<void> {
+  const nextConfig = await promptAndRemoveApiToken(state.config);
+  if (!nextConfig) {
+    console.log(chalk.yellow('API token config unchanged.'));
+    return;
+  }
+  state.config.clients = nextConfig.clients;
+  await state.persistConfig();
+  console.log(chalk.green(`API token config saved to ${state.configPath}`));
 }
 
 function printPluginSummary(plugins: ToolResultPlugin[]): void {

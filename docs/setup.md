@@ -80,9 +80,16 @@ For a one-off read-only folder without changing saved config:
 mvmt serve --path ~/Documents -i
 ```
 
+When adding a mount:
+
+- **Folder on this computer** is the real local folder. It must already exist.
+- **Virtual path clients will use** is the mvmt path, such as `/notes` or
+  `/workspace`.
+
 ## Token
 
-Show the current session bearer token:
+Show the current session bearer token. If the token file does not exist yet,
+this command creates it.
 
 ```bash
 mvmt token
@@ -102,6 +109,10 @@ mvmt token rotate
 
 If a client uses the old token, restart or update that client after rotation.
 
+The session token is stored as a plaintext bearer token at
+`~/.mvmt/.session-token` with file mode `600`. HTTP `mvmt serve` also creates it
+automatically during startup.
+
 ## Rebuild the Index
 
 Search uses the text index. mvmt rebuilds it in the background on startup.
@@ -119,23 +130,23 @@ Use this after adding a mount or changing files outside mvmt.
 Codex stores the name of an environment variable, not the token value.
 
 ```bash
+mvmt tokens add codex --read /notes
+
+# Use the token printed by `mvmt tokens add`.
+export MVMT_TOKEN="<paste mvmt_... token here>"
 codex mcp add mvmt \
   --url http://127.0.0.1:4141/mcp \
   --bearer-token-env-var MVMT_TOKEN
 ```
 
-Before starting Codex:
+Do not pass the token itself to `--bearer-token-env-var`. That flag expects the
+name of an environment variable.
+
+Before starting Codex later:
 
 ```bash
-export MVMT_TOKEN="$(mvmt token show)"
+export MVMT_TOKEN="<paste mvmt_... token here>"
 codex
-```
-
-If you rotate the token:
-
-```bash
-export MVMT_TOKEN="$(mvmt token show)"
-codex resume
 ```
 
 Do not run `codex mcp login mvmt` for the local bearer-token setup. If Codex asks for login, the usual cause is a missing or stale `MVMT_TOKEN`.
@@ -196,7 +207,8 @@ The exact list depends on client permissions.
 
 ### `No mounts loaded. Nothing to serve.`
 
-Add at least one mount:
+In an interactive terminal, `mvmt serve` will offer to add a mount before
+starting. In scripts or CI, add at least one mount explicitly:
 
 ```bash
 mvmt mounts add workspace ~/code/mvmt --mount-path /workspace --read-only
@@ -217,7 +229,7 @@ Run:
 ```bash
 mvmt doctor
 mvmt mounts list
-export MVMT_TOKEN="$(mvmt token show)"
+mvmt tokens
 ```
 
 Then restart the MCP client.
@@ -235,6 +247,6 @@ mvmt serve -i --port 4142
 Codex only sees environment variables from the shell that launched it.
 
 ```bash
-export MVMT_TOKEN="$(mvmt token show)"
+export MVMT_TOKEN="<paste mvmt_... token here>"
 codex
 ```

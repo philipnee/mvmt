@@ -1,4 +1,3 @@
-import crypto from 'crypto';
 import { describe, expect, it } from 'vitest';
 import { ClientConfig } from '../src/config/schema.js';
 import {
@@ -8,20 +7,17 @@ import {
   synthesizeDefaultClient,
 } from '../src/server/client-identity.js';
 import { AccessToken } from '../src/server/oauth.js';
+import { hashApiToken } from '../src/utils/api-token-hash.js';
 
-const SHA256_HEX_LEN = 64;
 const ALWAYS_FALSE = () => false;
 const ALWAYS_TRUE = () => true;
-
-function sha256Hex(value: string): string {
-  return crypto.createHash('sha256').update(value, 'utf8').digest('hex');
-}
+const LEGACY_SHA256_FOR_CASE_TOKEN = '68422947E634BBE26EEACDFC99FDAD68E4E5FD75DA9EB717B1DA0F710EC7B0AB';
 
 function tokenClient(id: string, plaintext: string, overrides: Partial<ClientConfig> = {}): ClientConfig {
   return {
     id,
     name: id,
-    auth: { type: 'token', tokenHash: sha256Hex(plaintext) },
+    auth: { type: 'token', tokenHash: hashApiToken(plaintext) },
     rawToolsEnabled: false,
     permissions: [],
     ...overrides,
@@ -120,6 +116,19 @@ describe('resolveClientIdentity', () => {
       expect(identity?.isLegacyDefault).toBe(true);
     });
 
+    it('quarantines OAuth tokens when legacy default access is disabled', () => {
+      const identity = resolveClientIdentity({
+        authHeader: 'Bearer mvmtv1.something',
+        clients: [],
+        oauthAccessToken: fakeOauthAccessToken('legacy-oauth-client'),
+        validateSession: ALWAYS_FALSE,
+        allowLegacyDefault: false,
+      });
+
+      expect(identity?.source).toBe('quarantine');
+      expect(identity?.id).toBe('quarantine:legacy-oauth-client');
+    });
+
     it('does not fall through to client-token or session paths when OAuth token is present (and policy is configured)', () => {
       // Even if a token client matches the bearer string, the OAuth path
       // takes precedence for OAuth-authenticated requests.
@@ -137,7 +146,7 @@ describe('resolveClientIdentity', () => {
   });
 
   describe('client token path', () => {
-    it('matches a configured token client by sha256 hash', () => {
+    it('matches a configured token client by scrypt verifier', () => {
       const codex = tokenClient('codex', 'codex-plaintext-token', { rawToolsEnabled: true });
       const identity = resolveClientIdentity({
         authHeader: 'Bearer codex-plaintext-token',
@@ -175,12 +184,9 @@ describe('resolveClientIdentity', () => {
       expect(identity).toBeUndefined();
     });
 
-    it('verifies tokenHash format (full 64-char hex) is enforced by schema, but matches case-insensitively here', () => {
-      const upperHash = sha256Hex('case-token').toUpperCase();
+    it('matches legacy SHA-256 token verifiers case-insensitively', () => {
       const codex = tokenClient('codex', 'case-token');
-      // Replace the lowercase hash with an uppercase one to confirm
-      // timingSafeHexEqual handles case via Buffer.from(..., 'hex').
-      codex.auth = { type: 'token', tokenHash: upperHash };
+      codex.auth = { type: 'token', tokenHash: LEGACY_SHA256_FOR_CASE_TOKEN };
 
       const identity = resolveClientIdentity({
         authHeader: 'Bearer case-token',
@@ -205,6 +211,18 @@ describe('resolveClientIdentity', () => {
       expect(identity?.source).toBe('session');
       expect(identity?.id).toBe('default');
       expect(identity?.isLegacyDefault).toBe(true);
+    });
+
+    it('rejects the legacy session token when legacy default access is disabled', () => {
+      const identity = resolveClientIdentity({
+        authHeader: 'Bearer session-token',
+        clients: [],
+        oauthAccessToken: undefined,
+        validateSession: ALWAYS_TRUE,
+        allowLegacyDefault: false,
+      });
+
+      expect(identity).toBeUndefined();
     });
 
     it('does NOT fall back to default when clients[] is non-empty (session token is admin-only once policy is configured)', () => {
@@ -245,12 +263,5 @@ describe('resolveClientIdentity', () => {
 
       expect(identity).toBeUndefined();
     });
-  });
-});
-
-describe('tokenHash format invariants', () => {
-  it('sha256 hashes used in tests are always 64 hex chars', () => {
-    expect(sha256Hex('anything')).toHaveLength(SHA256_HEX_LEN);
-    expect(sha256Hex('')).toMatch(/^[0-9a-f]{64}$/);
   });
 });

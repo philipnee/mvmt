@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isApiTokenVerifier, normalizeApiTokenVerifierForDuplicateCheck } from '../utils/api-token-hash.js';
 
 export const GLOBAL_SECRET_PATH_PATTERNS = [
   '.mvmt/**',
@@ -172,9 +173,10 @@ export const PermissionSchema = z.object({
 
 export const ClientAuthTokenSchema = z.object({
   type: z.literal('token'),
-  // SHA-256 hex hash of the issued bearer token. Plaintext is shown to
-  // the operator once at issuance and never persisted.
-  tokenHash: z.string().regex(/^[0-9a-f]{64}$/i, 'tokenHash must be a 64-char hex SHA-256'),
+  // Verifier for an issued bearer token. New tokens use scrypt; legacy
+  // 64-char SHA-256 verifiers are still accepted so existing configs keep
+  // working. Plaintext is shown once at issuance and never persisted.
+  tokenHash: z.string().refine(isApiTokenVerifier, 'tokenHash must be a scrypt verifier or legacy 64-char SHA-256 hex'),
 });
 
 export const ClientAuthOAuthSchema = z.object({
@@ -261,7 +263,7 @@ export const ConfigSchema = z
       }
 
       if (client.auth.type === 'token') {
-        const tokenHash = client.auth.tokenHash.toLowerCase();
+        const tokenHash = normalizeApiTokenVerifierForDuplicateCheck(client.auth.tokenHash);
         const firstSeen = seenTokenHashes.get(tokenHash);
         if (firstSeen !== undefined) {
           ctx.addIssue({

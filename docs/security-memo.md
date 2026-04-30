@@ -57,13 +57,24 @@ mvmt token rotate
 
 The HTTP server validates against the token file on each request, so rotation is effective without restarting mvmt. Clients using the old token still need to be restarted or updated.
 
+Scoped bearer credentials use API tokens:
+
+```bash
+mvmt tokens add
+mvmt tokens list
+mvmt tokens remove
+```
+
+The plaintext API token is printed once. mvmt stores only a scrypt verifier in
+config.
+
 ## Per-Client Policy
 
 When `clients[]` is absent, mvmt preserves legacy behavior: the session token can access all configured mounts.
 
 When `clients[]` exists, `/mcp` resolves every request to a configured client:
 
-- token clients match a stored SHA-256 `tokenHash`;
+- token clients match a stored `tokenHash` verifier;
 - OAuth clients match configured OAuth `client_id` values;
 - unknown OAuth clients are quarantined with zero permissions;
 - the session token no longer grants data-plane access.
@@ -87,14 +98,17 @@ For writes, both checks must pass:
 
 Protected paths remain blocked even when both checks pass.
 
-Tunnel mode requires `clients[]` by default so public traffic cannot fall back to the legacy all-mount session-token identity. `MVMT_ALLOW_LEGACY_TUNNEL=1` exists only as a temporary debugging escape hatch.
+Tunnel mode can start without API tokens, but `/mcp` rejects the legacy
+all-mount session token in that state. Public data access requires a scoped API
+token or an approved OAuth client mapping. `MVMT_ALLOW_LEGACY_TUNNEL=1` exists
+only as a temporary debugging escape hatch.
 
 Mount access has two layers of path filtering: per-mount `exclude`/`protect` patterns and a global secret-path deny list. The global list blocks paths such as `.mvmt/**`, `.ssh/**`, `.aws/**`, `.kube/**`, and common credential files even when an older config omits those patterns.
 
 ## Known Limits
 
 - Localhost traffic is plaintext. The OS user remains the main trust boundary.
-- Client-token issuance is not managed yet; `clients[]` is manual config.
+- API-token rotation is not managed yet.
 - There is no admin UI yet.
 - Search is prototype keyword scoring over text files, not embeddings.
 - Binary/PDF/image indexing is not shipped.
@@ -109,7 +123,7 @@ It is not the primary security boundary. If a client must not see data, do not m
 
 ## Near-Term Security Priorities
 
-- Managed client-key issuance and revocation.
+- API-token rotation and revocation UX.
 - Admin UI for mounts, client policy, and audit visibility.
 - SQLite-backed index and incremental updates.
 - Remote mvmt mounts with clear two-sided permission checks.

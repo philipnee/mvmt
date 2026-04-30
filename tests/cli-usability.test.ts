@@ -4,7 +4,7 @@ import os from 'os';
 import path from 'path';
 import { promisify } from 'util';
 import { describe, expect, it } from 'vitest';
-import { parseConfig, saveConfig } from '../src/config/loader.js';
+import { parseConfig, readConfig, saveConfig } from '../src/config/loader.js';
 
 const execFileAsync = promisify(execFile);
 const root = path.resolve(import.meta.dirname, '..');
@@ -83,6 +83,154 @@ describe('CLI usability', () => {
       expect(result.code).toBe(1);
       expect(result.output).toContain('No mounts configured.');
       expect(result.output).toContain('mvmt mounts add <name> <folder>');
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('gives non-interactive serve users mount setup commands when no mounts exist', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    const configPath = path.join(tmp, 'config.yaml');
+    try {
+      await saveConfig(configPath, parseConfig({ version: 1 }));
+
+      const result = await runCliAllowFailure(['serve', '--config', configPath]);
+      expect(result.code).toBe(1);
+      expect(result.output).toContain('No mounts loaded. Nothing to serve.');
+      expect(result.output).toContain('mvmt mounts add <name> <folder>');
+      expect(result.output).toContain('mvmt serve --path <dir>');
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects non-interactive mount roots that do not exist', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    const configPath = path.join(tmp, 'config.yaml');
+    const missingRoot = path.join(tmp, 'missing');
+    try {
+      await saveConfig(configPath, parseConfig({ version: 1 }));
+
+      const result = await runCliAllowFailure([
+        'mounts',
+        'add',
+        'missing',
+        missingRoot,
+        '--config',
+        configPath,
+      ]);
+      expect(result.code).toBe(1);
+      expect(result.output).toContain(`Folder not found: ${missingRoot}`);
+      expect(result.output).not.toContain('Error:');
+      expect(result.output).not.toContain('at async');
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('can disable tunnel access without removing saved tunnel details', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    const configPath = path.join(tmp, 'config.yaml');
+    try {
+      await saveConfig(configPath, parseConfig({
+        version: 1,
+        server: {
+          access: 'tunnel',
+          tunnel: {
+            provider: 'custom',
+            command: 'cloudflared tunnel --config ~/.cloudflared/mvmt.yml run',
+            url: 'https://mvmt.example.com',
+          },
+        },
+      }));
+
+      const { stdout } = await runCli(['tunnel', 'disable', '--config', configPath]);
+      expect(stdout).toContain('Tunnel access disabled');
+
+      const updated = readConfig(configPath);
+      expect(updated.server.access).toBe('local');
+      expect(updated.server.tunnel?.url).toBe('https://mvmt.example.com');
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('creates and lists scoped API tokens non-interactively', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    const configPath = path.join(tmp, 'config.yaml');
+    const mountRoot = path.join(tmp, 'notes');
+    try {
+      await fs.mkdir(mountRoot);
+      await saveConfig(configPath, parseConfig({
+        version: 1,
+        mounts: [{ name: 'notes', type: 'local_folder', path: '/notes', root: mountRoot }],
+      }));
+
+      const { stdout } = await runCli([
+        'tokens',
+        'add',
+        'codex',
+        '--config',
+        configPath,
+        '--read',
+        '/notes',
+        '--name',
+        'Codex CLI',
+      ]);
+      expect(stdout).toContain('API token codex created');
+      expect(stdout).toContain('API token (shown once)');
+      expect(stdout).toContain('id: codex');
+      expect(stdout).toContain('token: mvmt_');
+      expect(stdout).toContain('export MVMT_TOKEN="mvmt_');
+      expect(stdout).toContain('codex mcp add mvmt --url http://127.0.0.1:4141/mcp --bearer-token-env-var MVMT_TOKEN');
+
+      const { stdout: list } = await runCli(['tokens', '--config', configPath]);
+      expect(list).toContain('API tokens');
+      expect(list).toContain('    codex');
+      expect(list).toContain('      name: Codex CLI');
+      expect(list).toContain('      can: search, read');
+      expect(list).toContain('      path: /notes/**');
+      expect(list).toContain('      token: hidden, remove/add to replace');
+
+      const { stdout: json } = await runCli(['tokens', '--config', configPath, '--json']);
+      expect(JSON.parse(json)).toMatchObject({
+        tokens: [
+          {
+            id: 'codex',
+            name: 'Codex CLI',
+            permissions: [{ path: '/notes/**', actions: ['search', 'read'] }],
+          },
+        ],
+      });
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects API-token write access that exceeds the mount base permission', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    const configPath = path.join(tmp, 'config.yaml');
+    const mountRoot = path.join(tmp, 'notes');
+    try {
+      await fs.mkdir(mountRoot);
+      await saveConfig(configPath, parseConfig({
+        version: 1,
+        mounts: [{ name: 'notes', type: 'local_folder', path: '/notes', root: mountRoot }],
+      }));
+
+      const result = await runCliAllowFailure([
+        'tokens',
+        'add',
+        'codex',
+        '--config',
+        configPath,
+        '--write',
+        '/notes',
+      ]);
+      expect(result.code).toBe(1);
+      expect(result.output).toContain('Mount /notes is read-only');
+      expect(result.output).not.toContain('Error:');
+      expect(result.output).not.toContain('at async');
     } finally {
       await fs.rm(tmp, { recursive: true, force: true });
     }

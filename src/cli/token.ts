@@ -1,6 +1,6 @@
 import chalk from 'chalk';
 import fs from 'fs';
-import { defaultSigningKeyPath, generateSessionToken, readSessionToken, rotateSigningKey, TOKEN_PATH } from '../utils/token.js';
+import { defaultSigningKeyPath, ensureSessionToken, generateSessionToken, readSessionToken, rotateSigningKey, TOKEN_PATH } from '../utils/token.js';
 
 export interface TokenSummary {
   token?: string;
@@ -10,18 +10,12 @@ export interface TokenSummary {
 }
 
 export async function showToken(tokenPath = TOKEN_PATH): Promise<void> {
-  const token = readSessionToken(tokenPath);
-  if (!token) {
-    console.error(`No session token found at ${tokenPath}.`);
-    console.error('Run `mvmt serve` or `mvmt token rotate` first.');
-    process.exitCode = 1;
-    return;
-  }
-
+  const token = ensureSessionToken(tokenPath);
   console.log(token);
 }
 
 export async function showTokenSummary(tokenPath = TOKEN_PATH): Promise<void> {
+  ensureSessionToken(tokenPath);
   const summary = readTokenSummary(tokenPath);
   printTokenSummary(summary);
 }
@@ -61,7 +55,7 @@ export function printTokenSummary(summary: TokenSummary): void {
   console.log('mvmt token\n');
   if (!summary.token) {
     console.log(chalk.yellow(`No token found at ${summary.path}`));
-    console.log(`Run ${chalk.cyan('mvmt serve')} or ${chalk.cyan('mvmt token rotate')} first.`);
+    console.log(`Run ${chalk.cyan('mvmt token')} to create one, or ${chalk.cyan('mvmt token rotate')} to replace it.`);
     return;
   }
 

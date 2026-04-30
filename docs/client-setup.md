@@ -1,6 +1,7 @@
 # Client Setup
 
-All clients connect to the same mvmt endpoint. Start mvmt first, then get your token:
+All clients connect to the same mvmt endpoint. For local testing, start mvmt
+first, then get the legacy session token:
 
 ```bash
 mvmt serve
@@ -12,11 +13,20 @@ Or `token` in interactive mode.
 Most MCP clients let you add servers through their settings UI. You only need two pieces of information:
 
 - **URL**: `http://127.0.0.1:4141/mcp`
-- **Authorization header**: `Bearer <token from mvmt token>`
+- **Authorization header**: `Bearer <token>`
 
 Stdio mode (Claude Desktop) is the exception — it launches mvmt directly and does not need a token.
 
-If `clients[]` is configured in `~/.mvmt/config.yaml`, HTTP clients should use their configured client token instead of the owner/session token. The owner/session token remains the legacy data-plane credential only when no `clients[]` policy exists.
+For repeatable access, create a scoped API token and use that value instead of
+the session token:
+
+```bash
+mvmt tokens add codex --read /notes
+```
+
+Once API tokens are configured, HTTP clients must use one of those tokens. The
+owner/session token remains the legacy data-plane credential only when no API
+tokens or OAuth client policy exists.
 
 ## Remote OAuth clients
 
@@ -40,7 +50,9 @@ curl -X POST https://your-public-mvmt-host/register \
   }'
 ```
 
-Use the same `client_id` and exact `redirect_uri` during `/authorize`. When `clients[]` is configured, map that OAuth `client_id` to a named client before expecting access to tools; unknown OAuth client IDs are rejected as quarantined.
+Use the same `client_id` and exact `redirect_uri` during `/authorize`. When API
+tokens or OAuth client policy is configured, map that OAuth `client_id` before
+expecting access to tools; unknown OAuth client IDs are rejected as quarantined.
 
 ## Claude Desktop
 
@@ -65,28 +77,40 @@ Claude Desktop uses stdio mode, so it launches mvmt as a child process. No token
 
 ```bash
 mvmt serve
+mvmt tokens add claude-code --read /notes
+
+# Use the token printed by `mvmt tokens add`.
+MVMT_TOKEN="<paste mvmt_... token here>"
 claude mcp add --transport http \
-  --header "Authorization: Bearer $(mvmt token show)" \
+  --header "Authorization: Bearer $MVMT_TOKEN" \
   mvmt http://127.0.0.1:4141/mcp
 ```
 
-If you rotate the mvmt token, update the client token afterward.
+If you replace the API token, update the client header afterward.
 
 ## Codex CLI
 
 Codex stores a bearer-token environment variable name, not the token value itself:
 
 ```bash
-export MVMT_TOKEN="$(mvmt token show)"
+mvmt serve
+mvmt tokens add codex --read /notes
+
+# Use the token printed by `mvmt tokens add`.
+export MVMT_TOKEN="<paste mvmt_... token here>"
 codex mcp add mvmt \
   --url http://127.0.0.1:4141/mcp \
   --bearer-token-env-var MVMT_TOKEN
 ```
 
+Do not pass the token itself to `--bearer-token-env-var`. That flag expects the
+name of an environment variable.
+
 Start new Codex sessions from a shell where `MVMT_TOKEN` is set:
 
 ```bash
-MVMT_TOKEN="$(mvmt token show)" codex
+export MVMT_TOKEN="<paste mvmt_... token here>"
+codex
 ```
 
 ## Cursor
@@ -101,7 +125,7 @@ MVMT_TOKEN="$(mvmt token show)" codex
     "mvmt": {
       "url": "http://127.0.0.1:4141/mcp",
       "headers": {
-        "Authorization": "Bearer <paste token from mvmt token>"
+        "Authorization": "Bearer <paste token from mvmt tokens add>"
       }
     }
   }
@@ -120,7 +144,7 @@ MVMT_TOKEN="$(mvmt token show)" codex
     "mvmt": {
       "url": "http://127.0.0.1:4141/mcp",
       "headers": {
-        "Authorization": "Bearer <paste token from mvmt token>"
+        "Authorization": "Bearer <paste token from mvmt tokens add>"
       }
     }
   }

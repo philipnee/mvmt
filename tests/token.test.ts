@@ -9,7 +9,7 @@ import {
   validateSessionToken,
   validateToken,
 } from '../src/utils/token.js';
-import { rotateToken, showToken } from '../src/cli/token.js';
+import { rotateToken, showToken, showTokenSummary } from '../src/cli/token.js';
 
 const tempDirs: string[] = [];
 
@@ -74,6 +74,29 @@ describe('token CLI helpers', () => {
 
     expect(output).toHaveBeenCalledWith(token);
     expect(readSessionToken(tokenPath)).toBe(token);
+  });
+
+  it('creates a missing token before showing it', async () => {
+    const output = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const tokenPath = createTokenPath();
+    fs.rmSync(tokenPath, { force: true });
+
+    await showToken(tokenPath);
+
+    const token = readSessionToken(tokenPath);
+    expect(token).toHaveLength(43);
+    expect(output).toHaveBeenCalledWith(token);
+  });
+
+  it('creates a missing token before printing the summary', async () => {
+    const output = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const tokenPath = createTokenPath();
+    fs.rmSync(tokenPath, { force: true });
+
+    await showTokenSummary(tokenPath);
+
+    expect(readSessionToken(tokenPath)).toHaveLength(43);
+    expect(output).toHaveBeenCalledWith('mvmt token\n');
   });
 
   it('rotates and prints a new token', async () => {
