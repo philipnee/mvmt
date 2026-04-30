@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
   addApiTokenToConfig,
+  editApiTokenInConfig,
   removeApiTokenFromConfig,
+  rotateApiTokenInConfig,
 } from '../src/cli/api-tokens.js';
 import { parseConfig } from '../src/config/loader.js';
 import { verifyApiToken } from '../src/utils/api-token-hash.js';
+
+const EXISTING_TOKEN_VERIFIER = 'scrypt:v1:AAAAAAAAAAAAAAAAAAAAAA:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 
 describe('API token config helpers', () => {
   it('creates a token client with search/read permission for one mount', () => {
@@ -18,6 +22,9 @@ describe('API token config helpers', () => {
     const result = addApiTokenToConfig(config, {
       id: 'codex',
       name: 'Codex CLI',
+      description: 'Used by Codex for the mvmt repo',
+      ttl: '7d',
+      now: Date.parse('2026-04-29T12:00:00.000Z'),
       plaintextToken: 'plain-token',
       permissions: [{ mount: '/document', mode: 'read' }],
     });
@@ -27,6 +34,8 @@ describe('API token config helpers', () => {
     expect(result.client).toMatchObject({
       id: 'codex',
       name: 'Codex CLI',
+      description: 'Used by Codex for the mvmt repo',
+      expiresAt: '2026-05-06T12:00:00.000Z',
       auth: { type: 'token' },
       rawToolsEnabled: false,
       permissions: [{ path: '/document/**', actions: ['search', 'read'] }],
@@ -48,7 +57,7 @@ describe('API token config helpers', () => {
         {
           id: 'codex',
           name: 'Codex CLI',
-          auth: { type: 'token', tokenHash: 'a'.repeat(64) },
+          auth: { type: 'token', tokenHash: EXISTING_TOKEN_VERIFIER },
           permissions: [{ path: '/workspace/**', actions: ['search', 'read'] }],
         },
       ],
@@ -61,10 +70,86 @@ describe('API token config helpers', () => {
 
     expect(result.created).toBe(false);
     expect(result.plaintextToken).toBeUndefined();
-    expect(result.client.auth).toEqual({ type: 'token', tokenHash: 'a'.repeat(64) });
+    expect(result.client.auth).toEqual({ type: 'token', tokenHash: EXISTING_TOKEN_VERIFIER });
     expect(result.client.permissions).toEqual([
       { path: '/workspace/**', actions: ['search', 'read', 'write'] },
     ]);
+  });
+
+  it('edits token metadata, ttl, and permissions without rotating the token secret', () => {
+    const config = parseConfig({
+      version: 1,
+      mounts: [
+        { name: 'notes', type: 'local_folder', path: '/notes', root: '/tmp/notes' },
+        { name: 'workspace', type: 'local_folder', path: '/workspace', root: '/tmp/workspace', writeAccess: true },
+      ],
+      clients: [
+        {
+          id: 'codex',
+          name: 'Codex CLI',
+          description: 'old description',
+          expiresAt: '2026-04-30T12:00:00.000Z',
+          auth: { type: 'token', tokenHash: EXISTING_TOKEN_VERIFIER },
+          permissions: [{ path: '/notes/**', actions: ['search', 'read'] }],
+        },
+      ],
+    });
+
+    const result = editApiTokenInConfig(config, 'codex', {
+      name: 'Codex',
+      description: 'updated description',
+      ttl: 'never',
+      permissions: [{ mount: '/workspace', mode: 'write' }],
+    });
+
+    expect(result.created).toBe(false);
+    expect(result.plaintextToken).toBeUndefined();
+    expect(result.client).toMatchObject({
+      id: 'codex',
+      name: 'Codex',
+      description: 'updated description',
+      auth: { type: 'token', tokenHash: EXISTING_TOKEN_VERIFIER },
+      permissions: [
+        { path: '/workspace/**', actions: ['search', 'read', 'write'] },
+      ],
+    });
+    expect(result.client.expiresAt).toBeUndefined();
+  });
+
+  it('rotates a token secret while preserving metadata and permissions', () => {
+    const config = parseConfig({
+      version: 1,
+      mounts: [
+        { name: 'notes', type: 'local_folder', path: '/notes', root: '/tmp/notes' },
+      ],
+      clients: [
+        {
+          id: 'codex',
+          name: 'Codex CLI',
+          description: 'keep this',
+          expiresAt: '2026-05-06T12:00:00.000Z',
+          auth: { type: 'token', tokenHash: EXISTING_TOKEN_VERIFIER },
+          permissions: [{ path: '/notes/**', actions: ['search', 'read'] }],
+        },
+      ],
+    });
+
+    const result = rotateApiTokenInConfig(config, 'codex', 'new-plaintext-token');
+
+    expect(result.created).toBe(false);
+    expect(result.plaintextToken).toBe('new-plaintext-token');
+    expect(result.client).toMatchObject({
+      id: 'codex',
+      name: 'Codex CLI',
+      description: 'keep this',
+      expiresAt: '2026-05-06T12:00:00.000Z',
+      permissions: [{ path: '/notes/**', actions: ['search', 'read'] }],
+    });
+    expect(result.client.auth.type).toBe('token');
+    if (result.client.auth.type === 'token') {
+      expect(result.client.auth.tokenHash).not.toBe(EXISTING_TOKEN_VERIFIER);
+      expect(verifyApiToken('new-plaintext-token', result.client.auth.tokenHash)).toBe(true);
+    }
   });
 
   it('rejects write permissions on read-only mounts', () => {
@@ -92,7 +177,7 @@ describe('API token config helpers', () => {
         {
           id: 'codex',
           name: 'Codex CLI',
-          auth: { type: 'token', tokenHash: 'a'.repeat(64) },
+          auth: { type: 'token', tokenHash: EXISTING_TOKEN_VERIFIER },
           permissions: [{ path: '/document/**', actions: ['search', 'read'] }],
         },
         {

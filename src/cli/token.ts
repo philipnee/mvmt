@@ -55,7 +55,7 @@ export function printTokenSummary(summary: TokenSummary): void {
   console.log('mvmt token\n');
   if (!summary.token) {
     console.log(chalk.yellow(`No token found at ${summary.path}`));
-    console.log(`Run ${chalk.cyan('mvmt token')} to create one, or ${chalk.cyan('mvmt token rotate')} to replace it.`);
+    console.log(`Run ${chalk.cyan('mvmt serve')} to create one, or ${chalk.cyan('mvmt token session-rotate')} to replace it.`);
     return;
   }
 
@@ -68,7 +68,7 @@ export function printTokenSummary(summary: TokenSummary): void {
     console.log(`  rotated: ${summary.rotatedAt.toLocaleString()}`);
   }
   console.log(`  path: ${summary.path}`);
-  console.log(`  rotate: ${chalk.cyan('mvmt token rotate')}`);
+  console.log(`  rotate: ${chalk.cyan('mvmt token session-rotate')}`);
 }
 
 function formatAge(ageMs: number): string {

@@ -51,25 +51,26 @@ Also check that the file type is text-like and smaller than the current text siz
 
 ## Token rejected by client
 
-The session bearer token is reused across normal `mvmt serve` restarts. It changes only when you rotate it.
-The token is stored at `~/.mvmt/.session-token` with file mode `600`.
-`mvmt serve` and `mvmt token` both create it if it is missing.
+Scoped API tokens are stored as scrypt verifiers, so mvmt cannot print their
+plaintext value again. If you lost a token, create a replacement with
+`mvmt token add` and update the client.
 
 ```bash
-mvmt token show
+mvmt token
 ```
 
-If the token works in curl but not an MCP client, restart the client after updating its environment variable or config.
+If the token works in curl but not an MCP client, restart the client after
+updating its stored token.
 
 ## Codex says login is required
 
 For local bearer-token setup, do not use `codex mcp login mvmt`.
 
-Codex usually says this when the token environment variable is missing or stale.
+Codex usually says this when its stored token is missing or stale.
 
 ```bash
-export MVMT_TOKEN="$(mvmt token show)"
-codex
+mvmt token add codex --read /notes --ttl 7d
+codex mcp add mvmt --url http://127.0.0.1:4141/mcp
 ```
 
 ## OAuth client gets `redirect_uri is not registered for this client`

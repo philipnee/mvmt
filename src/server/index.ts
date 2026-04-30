@@ -8,6 +8,8 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { ToolRouter } from './router.js';
 import { log } from '../utils/logger.js';
 import { defaultClientsPath, defaultSigningKeyPath, ensureSessionToken, ensureSigningKey, readSigningKey, TOKEN_PATH, validateSessionToken } from '../utils/token.js';
+import { verifyApiToken } from '../utils/api-token-hash.js';
+import { isExpired } from '../utils/token-ttl.js';
 import {
   CodeChallengeMethod,
   OAuthClientAlreadyRegisteredError,
@@ -145,7 +147,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   ensureSessionToken(tokenPath);
   const signingKeyPath = options.signingKeyPath ?? defaultSigningKeyPath(tokenPath ?? TOKEN_PATH);
   // Create the signing key file on first boot, then re-read it on every
-  // HMAC op. This way `mvmt token rotate` (which rewrites the file)
+  // HMAC op. This way internal session-token rotation (which rewrites the file)
   // invalidates outstanding OAuth access tokens immediately, without
   // requiring a server restart.
   ensureSigningKey(signingKeyPath);
@@ -446,10 +448,10 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     }
 
     const requestId = params.requestId ?? randomUUID();
-    const sessionTokenRaw = typeof req.body?.session_token === 'string' ? req.body.session_token : '';
-    if (!validateSessionToken(`Bearer ${sessionTokenRaw}`, tokenPath)) {
+    const approval = resolveAuthorizeApproval(req.body ?? {}, resolveClients(options.clients), tokenPath);
+    if (!approval.ok) {
       const denyDetail = formatAuthorizeLogDetail({
-        phase: 'deny_invalid_session_token',
+        phase: approval.phase,
         requestId,
         redirectUri: params.redirectUri,
         resource: params.resource,
@@ -460,12 +462,13 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       res
         .status(401)
         .type('text/html')
-        .send(renderAuthorizePage({ ...params, requestId, error: 'Invalid session token. Try again.' }));
+        .send(renderAuthorizePage({ ...params, requestId, error: approval.message }));
       return;
     }
 
     const authCode = oauth.issueCode({
       clientId: params.clientId,
+      mvmtClientId: approval.mvmtClientId,
       redirectUri: params.redirectUri,
       resource: params.resource,
       codeChallenge: params.codeChallenge,
@@ -483,6 +486,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       resource: params.resource,
       resourceDefaulted,
       state: params.state,
+      authorizedClientId: approval.mvmtClientId,
     });
     logHttpRequest(requestLog, req, 302, 'oauth.authorize', approveDetail, params.clientId);
     res.redirect(302, redirect.toString());
@@ -889,6 +893,55 @@ function firstHeaderValue(value: string | string[] | undefined): string | undefi
   return value;
 }
 
+type AuthorizeApproval =
+  | { ok: true; mvmtClientId?: string }
+  | { ok: false; phase: string; message: string };
+
+function resolveAuthorizeApproval(
+  body: Record<string, unknown>,
+  clients: readonly ClientConfig[],
+  tokenPath: string | undefined,
+): AuthorizeApproval {
+  const apiTokenRaw = stringField(body.api_token);
+  if (apiTokenRaw) {
+    const client = findApiTokenClient(apiTokenRaw, clients);
+    if (client) return { ok: true, mvmtClientId: client.id };
+    return {
+      ok: false,
+      phase: 'deny_invalid_api_token',
+      message: 'Invalid API token. Try again.',
+    };
+  }
+
+  const hasPolicy = clients.length > 0;
+  if (hasPolicy) {
+    return {
+      ok: false,
+      phase: 'deny_missing_api_token',
+      message: 'Enter a scoped API token. Create one with mvmt token add.',
+    };
+  }
+
+  const sessionTokenRaw = stringField(body.session_token);
+  if (sessionTokenRaw && validateSessionToken(`Bearer ${sessionTokenRaw}`, tokenPath)) {
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    phase: 'deny_invalid_session_token',
+    message: 'Invalid API token. Try again.',
+  };
+}
+
+function findApiTokenClient(token: string, clients: readonly ClientConfig[]): ClientConfig | undefined {
+  for (const client of clients) {
+    if (client.auth.type !== 'token') continue;
+    if (isExpired(client.expiresAt)) continue;
+    if (verifyApiToken(token, client.auth.tokenHash)) return client;
+  }
+  return undefined;
+}
+
 // Used in request logs for redirect/resource URIs. We log the host only
 // (not the full path) because full redirect URLs can include
 // client-supplied identifiers that belong in an audit trail but not in
@@ -908,8 +961,10 @@ function formatAuthorizeLogDetail(input: {
   resource?: string;
   resourceDefaulted?: boolean;
   state?: string;
+  authorizedClientId?: string;
 }): string {
-  return `${input.phase} rid=${input.requestId} redirect_host=${safeHost(input.redirectUri)} resource_host=${input.resource ? safeHost(input.resource) : '(none)'} resource_defaulted=${input.resourceDefaulted ? 'true' : 'false'} state_hash=${hashForLog(input.state)}`;
+  const authorizedClient = input.authorizedClientId ? ` authorized_client=${input.authorizedClientId}` : '';
+  return `${input.phase} rid=${input.requestId} redirect_host=${safeHost(input.redirectUri)} resource_host=${input.resource ? safeHost(input.resource) : '(none)'} resource_defaulted=${input.resourceDefaulted ? 'true' : 'false'} state_hash=${hashForLog(input.state)}${authorizedClient}`;
 }
 
 function hashForLog(value: string | undefined): string {

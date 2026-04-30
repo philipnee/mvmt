@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import { confirm } from '@inquirer/prompts';
 import { TextContextIndex, defaultTextIndexPath } from '../context/text-index.js';
 import { configExists, loadConfig, resolveConfigPath, saveConfig } from '../config/loader.js';
 import { MvmtConfig, TunnelSchema } from '../config/schema.js';
@@ -18,6 +19,7 @@ import { TunnelController } from './tunnel-controller.js';
 import { InteractiveAuditLogger, startInteractivePrompt, formatHttpRequestEntry } from './interactive.js';
 import { LEGACY_TUNNEL_OVERRIDE_ENV, legacyTunnelOverrideEnabled, tunnelLegacyAccessWarning } from './tunnel-safety.js';
 import { promptAndAddMount } from './mounts.js';
+import { printApiTokenSaved, promptAndAddApiToken } from './api-tokens.js';
 
 export interface StartOptions {
   port?: string;
@@ -267,7 +269,7 @@ async function ensureStartupMounts(
   if (!process.stdin.isTTY || !process.stdout.isTTY) return config;
 
   logger.warn('No mounts configured. Add a mount to continue startup.');
-  const nextConfig = await promptAndAddMount(config);
+  let nextConfig = await promptAndAddMount(config);
   if (!nextConfig || !hasEnabledMounts(nextConfig)) {
     logger.error('No mount added. Startup cannot continue without at least one enabled mount.');
     logger.error('Run `mvmt mounts add <name> <folder>` or `mvmt config setup` first.');
@@ -276,9 +278,32 @@ async function ensureStartupMounts(
 
   await saveConfig(configPath, nextConfig);
   logger.info(`Saved mount config to ${configPath}`);
+  nextConfig = await ensureStartupApiToken(nextConfig, configPath, logger);
   logger.info(formatPermissionMode(nextConfig));
-  logger.info(`The HTTP session token is stored at ${TOKEN_PATH} and is created automatically when the server starts.`);
+  logger.info(`The internal HTTP session token is stored at ${TOKEN_PATH} and is created automatically when the server starts.`);
   return nextConfig;
+}
+
+async function ensureStartupApiToken(
+  config: MvmtConfig,
+  configPath: string,
+  logger: Logger,
+): Promise<MvmtConfig> {
+  if ((config.clients ?? []).some((client) => client.auth.type === 'token')) return config;
+  const createToken = await confirm({
+    message: 'Create a scoped API token for clients now?',
+    default: true,
+  });
+  if (!createToken) {
+    logger.info('No API token created. Add one later with `mvmt token add`.');
+    return config;
+  }
+
+  const result = await promptAndAddApiToken(config);
+  if (!result) return config;
+  await saveConfig(configPath, result.config);
+  printApiTokenSaved(configPath, result);
+  return result.config;
 }
 
 function formatPermissionMode(config: MvmtConfig): string {
@@ -365,19 +390,19 @@ function printStartupBanner(
     console.log('');
   }
   if (interactiveMode) {
-    console.log(`${chalk.bold('Token')}        type ${chalk.cyan('token')} to print the bearer token`);
+    console.log(`${chalk.bold('Tokens')}       type ${chalk.cyan('token')} to list scoped API tokens`);
     console.log(`${chalk.bold('Tool-call log')} ${AUDIT_LOG_PATH}`);
     console.log(`${chalk.bold('Live events')}   OAuth, MCP auth, and tool-call attempts`);
     console.log(`\n${chalk.dim('Interactive mode: type "help" for commands.')}`);
   } else {
-    console.log(`${chalk.bold('Token')}        ${TOKEN_PATH}`);
+    console.log(`${chalk.bold('Session')}      ${TOKEN_PATH}`);
     console.log(`${chalk.bold('Tool-call log')} ${AUDIT_LOG_PATH}`);
-    console.log('\nRead token with:');
-    console.log(`  ${chalk.cyan('mvmt token')}\n`);
+    console.log('\nCreate scoped client access with:');
+    console.log(`  ${chalk.cyan('mvmt token add <id> --read /mount')}\n`);
     console.log('Connect a local HTTP client:');
     console.log(`  URL: ${chalk.cyan(`http://127.0.0.1:${port}/mcp`)}`);
     console.log('  Header: Authorization: Bearer <token>');
-    console.log(chalk.dim('  Use `mvmt tokens add` for scoped client access, or `mvmt token` only in legacy mode.'));
+    console.log(chalk.dim('  Use `mvmt token session` only for legacy local testing with no scoped tokens configured.'));
   }
 }
 

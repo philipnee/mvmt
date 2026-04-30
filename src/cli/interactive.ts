@@ -1,12 +1,11 @@
 import readline from 'node:readline';
+import { select } from '@inquirer/prompts';
 import chalk from 'chalk';
 import { MvmtConfig } from '../config/schema.js';
 import { AuditEntry, AuditLogger, AUDIT_LOG_PATH } from '../utils/audit.js';
 import { HttpRequestLogEntry } from '../server/index.js';
-import { generateSessionToken, rotateSigningKey, TOKEN_PATH, defaultSigningKeyPath } from '../utils/token.js';
 import { formatMcpPublicUrl } from '../utils/tunnel.js';
-import { printApiTokenSaved, printApiTokens, promptAndAddApiToken, promptAndRemoveApiToken } from './api-tokens.js';
-import { printTokenSummary, readTokenSummary } from './token.js';
+import { printApiTokenSaved, printApiTokens, promptAndAddApiToken, promptAndEditApiToken, promptAndRemoveApiToken, rotateApiTokenInConfig } from './api-tokens.js';
 import { printConfigSummary } from './config.js';
 import { printMounts, promptAndAddMount, promptAndEditMount, promptAndRemoveMount } from './mounts.js';
 import { applyTunnelConfig, printTunnelEnabledWithNoTokens, promptForTunnelConfig } from './tunnel.js';
@@ -166,13 +165,21 @@ async function handleInteractiveCommand(
       console.log(chalk.dim('Run `mvmt config setup` in another shell, then restart `mvmt serve` to apply the new config.'));
       return;
     case 'token':
-      printTokenSummary(readTokenSummary());
-      return;
+    case 'token list':
     case 'token show':
-      printCurrentTokenValue();
+      printApiTokens(state.config);
+      return;
+    case 'token add':
+      await handleTokensAdd(state);
+      return;
+    case 'token edit':
+      await handleTokensEdit(state);
       return;
     case 'token rotate':
-      printRotatedToken();
+      await handleTokensRotate(state);
+      return;
+    case 'token remove':
+      await handleTokensRemove(state);
       return;
     case 'tokens':
     case 'tokens list':
@@ -180,6 +187,12 @@ async function handleInteractiveCommand(
       return;
     case 'tokens add':
       await handleTokensAdd(state);
+      return;
+    case 'tokens edit':
+      await handleTokensEdit(state);
+      return;
+    case 'tokens rotate':
+      await handleTokensRotate(state);
       return;
     case 'tokens remove':
       await handleTokensRemove(state);
@@ -249,10 +262,10 @@ function printInteractiveHelp(): void {
   console.log(chalk.bold('Commands'));
   console.log('  config              show saved mvmt config');
   console.log('  config setup        rerun guided setup in another shell');
-  console.log('  token               show current bearer token and age');
-  console.log('  token rotate        generate and print a new bearer token');
-  console.log('  tokens              list scoped API tokens');
-  console.log('  tokens add/remove   manage scoped API tokens');
+  console.log('  token               list scoped API tokens');
+  console.log('  token add/edit      manage scoped API tokens');
+  console.log('  token rotate        rotate a scoped API token');
+  console.log('  token remove        remove a scoped API token');
   console.log('  tunnel              show tunnel status');
   console.log('  tunnel config       choose a different tunnel');
   console.log('  tunnel start        start the configured tunnel');
@@ -274,24 +287,6 @@ function printInteractiveHelp(): void {
 
 function printLiveLogState(state: InteractivePromptState): void {
   console.log(`live logs: ${state.audit.getLiveLogs() ? chalk.green('on') : chalk.dim('off')}`);
-}
-
-function printCurrentTokenValue(): void {
-  const summary = readTokenSummary();
-  if (!summary.token) {
-    console.log(chalk.red(`No session token found at ${TOKEN_PATH}`));
-    return;
-  }
-  console.log(summary.token);
-}
-
-function printRotatedToken(): void {
-  const token = generateSessionToken();
-  rotateSigningKey(defaultSigningKeyPath(TOKEN_PATH));
-  console.log(token);
-  console.log(
-    chalk.yellow('Token rotated. HTTP clients storing the old token must update it. OAuth access tokens were revoked immediately.'),
-  );
 }
 
 function printInteractiveStatus(state: InteractivePromptState): void {
@@ -346,7 +341,7 @@ async function handleTunnelStart(state: InteractivePromptState): Promise<void> {
     console.log(`public URL  ${chalk.yellow(formatMcpPublicUrl(tunnel.url))}`);
   }
   if ((state.config.clients?.length ?? 0) === 0 && state.config.server.access === 'tunnel') {
-    console.log(chalk.dim('No API tokens are configured. Run `tokens add` before expecting MCP data access over the tunnel.'));
+    console.log(chalk.dim('No API tokens are configured. Run `token add` before expecting MCP data access over the tunnel.'));
   }
 }
 
@@ -466,6 +461,22 @@ async function handleTokensAdd(state: InteractivePromptState): Promise<void> {
   printApiTokenSaved(state.configPath, result);
 }
 
+async function handleTokensEdit(state: InteractivePromptState): Promise<void> {
+  const result = await promptAndEditApiToken(state.config);
+  if (!result) return;
+  state.config.clients = result.config.clients;
+  await state.persistConfig();
+  printApiTokenSaved(state.configPath, result);
+}
+
+async function handleTokensRotate(state: InteractivePromptState): Promise<void> {
+  const tokenId = await promptForInteractiveTokenId(state.config, 'Rotate which API token?');
+  const result = rotateApiTokenInConfig(state.config, tokenId);
+  state.config.clients = result.config.clients;
+  await state.persistConfig();
+  printApiTokenSaved(state.configPath, result);
+}
+
 async function handleTokensRemove(state: InteractivePromptState): Promise<void> {
   const nextConfig = await promptAndRemoveApiToken(state.config);
   if (!nextConfig) {
@@ -475,6 +486,18 @@ async function handleTokensRemove(state: InteractivePromptState): Promise<void> 
   state.config.clients = nextConfig.clients;
   await state.persistConfig();
   console.log(chalk.green(`API token config saved to ${state.configPath}`));
+}
+
+async function promptForInteractiveTokenId(config: MvmtConfig, message: string): Promise<string> {
+  const tokens = (config.clients ?? []).filter((client) => client.auth.type === 'token');
+  if (tokens.length === 0) throw new Error('No API tokens configured.');
+  return select({
+    message,
+    choices: tokens.map((client) => ({
+      name: `${client.id} (${client.name})`,
+      value: client.id,
+    })),
+  });
 }
 
 function printPluginSummary(plugins: ToolResultPlugin[]): void {

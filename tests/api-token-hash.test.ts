@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import {
   hashApiToken,
   isApiTokenVerifier,
-  normalizeApiTokenVerifierForDuplicateCheck,
   verifyApiToken,
 } from '../src/utils/api-token-hash.js';
 
@@ -18,11 +17,18 @@ describe('API token verifiers', () => {
     expect(verifyApiToken('wrong-token', verifier)).toBe(false);
   });
 
-  it('accepts legacy SHA-256 verifiers for existing configs', () => {
-    expect(isApiTokenVerifier(LEGACY_SHA256_FOR_CASE_TOKEN)).toBe(true);
-    expect(verifyApiToken('case-token', LEGACY_SHA256_FOR_CASE_TOKEN)).toBe(true);
-    expect(verifyApiToken('wrong-token', LEGACY_SHA256_FOR_CASE_TOKEN)).toBe(false);
-    expect(normalizeApiTokenVerifierForDuplicateCheck(LEGACY_SHA256_FOR_CASE_TOKEN))
-      .toBe(LEGACY_SHA256_FOR_CASE_TOKEN.toLowerCase());
+  it('rejects SHA-256-looking verifiers', () => {
+    expect(isApiTokenVerifier(LEGACY_SHA256_FOR_CASE_TOKEN)).toBe(false);
+    expect(verifyApiToken('case-token', LEGACY_SHA256_FOR_CASE_TOKEN)).toBe(false);
+  });
+
+  it('rejects malformed scrypt verifiers', () => {
+    const shortSalt = 'scrypt:v1:AAAA:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const shortHash = 'scrypt:v1:AAAAAAAAAAAAAAAAAAAAAA:AAAA';
+
+    expect(isApiTokenVerifier(shortSalt)).toBe(false);
+    expect(isApiTokenVerifier(shortHash)).toBe(false);
+    expect(verifyApiToken('plain-token', shortSalt)).toBe(false);
+    expect(verifyApiToken('plain-token', shortHash)).toBe(false);
   });
 });

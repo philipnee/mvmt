@@ -39,7 +39,7 @@ An Obsidian vault is just a local folder mount. MemPalace is not part of the cur
 
 ## Token Handling
 
-HTTP auth uses a 256-bit session bearer token stored at:
+mvmt keeps an internal 256-bit session bearer token stored at:
 
 ```text
 ~/.mvmt/.session-token
@@ -47,12 +47,12 @@ HTTP auth uses a 256-bit session bearer token stored at:
 
 The token file is mode `600` on non-Windows systems.
 
-Commands:
+Hidden compatibility commands:
 
 ```bash
-mvmt token
-mvmt token show
-mvmt token rotate
+mvmt token session
+mvmt token session-raw
+mvmt token session-rotate
 ```
 
 The HTTP server validates against the token file on each request, so rotation is effective without restarting mvmt. Clients using the old token still need to be restarted or updated.
@@ -60,9 +60,11 @@ The HTTP server validates against the token file on each request, so rotation is
 Scoped bearer credentials use API tokens:
 
 ```bash
-mvmt tokens add
-mvmt tokens list
-mvmt tokens remove
+mvmt token add
+mvmt token list
+mvmt token edit
+mvmt token rotate
+mvmt token remove
 ```
 
 The plaintext API token is printed once. mvmt stores only a scrypt verifier in
@@ -75,7 +77,7 @@ When `clients[]` is absent, mvmt preserves legacy behavior: the session token ca
 When `clients[]` exists, `/mcp` resolves every request to a configured client:
 
 - token clients match a stored `tokenHash` verifier;
-- OAuth clients match configured OAuth `client_id` values;
+- OAuth access tokens inherit the API-token identity selected at approval time;
 - unknown OAuth clients are quarantined with zero permissions;
 - the session token no longer grants data-plane access.
 

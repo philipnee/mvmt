@@ -8,7 +8,7 @@ export function tunnelLegacyAccessWarning(config: MvmtConfig, env: NodeJS.Proces
   if (legacyTunnelOverrideEnabled(env)) return undefined;
   return [
     'No API tokens are configured. The tunnel can start, but MCP data access will reject the legacy session token.',
-    'Run `mvmt tokens add` to grant scoped access.',
+    'Run `mvmt token add` to grant scoped access.',
   ].join(' ');
 }
 

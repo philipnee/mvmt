@@ -176,7 +176,7 @@ mvmt serve -i
 | Text index | supported as a JSON prototype index |
 | MCP tools | `search`, `list`, `read`, `write`, `remove` |
 | Mount management CLI | supported |
-| API-token path permissions | supported via `mvmt tokens add` |
+| API-token path permissions | supported via `mvmt token add` |
 | Local Streamable HTTP | supported on `127.0.0.1` |
 | Stdio mode | supported |
 | OAuth/PKCE for web clients | supported, including Dynamic Client Registration |
@@ -196,8 +196,8 @@ through tunnel mode.
 | Client | Transport | Status | Auth method | Notes |
 | --- | --- | --- | --- | --- |
 | Claude Desktop | stdio | supported | process launch | Runs its own mvmt process from the client config |
-| Claude Code | Streamable HTTP | supported | bearer token | Use a scoped API token from `mvmt tokens add` |
-| Codex CLI | Streamable HTTP | supported | bearer token | Use a scoped API token from `mvmt tokens add` |
+| Claude Code | Streamable HTTP | supported | bearer token | Use a scoped API token from `mvmt token add` |
+| Codex CLI | Streamable HTTP | supported | bearer token | Use a scoped API token from `mvmt token add` |
 | Cursor | Streamable HTTP | expected | bearer token | Behavior depends on Cursor's MCP implementation |
 | VS Code / Copilot | Streamable HTTP | expected | bearer token | Behavior depends on the MCP extension |
 | claude.ai / ChatGPT web | public HTTPS tunnel | supported remote mode | OAuth/PKCE | Requires a reachable tunnel URL |
@@ -210,9 +210,9 @@ URL: http://127.0.0.1:4141/mcp
 Authorization: Bearer <token>
 ```
 
-In local legacy mode, `<token>` can be the session token from `mvmt token`.
-For scoped access, create an API token with `mvmt tokens add` and use that
-token instead.
+In local legacy mode, `<token>` can be the internal session token from
+`mvmt token session`. For normal scoped access, create an API token with
+`mvmt token add` and use that token instead.
 
 Remote web clients use the tunnel URL, usually ending in `/mcp`, and authorize
 through OAuth 2.1 + PKCE.
@@ -361,35 +361,28 @@ runtime connector in the current mount-only shape.
 ## API tokens and policy
 
 For local testing, mvmt keeps legacy behavior when no API tokens are configured:
-the session bearer token from `mvmt token` can access all configured mounts.
-The session token is stored at `~/.mvmt/.session-token` with file mode `600`.
-HTTP `mvmt serve` and `mvmt token` create it if it is missing.
+the internal session bearer token can access all configured mounts. The session
+token is stored at `~/.mvmt/.session-token` with file mode `600`. HTTP
+`mvmt serve` creates it if it is missing.
 
 For repeatable client access, create scoped API tokens:
 
 ```bash
-mvmt tokens add codex --read /notes
-mvmt tokens add codex --write /workspace
+mvmt token add codex --read /notes --ttl 7d
+mvmt token add codex --write /workspace --ttl 30d
 ```
 
-`mvmt tokens add` prints the plaintext token once. mvmt stores only a scrypt
-verifier in config.
-
-For Codex CLI, store that printed token in an environment variable and pass the
-variable name:
-
-```bash
-export MVMT_TOKEN="<paste mvmt_... token here>"
-codex mcp add mvmt --url http://127.0.0.1:4141/mcp --bearer-token-env-var MVMT_TOKEN
-```
-
-Do not pass the token itself to `--bearer-token-env-var`; Codex expects an
-environment variable name.
+`mvmt token add` prints the plaintext token once. mvmt stores only a scrypt
+verifier in config. Tokens expire after 30 days by default; use values like
+`--ttl 30m`, `--ttl 7d`, or `--ttl never` when creating or editing a token.
+If a client asks for an authorization token, paste the printed `mvmt_...`
+value. If a web client sends you through OAuth, paste the same token into the
+mvmt approval page.
 
 Once API tokens are present, `/mcp` becomes strict:
 
 - bearer tokens must match a configured client `tokenHash`;
-- OAuth access tokens must map to a configured OAuth client id;
+- OAuth access tokens inherit the API-token identity selected on the approval page;
 - the session token no longer grants data-plane access;
 - unknown OAuth clients are quarantined with zero permissions.
 
@@ -405,6 +398,8 @@ The underlying config field is currently named `clients[]`.
 clients:
   - id: codex
     name: Codex CLI
+    description: Local Codex token
+    expiresAt: "2026-05-06T12:00:00.000Z"
     auth:
       type: token
       # Verifier for the client API key.
@@ -451,11 +446,12 @@ must not match `protect`.
 | `mvmt config` | Show the saved config summary |
 | `mvmt config setup` | Rerun guided setup |
 | `mvmt doctor` | Validate config and startup prerequisites |
-| `mvmt token` | Show the current session bearer token, creating it if missing |
-| `mvmt token rotate` | Regenerate the session bearer token |
-| `mvmt tokens` | List scoped API tokens |
-| `mvmt tokens add [id]` | Create or update a scoped API token |
-| `mvmt tokens remove [id]` | Remove a scoped API token |
+| `mvmt token` | List scoped API tokens |
+| `mvmt token add [id]` | Create or update a scoped API token |
+| `mvmt token edit [id]` | Edit a scoped API token |
+| `mvmt token rotate [id]` | Replace a scoped API token secret |
+| `mvmt token remove [id]` | Remove a scoped API token |
+| `mvmt token session` | Hidden compatibility command for the internal session token |
 | `mvmt tunnel` | Show tunnel status |
 | `mvmt tunnel config` | Choose and save a tunnel command |
 | `mvmt tunnel start` | Start the configured tunnel |
@@ -476,9 +472,10 @@ Interactive mode accepts the same command groups:
 > config
 > config setup
 > token
+> token add
+> token edit
 > token rotate
-> tokens
-> tokens add
+> token remove
 > tunnel
 > tunnel refresh
 ```
@@ -541,7 +538,7 @@ Remote access checklist:
 2. Prefer read-only mounts.
 3. Start the tunnel when ready. Without API tokens, the public endpoint is
    reachable but cannot read data.
-4. Create scoped API tokens with `mvmt tokens add`.
+4. Create scoped API tokens with `mvmt token add`.
 5. Use `protect` for secrets and private folders.
 6. Watch `~/.mvmt/audit.log` when testing a new remote client.
 7. Use a stable tunnel URL for repeatable OAuth flows.

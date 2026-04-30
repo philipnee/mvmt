@@ -1,6 +1,7 @@
 import { MvmtConfig, TunnelConfig } from '../config/schema.js';
 import { Logger } from '../utils/logger.js';
 import { formatMcpPublicUrl, missingTunnelDependency, RunningTunnel, startTunnel } from '../utils/tunnel.js';
+import { withTerminalProgress } from './progress.js';
 import { printMissingTunnelDependencyWarning } from './tunnel.js';
 
 export interface TunnelSnapshot {
@@ -92,11 +93,14 @@ export class TunnelController {
       return undefined;
     }
 
+    const tunnelConfig = this.serverConfig.tunnel;
     this.logger.info(`Starting tunnel: ${this.command}`);
     try {
-      const tunnel = await startTunnel(this.serverConfig.tunnel.command, this.port, {
-        onOutput: (line) => this.addLog(line),
-      });
+      const tunnel = await withTerminalProgress('Waiting for tunnel URL', () =>
+        startTunnel(tunnelConfig.command, this.port, {
+          onOutput: (line) => this.addLog(line),
+        }),
+      );
       tunnel.url = tunnel.url || this.serverConfig.tunnel.url;
       this.current = tunnel;
       this.lastError = undefined;

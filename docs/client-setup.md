@@ -1,14 +1,14 @@
 # Client Setup
 
-All clients connect to the same mvmt endpoint. For local testing, start mvmt
-first, then get the legacy session token:
+All clients connect to the same mvmt endpoint. Start mvmt first, then create a
+scoped API token:
 
 ```bash
 mvmt serve
-mvmt token
+mvmt token add codex --read /notes --ttl 7d
 ```
 
-Or `token` in interactive mode.
+Or run `token add` in interactive mode.
 
 Most MCP clients let you add servers through their settings UI. You only need two pieces of information:
 
@@ -17,20 +17,16 @@ Most MCP clients let you add servers through their settings UI. You only need tw
 
 Stdio mode (Claude Desktop) is the exception — it launches mvmt directly and does not need a token.
 
-For repeatable access, create a scoped API token and use that value instead of
-the session token:
-
-```bash
-mvmt tokens add codex --read /notes
-```
-
 Once API tokens are configured, HTTP clients must use one of those tokens. The
 owner/session token remains the legacy data-plane credential only when no API
 tokens or OAuth client policy exists.
 
 ## Remote OAuth clients
 
-Web clients that connect through a public HTTPS tunnel use OAuth/PKCE instead of a bearer token. mvmt will only authorize a client if its exact callback URL is registered first.
+Web clients that connect through a public HTTPS tunnel use OAuth/PKCE instead
+of a bearer token. mvmt will only authorize a client if its exact callback URL
+is registered first. During approval, paste the scoped API token you want that
+client to use.
 
 That means the client must either:
 
@@ -50,9 +46,9 @@ curl -X POST https://your-public-mvmt-host/register \
   }'
 ```
 
-Use the same `client_id` and exact `redirect_uri` during `/authorize`. When API
-tokens or OAuth client policy is configured, map that OAuth `client_id` before
-expecting access to tools; unknown OAuth client IDs are rejected as quarantined.
+Use the same `client_id` and exact `redirect_uri` during `/authorize`. The
+OAuth access token inherits the scoped API token selected on the approval page,
+so changing that token's permissions changes future access checks.
 
 ## Claude Desktop
 
@@ -77,9 +73,9 @@ Claude Desktop uses stdio mode, so it launches mvmt as a child process. No token
 
 ```bash
 mvmt serve
-mvmt tokens add claude-code --read /notes
+mvmt token add claude-code --read /notes --ttl 7d
 
-# Use the token printed by `mvmt tokens add`.
+# Use the token printed by `mvmt token add`.
 MVMT_TOKEN="<paste mvmt_... token here>"
 claude mcp add --transport http \
   --header "Authorization: Bearer $MVMT_TOKEN" \
@@ -90,28 +86,15 @@ If you replace the API token, update the client header afterward.
 
 ## Codex CLI
 
-Codex stores a bearer-token environment variable name, not the token value itself:
+Create a scoped token and add the server:
 
 ```bash
 mvmt serve
-mvmt tokens add codex --read /notes
-
-# Use the token printed by `mvmt tokens add`.
-export MVMT_TOKEN="<paste mvmt_... token here>"
-codex mcp add mvmt \
-  --url http://127.0.0.1:4141/mcp \
-  --bearer-token-env-var MVMT_TOKEN
+mvmt token add codex --read /notes --ttl 7d
+codex mcp add mvmt --url http://127.0.0.1:4141/mcp
 ```
 
-Do not pass the token itself to `--bearer-token-env-var`. That flag expects the
-name of an environment variable.
-
-Start new Codex sessions from a shell where `MVMT_TOKEN` is set:
-
-```bash
-export MVMT_TOKEN="<paste mvmt_... token here>"
-codex
-```
+When prompted, paste the token printed by `mvmt token add`.
 
 ## Cursor
 
@@ -125,7 +108,7 @@ codex
     "mvmt": {
       "url": "http://127.0.0.1:4141/mcp",
       "headers": {
-        "Authorization": "Bearer <paste token from mvmt tokens add>"
+        "Authorization": "Bearer <paste token from mvmt token add>"
       }
     }
   }
@@ -144,7 +127,7 @@ codex
     "mvmt": {
       "url": "http://127.0.0.1:4141/mcp",
       "headers": {
-        "Authorization": "Bearer <paste token from mvmt tokens add>"
+        "Authorization": "Bearer <paste token from mvmt token add>"
       }
     }
   }
@@ -156,7 +139,7 @@ codex
 Direct `curl` is useful for debugging, but MCP Streamable HTTP is session-based. Initialize first, capture the `mcp-session-id` response header, then make later requests with that session ID.
 
 ```bash
-TOKEN="$(mvmt token show)"
+TOKEN="<paste mvmt_... token from mvmt token add>"
 
 curl -i http://127.0.0.1:4141/mcp \
   -H "Authorization: Bearer $TOKEN" \

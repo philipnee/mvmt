@@ -140,17 +140,17 @@ An Obsidian vault is just a local folder mount. There is no special Obsidian run
 
 ## `clients`
 
-`clients[]` is optional and is managed for token clients by `mvmt tokens add`.
+`clients[]` is optional and is managed for token clients by `mvmt token add`.
 The field name is internal config terminology; the CLI calls these API tokens.
 
 If absent, mvmt keeps legacy local behavior: the session bearer token from
-`mvmt token` can access all configured mounts. In tunnel mode, the legacy
+the hidden `mvmt token session` command can access all configured mounts. In tunnel mode, the legacy
 session token is rejected unless `MVMT_ALLOW_LEGACY_TUNNEL=1` is set.
 
 If present, `/mcp` becomes strict:
 
 - bearer tokens must match a configured client `tokenHash`;
-- OAuth access tokens must map to a configured OAuth client id;
+- OAuth access tokens inherit the API-token identity selected at approval time;
 - the session token no longer grants data-plane access;
 - unknown OAuth clients are quarantined with zero permissions.
 
@@ -158,6 +158,8 @@ If present, `/mcp` becomes strict:
 | --- | --- |
 | `id` | Stable client id used in audit entries. Lowercase letters, numbers, `_`, and `-`. |
 | `name` | Human-readable client name. |
+| `description` | Optional note shown by `mvmt token`. |
+| `expiresAt` | Optional ISO timestamp. Omitted means the token does not expire. |
 | `auth.type` | `token` or `oauth`. |
 | `auth.tokenHash` | Verifier for the client bearer token. New tokens use scrypt. Plaintext tokens are not stored. |
 | `auth.oauthClientIds` | OAuth `client_id` values mapped to this client. |

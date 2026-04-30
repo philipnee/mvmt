@@ -86,33 +86,28 @@ When adding a mount:
 - **Virtual path clients will use** is the mvmt path, such as `/notes` or
   `/workspace`.
 
-## Token
+## API Tokens
 
-Show the current session bearer token. If the token file does not exist yet,
-this command creates it.
+List scoped API tokens:
 
 ```bash
 mvmt token
 ```
 
-Print only the raw token:
+Create a token:
 
 ```bash
-mvmt token show
+mvmt token add codex --read /notes --ttl 7d
 ```
 
-Rotate it:
+The plaintext token is printed once. mvmt stores only a scrypt verifier.
+
+The internal legacy session token is still stored at
+`~/.mvmt/.session-token` with file mode `600`. HTTP `mvmt serve` creates it
+automatically during startup. Use `mvmt token session` only for legacy local
+testing when no scoped API tokens are configured.
 
 ```bash
-mvmt token rotate
-```
-
-If a client uses the old token, restart or update that client after rotation.
-
-The session token is stored as a plaintext bearer token at
-`~/.mvmt/.session-token` with file mode `600`. HTTP `mvmt serve` also creates it
-automatically during startup.
-
 ## Rebuild the Index
 
 Search uses the text index. mvmt rebuilds it in the background on startup.
@@ -127,29 +122,19 @@ Use this after adding a mount or changing files outside mvmt.
 
 ## Connect Codex CLI
 
-Codex stores the name of an environment variable, not the token value.
+Create a scoped token first:
 
 ```bash
-mvmt tokens add codex --read /notes
-
-# Use the token printed by `mvmt tokens add`.
-export MVMT_TOKEN="<paste mvmt_... token here>"
-codex mcp add mvmt \
-  --url http://127.0.0.1:4141/mcp \
-  --bearer-token-env-var MVMT_TOKEN
+mvmt token add codex --read /notes --ttl 7d
 ```
 
-Do not pass the token itself to `--bearer-token-env-var`. That flag expects the
-name of an environment variable.
-
-Before starting Codex later:
+Use the printed `mvmt_...` token when Codex asks for authentication.
 
 ```bash
-export MVMT_TOKEN="<paste mvmt_... token here>"
-codex
+codex mcp add mvmt --url http://127.0.0.1:4141/mcp
 ```
 
-Do not run `codex mcp login mvmt` for the local bearer-token setup. If Codex asks for login, the usual cause is a missing or stale `MVMT_TOKEN`.
+When prompted, paste the `mvmt_...` token printed by `mvmt token add`.
 
 ## Connect Other Clients
 
@@ -180,7 +165,7 @@ See [Client Setup](client-setup.md) for more examples.
 Check server health:
 
 ```bash
-TOKEN="$(mvmt token show)"
+TOKEN="<paste mvmt_... token from mvmt token add>"
 curl -i http://127.0.0.1:4141/health \
   -H "Authorization: Bearer $TOKEN"
 ```
@@ -229,7 +214,7 @@ Run:
 ```bash
 mvmt doctor
 mvmt mounts list
-mvmt tokens
+mvmt token
 ```
 
 Then restart the MCP client.
