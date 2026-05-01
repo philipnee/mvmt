@@ -23,6 +23,29 @@ The current npm package named `mvmt` is not this CLI release yet. If
 `npm install -g mvmt` leaves you with `zsh: command not found: mvmt`, use the
 source install above.
 
+## First 10 Minutes
+
+Use this path for a local smoke test:
+
+```bash
+mvmt mounts add documents ~/Documents --mount-path /documents --read-only
+mvmt token add codex --read /documents --ttl 7d
+mvmt reindex
+mvmt serve -i
+codex mcp add mvmt --url http://127.0.0.1:4141/mcp
+```
+
+When the client asks for authentication, paste the `mvmt_...` API token printed
+by `mvmt token add`.
+
+Then ask the client to:
+
+```text
+Search /documents for a project note and read the most relevant result.
+```
+
+The happy path is mount -> token -> index -> serve -> connect -> test.
+
 ## Configure Mounts
 
 Run guided setup:
@@ -108,6 +131,11 @@ automatically during startup. Use `mvmt token session` only for legacy local
 testing when no scoped API tokens are configured.
 
 ```bash
+mvmt token rotate codex --ttl 30d
+```
+
+Running mvmt processes load API-token changes on the next auth request.
+
 ## Rebuild the Index
 
 Search uses the text index. mvmt rebuilds it in the background on startup.

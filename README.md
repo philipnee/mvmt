@@ -539,9 +539,10 @@ Remote access checklist:
 3. Start the tunnel when ready. Without API tokens, the public endpoint is
    reachable but cannot read data.
 4. Create scoped API tokens with `mvmt token add`.
-5. Use `protect` for secrets and private folders.
-6. Watch `~/.mvmt/audit.log` when testing a new remote client.
-7. Use a stable tunnel URL for repeatable OAuth flows.
+5. Use `exclude` for secrets that must not be read.
+6. Use `protect` for files that must not be written or removed.
+7. Watch `~/.mvmt/audit.log` when testing a new remote client.
+8. Use a stable tunnel URL for repeatable OAuth flows.
 
 Quick tunnels are convenient but temporary.
 
@@ -556,7 +557,7 @@ Quick tunnels are convenient but temporary.
 - Search is prototype keyword scoring, not semantic embedding search.
 - PDFs, images, archives, and other binary files are skipped.
 - There is no file watcher yet.
-- API-token rotation and an admin UI are not shipped.
+- API-token rotation is shipped. An admin UI is not shipped.
 - mvmt does not sync, replicate, or resolve conflicts across machines.
 
 ## Coming next
@@ -583,6 +584,7 @@ Later:
 - [Text index prototype](docs/text-index-prototype.md)
 - [Remote access](docs/remote-access.md)
 - [Audit log](docs/audit-log.md)
+- [Threat model](docs/threat-model.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Architecture](docs/architecture.md)
 - [Security policy](SECURITY.md)
