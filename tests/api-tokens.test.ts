@@ -152,6 +152,59 @@ describe('API token config helpers', () => {
     }
   });
 
+  it('refreshes the default ttl when rotating an expired token', () => {
+    const config = parseConfig({
+      version: 1,
+      mounts: [
+        { name: 'notes', type: 'local_folder', path: '/notes', root: '/tmp/notes' },
+      ],
+      clients: [
+        {
+          id: 'codex',
+          name: 'Codex CLI',
+          expiresAt: '2026-04-30T06:24:31.469Z',
+          auth: { type: 'token', tokenHash: EXISTING_TOKEN_VERIFIER },
+          permissions: [{ path: '/notes/**', actions: ['search', 'read'] }],
+        },
+      ],
+    });
+
+    const result = rotateApiTokenInConfig(config, 'codex', 'new-plaintext-token', {
+      now: Date.parse('2026-04-30T16:00:00.000Z'),
+    });
+
+    expect(result.client.expiresAt).toBe('2026-05-30T16:00:00.000Z');
+    expect(result.client.auth.type).toBe('token');
+    if (result.client.auth.type === 'token') {
+      expect(verifyApiToken('new-plaintext-token', result.client.auth.tokenHash)).toBe(true);
+    }
+  });
+
+  it('allows rotate callers to choose a replacement ttl', () => {
+    const config = parseConfig({
+      version: 1,
+      mounts: [
+        { name: 'notes', type: 'local_folder', path: '/notes', root: '/tmp/notes' },
+      ],
+      clients: [
+        {
+          id: 'codex',
+          name: 'Codex CLI',
+          expiresAt: '2026-05-06T12:00:00.000Z',
+          auth: { type: 'token', tokenHash: EXISTING_TOKEN_VERIFIER },
+          permissions: [{ path: '/notes/**', actions: ['search', 'read'] }],
+        },
+      ],
+    });
+
+    const result = rotateApiTokenInConfig(config, 'codex', 'new-plaintext-token', {
+      ttl: '7d',
+      now: Date.parse('2026-04-30T16:00:00.000Z'),
+    });
+
+    expect(result.client.expiresAt).toBe('2026-05-07T16:00:00.000Z');
+  });
+
   it('rejects write permissions on read-only mounts', () => {
     const config = parseConfig({
       version: 1,

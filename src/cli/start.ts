@@ -137,7 +137,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
       port,
       allowedOrigins: config.server.allowedOrigins,
       resolvePublicBaseUrl: () => tunnelController.publicUrl,
-      clients: () => config.clients,
+      clients: createLiveClientsResolver(configPath, config),
       allowLegacyDefaultClient: () => config.server.access !== 'tunnel' || legacyTunnelOverrideEnabled(),
       requestLog: interactiveMode
         ? (entry) => (audit as InteractiveAuditLogger).recordHttp(entry)
@@ -258,6 +258,14 @@ export async function start(options: StartOptions = {}): Promise<void> {
 
 export function hasEnabledMounts(config: Pick<MvmtConfig, 'mounts'>): boolean {
   return config.mounts.some((mount) => mount.enabled !== false);
+}
+
+export function createLiveClientsResolver(configPath: string, config: MvmtConfig): () => MvmtConfig['clients'] {
+  return () => {
+    const latest = loadConfig(configPath);
+    config.clients = latest.clients;
+    return config.clients;
+  };
 }
 
 async function ensureStartupMounts(
