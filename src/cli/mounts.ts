@@ -1,6 +1,6 @@
 import { confirm, input, select } from '@inquirer/prompts';
 import chalk from 'chalk';
-import { getConfigPath, loadConfig, saveConfig } from '../config/loader.js';
+import { configExists, getConfigPath, loadConfig, parseConfig, saveConfig } from '../config/loader.js';
 import {
   DEFAULT_MOUNT_EXCLUDE_PATTERNS,
   DEFAULT_MOUNT_PROTECT_PATTERNS,
@@ -65,7 +65,7 @@ export async function listMounts(options: MountCommandOptions = {}): Promise<voi
 export async function addMount(name: string | undefined, root: string | undefined, options: AddMountOptions = {}): Promise<void> {
   assertWriteFlags(options);
   const configPath = resolveMountsConfigPath(options.config);
-  const config = loadConfig(configPath);
+  const config = configExists(configPath) ? loadConfig(configPath) : parseConfig({ version: 1 });
   const inputValue = name && root
     ? mountInputFromOptions(name, root, options)
     : await promptForMountInput(config);

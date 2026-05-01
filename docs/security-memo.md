@@ -4,6 +4,9 @@
 
 mvmt exposes selected local files to AI clients. Its security model is part of the product.
 
+For the current threat model, see [Threat Model](threat-model.md). This memo is
+an implementation-oriented companion.
+
 ## Boundary
 
 mvmt is local-first.
@@ -110,7 +113,6 @@ Mount access has two layers of path filtering: per-mount `exclude`/`protect` pat
 ## Known Limits
 
 - Localhost traffic is plaintext. The OS user remains the main trust boundary.
-- API-token rotation is not managed yet.
 - There is no admin UI yet.
 - Search is prototype keyword scoring over text files, not embeddings.
 - Binary/PDF/image indexing is not shipped.
@@ -125,7 +127,6 @@ It is not the primary security boundary. If a client must not see data, do not m
 
 ## Near-Term Security Priorities
 
-- API-token rotation and revocation UX.
 - Admin UI for mounts, client policy, and audit visibility.
 - SQLite-backed index and incremental updates.
 - Remote mvmt mounts with clear two-sided permission checks.
