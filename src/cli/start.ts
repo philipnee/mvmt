@@ -267,7 +267,7 @@ export function createLiveClientsResolver(configPath: string, config: MvmtConfig
       const latest = readConfig(configPath);
       config.clients = latest.clients;
     } catch {
-      return config.clients;
+      // Keep the last known-good policy until the next successful reload.
     }
     return config.clients;
   };

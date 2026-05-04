@@ -377,6 +377,63 @@ describe('OAuthStore', () => {
     }
   });
 
+  it('keeps the old refresh token active when rotation persistence fails', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-oauth-refresh-'));
+    const refreshTokensPath = path.join(tmp, 'refresh-tokens.json');
+    try {
+      const store = new OAuthStore({ signingKey: 'test-secret', refreshTokensPath });
+      const refreshToken = store.issueRefreshToken({
+        clientId: 'chatgpt',
+        scope: 'mcp offline_access',
+        audience: 'https://mcp.example.com/mcp',
+      });
+      fs.rmSync(refreshTokensPath);
+      fs.mkdirSync(refreshTokensPath);
+
+      expect(() =>
+        store.exchangeRefreshToken({
+          refreshToken: refreshToken.token,
+          clientId: 'chatgpt',
+        }),
+      ).toThrow();
+
+      fs.rmSync(refreshTokensPath, { recursive: true, force: true });
+      const replacement = store.exchangeRefreshToken({
+        refreshToken: refreshToken.token,
+        clientId: 'chatgpt',
+      });
+      expect(replacement.refreshToken.token).not.toBe(refreshToken.token);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('does not throw from cleanup when refresh-token persistence fails', () => {
+    let now = 1_000_000;
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-oauth-refresh-'));
+    const refreshTokensPath = path.join(tmp, 'refresh-tokens.json');
+    try {
+      const store = new OAuthStore({
+        signingKey: 'test-secret',
+        refreshTokenTtlMs: 1000,
+        refreshTokensPath,
+        now: () => now,
+      });
+      store.issueRefreshToken({
+        clientId: 'chatgpt',
+        scope: 'mcp offline_access',
+        audience: 'https://mcp.example.com/mcp',
+      });
+      now += 2000;
+      fs.rmSync(refreshTokensPath);
+      fs.mkdirSync(refreshTokensPath);
+
+      expect(() => store.cleanup()).not.toThrow();
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('rejects refresh token scope widening', () => {
     const store = new OAuthStore({ signingKey: 'test-secret' });
     const refreshToken = store.issueRefreshToken({

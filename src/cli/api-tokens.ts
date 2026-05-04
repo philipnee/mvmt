@@ -37,7 +37,6 @@ export interface AddApiTokenOptions extends ApiTokensCommandOptions {
 }
 
 export interface EditApiTokenOptions extends AddApiTokenOptions {
-  noPermissions?: boolean;
   permissions?: boolean;
 }
 
@@ -381,10 +380,7 @@ function apiTokenInputFromOptions(
 ): ApiTokenInput {
   if (!id) throw new Error('Token name is required when using non-interactive token options.');
   const permissions = parsePermissionInputsFromOptions(config, options);
-  const noPermissions = (
-    ('noPermissions' in options && Boolean(options.noPermissions))
-    || ('permissions' in options && options.permissions === false)
-  );
+  const noPermissions = 'permissions' in options && options.permissions === false;
   if (noPermissions && permissions.length > 0) {
     throw new Error('Use either --no-permissions or --scope/--read/--write, not both.');
   }
@@ -759,7 +755,7 @@ function hasAddOptions(options: AddApiTokenOptions): boolean {
 }
 
 function hasEditOptions(options: EditApiTokenOptions): boolean {
-  return hasAddOptions(options) || options.noPermissions === true || options.permissions === false;
+  return hasAddOptions(options) || options.permissions === false;
 }
 
 function resolveExpiresAt(inputValue: ApiTokenInput): string | undefined {

@@ -396,7 +396,7 @@ export class OAuthStore {
     if (refreshToken.clientId !== input.clientId) {
       throw new OAuthError('invalid_grant', 'Client mismatch for refresh token');
     }
-    this.consumeRefreshToken(refreshToken);
+    this.validateActiveRefreshToken(refreshToken);
 
     return this.issueTokenGrant({
       clientId: refreshToken.clientId,
@@ -451,13 +451,23 @@ export class OAuthStore {
       aud: input.audience,
       expiresAt,
     });
+    const previousActive = this.activeRefreshTokens.get(familyId);
     this.activeRefreshTokens.set(familyId, {
       familyId,
       tokenId: id,
       clientId: input.clientId,
       expiresAt,
     });
-    this.persistRefreshTokens();
+    try {
+      this.persistRefreshTokens();
+    } catch (err) {
+      if (previousActive) {
+        this.activeRefreshTokens.set(familyId, previousActive);
+      } else {
+        this.activeRefreshTokens.delete(familyId);
+      }
+      throw err;
+    }
 
     return {
       token,
@@ -513,7 +523,13 @@ export class OAuthStore {
         refreshStateChanged = true;
       }
     }
-    if (refreshStateChanged) this.persistRefreshTokens();
+    if (refreshStateChanged) {
+      try {
+        this.persistRefreshTokens();
+      } catch {
+        // Expired entries were already removed in memory; future writes retry persistence.
+      }
+    }
   }
 
   private parseAccessToken(token: string): AccessToken | undefined {
@@ -547,7 +563,7 @@ export class OAuthStore {
     };
   }
 
-  private consumeRefreshToken(refreshToken: RefreshToken): void {
+  private validateActiveRefreshToken(refreshToken: RefreshToken): void {
     const active = this.activeRefreshTokens.get(refreshToken.familyId);
     if (this.revokedRefreshTokenFamilies.has(refreshToken.familyId)) {
       throw new OAuthError('invalid_grant', 'Refresh token family was revoked');
