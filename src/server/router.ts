@@ -162,6 +162,13 @@ export class ToolRouter {
     const { argKeys, argPreview } = summarizeArgs(args);
     this.audit.record({
       ts: new Date().toISOString(),
+      ...(identity && (identity.source === 'token' || identity.source === 'oauth')
+        ? {
+            event: 'token.use' as const,
+            name: identity.id,
+            result: threw || Boolean(result?.isError) ? 'error' as const : 'success' as const,
+          }
+        : {}),
       connectorId: 'mvmt',
       tool: name,
       ...(identity ? { clientId: identity.id } : {}),

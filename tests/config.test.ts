@@ -333,6 +333,10 @@ describe('client policy schema', () => {
         {
           id: 'codex',
           name: 'Codex CLI',
+          createdAt: '2026-04-29T12:00:00.000Z',
+          lastUsedAt: '2026-04-29T12:30:00.000Z',
+          credentialVersion: 3,
+          clientBinding: 'codex',
           auth: { type: 'token', tokenHash: SCRYPT_TOKEN_VERIFIER },
           rawToolsEnabled: true,
           permissions: [
@@ -347,6 +351,10 @@ describe('client policy schema', () => {
     expect(config.clients?.[0]).toMatchObject({
       id: 'codex',
       name: 'Codex CLI',
+      createdAt: '2026-04-29T12:00:00.000Z',
+      lastUsedAt: '2026-04-29T12:30:00.000Z',
+      credentialVersion: 3,
+      clientBinding: 'codex',
       auth: { type: 'token', tokenHash: SCRYPT_TOKEN_VERIFIER },
       rawToolsEnabled: true,
     });

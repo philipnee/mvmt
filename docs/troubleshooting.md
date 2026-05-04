@@ -69,7 +69,7 @@ For local bearer-token setup, do not use `codex mcp login mvmt`.
 Codex usually says this when its stored token is missing or stale.
 
 ```bash
-mvmt token add codex --read /notes --ttl 7d
+mvmt token add codex --scope notes:read --expires 7d
 codex mcp add mvmt --url http://127.0.0.1:4141/mcp
 ```
 

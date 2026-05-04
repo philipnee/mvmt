@@ -63,6 +63,9 @@ export interface ResolveClientIdentityInput {
   // endpoint can be reachable without giving the legacy session token
   // all-mount data access.
   allowLegacyDefault?: boolean;
+  // Optional best-effort client identity signal used by token clientBinding.
+  // HTTP callers pass OAuth client_id and User-Agent values here.
+  clientHint?: string;
 }
 
 // resolveClientIdentity returns the ClientIdentity for an authenticated
@@ -90,12 +93,18 @@ export function resolveClientIdentity(input: ResolveClientIdentityInput): Client
       const selected = input.clients.find(
         (c) => c.id === input.oauthAccessToken?.mvmtClientId && c.auth.type === 'token',
       );
-      return selected && !clientExpired(selected)
+      return selected
+        && !clientExpired(selected)
+        && clientCredentialVersion(selected) === accessTokenCredentialVersion(input.oauthAccessToken)
+        && clientBindingMatches(selected.clientBinding, input.clientHint ?? oauthClientId)
         ? identityFromConfig(selected, 'oauth', oauthClientId)
         : undefined;
     }
     const named = input.clients.find(
-      (c) => c.auth.type === 'oauth' && c.auth.oauthClientIds.includes(oauthClientId) && !clientExpired(c),
+      (c) => c.auth.type === 'oauth'
+        && c.auth.oauthClientIds.includes(oauthClientId)
+        && !clientExpired(c)
+        && clientBindingMatches(c.clientBinding, input.clientHint ?? oauthClientId),
     );
     if (named) return identityFromConfig(named, 'oauth', oauthClientId);
     if (!policyConfigured && allowLegacyDefault) return synthesizeDefaultClient();
@@ -110,6 +119,7 @@ export function resolveClientIdentity(input: ResolveClientIdentityInput): Client
     for (const client of input.clients) {
       if (client.auth.type !== 'token') continue;
       if (clientExpired(client)) continue;
+      if (!clientBindingMatches(client.clientBinding, input.clientHint)) continue;
       if (verifyApiToken(bearer, client.auth.tokenHash)) {
         return identityFromConfig(client, 'token');
       }
@@ -132,6 +142,22 @@ export function resolveClientIdentity(input: ResolveClientIdentityInput): Client
 
 function clientExpired(client: ClientConfig): boolean {
   return isExpired(client.expiresAt);
+}
+
+export function clientCredentialVersion(client: Pick<ClientConfig, 'credentialVersion'>): number {
+  return client.credentialVersion ?? 1;
+}
+
+function accessTokenCredentialVersion(token: AccessToken): number {
+  return token.mvmtClientCredentialVersion ?? 1;
+}
+
+export function clientBindingMatches(binding: string | undefined, hint: string | undefined): boolean {
+  if (!binding) return true;
+  if (!hint) return false;
+  const normalizedBinding = normalizeClientBindingSignal(binding);
+  const normalizedHint = normalizeClientBindingSignal(hint);
+  return normalizedBinding.length > 0 && normalizedHint.includes(normalizedBinding);
 }
 
 export function isQuarantined(identity: ClientIdentity): boolean {
@@ -160,6 +186,10 @@ function identityFromConfig(
     permissions: client.permissions,
     ...(oauthClientId ? { oauthClientId } : {}),
   };
+}
+
+function normalizeClientBindingSignal(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
 
 function extractBearer(authHeader: string): string | undefined {

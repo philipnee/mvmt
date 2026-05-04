@@ -5,7 +5,7 @@ scoped API token:
 
 ```bash
 mvmt serve
-mvmt token add codex --read /notes --ttl 7d
+mvmt token add codex --scope notes:read --expires 7d
 ```
 
 Or run `token add` in interactive mode.
@@ -73,10 +73,10 @@ Claude Desktop uses stdio mode, so it launches mvmt as a child process. No token
 
 ```bash
 mvmt serve
-mvmt token add claude-code --read /notes --ttl 7d
+mvmt token add claude-code --scope notes:read --client claude-code --expires 7d
 
 # Use the token printed by `mvmt token add`.
-MVMT_TOKEN="<paste mvmt_... token here>"
+MVMT_TOKEN="<paste mvmt_t_... token here>"
 claude mcp add --transport http \
   --header "Authorization: Bearer $MVMT_TOKEN" \
   mvmt http://127.0.0.1:4141/mcp
@@ -90,7 +90,7 @@ Create a scoped token and add the server:
 
 ```bash
 mvmt serve
-mvmt token add codex --read /notes --ttl 7d
+mvmt token add codex --scope notes:read --expires 7d
 codex mcp add mvmt --url http://127.0.0.1:4141/mcp
 ```
 
@@ -139,7 +139,7 @@ When prompted, paste the token printed by `mvmt token add`.
 Direct `curl` is useful for debugging, but MCP Streamable HTTP is session-based. Initialize first, capture the `mcp-session-id` response header, then make later requests with that session ID.
 
 ```bash
-TOKEN="<paste mvmt_... token from mvmt token add>"
+TOKEN="<paste mvmt_t_... token from mvmt token add>"
 
 curl -i http://127.0.0.1:4141/mcp \
   -H "Authorization: Bearer $TOKEN" \

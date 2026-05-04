@@ -402,6 +402,37 @@ describe('OAuthStore', () => {
     expect(validated?.clientId).toBe('codex');
   });
 
+  it('preserves selected mvmt token credential version across OAuth grants', () => {
+    const store = new OAuthStore({ signingKey: 'shared-secret' });
+    const { verifier, challenge } = pkcePair();
+    const code = store.issueCode({
+      clientId: 'claude',
+      mvmtClientId: 'codex',
+      mvmtClientCredentialVersion: 3,
+      redirectUri: 'https://claude.ai/cb',
+      resource: 'https://mvmt.example.com/mcp',
+      codeChallenge: challenge,
+      codeChallengeMethod: 'S256',
+    });
+
+    const grant = store.exchangeCode({
+      code: code.code,
+      clientId: 'claude',
+      redirectUri: 'https://claude.ai/cb',
+      resource: 'https://mvmt.example.com/mcp',
+      codeVerifier: verifier,
+    });
+    const validated = store.validateAccessToken(`Bearer ${grant.accessToken.token}`);
+    const refreshed = store.exchangeRefreshToken({
+      refreshToken: grant.refreshToken.token,
+      clientId: 'claude',
+    });
+
+    expect(validated?.mvmtClientId).toBe('codex');
+    expect(validated?.mvmtClientCredentialVersion).toBe(3);
+    expect(refreshed.accessToken.mvmtClientCredentialVersion).toBe(3);
+  });
+
   it('rejects access tokens whose audience does not match the expected resource', () => {
     const store = new OAuthStore({ signingKey: 'shared-secret' });
     const token = store.issueAccessToken({

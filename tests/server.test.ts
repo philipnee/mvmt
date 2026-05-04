@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { Request } from 'express';
+import type { ClientConfig } from '../src/config/schema.js';
 import {
   buildOriginCheck,
   isBenignDuplicateSseConflict,
@@ -1388,6 +1389,111 @@ describe('startHttpServer lifecycle', () => {
     }
   });
 
+  it('invalidates existing OAuth grants when the selected API token is rotated', async () => {
+    const router = new ToolRouter();
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const signingKeyPath = path.join(tmp, '.mvmt', '.signing-key');
+    let clients: ClientConfig[] = [
+      {
+        id: 'codex',
+        name: 'Codex CLI',
+        credentialVersion: 1,
+        auth: { type: 'token', tokenHash: hashApiToken('codex-api-token') },
+        rawToolsEnabled: false,
+        permissions: [{ path: '/workspace/**', actions: ['search', 'read'] }],
+      },
+    ];
+    const server = await startHttpServer(router, {
+      port: 0,
+      tokenPath,
+      signingKeyPath,
+      clients: () => clients,
+    });
+
+    try {
+      const redirectUri = 'https://codex.example/callback';
+      const registration = await fetch(`http://127.0.0.1:${server.port}/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ redirect_uris: [redirectUri] }),
+      });
+      expect(registration.status).toBe(201);
+      const { client_id: oauthClientId } = await registration.json() as { client_id: string };
+      const { verifier, challenge } = s256Pair();
+      const resource = `http://127.0.0.1:${server.port}/mcp`;
+
+      const authorize = await fetch(`http://127.0.0.1:${server.port}/authorize`, {
+        method: 'POST',
+        redirect: 'manual',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          response_type: 'code',
+          client_id: oauthClientId,
+          redirect_uri: redirectUri,
+          resource,
+          code_challenge: challenge,
+          code_challenge_method: 'S256',
+          api_token: 'codex-api-token',
+        }),
+      });
+      expect(authorize.status).toBe(302);
+      const code = new URL(authorize.headers.get('location')!).searchParams.get('code');
+      expect(code).toBeTruthy();
+
+      const token = await fetch(`http://127.0.0.1:${server.port}/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'authorization_code',
+          code: code!,
+          client_id: oauthClientId,
+          redirect_uri: redirectUri,
+          resource,
+          code_verifier: verifier,
+        }),
+      });
+      expect(token.status).toBe(200);
+      const grant = await token.json() as { access_token: string; refresh_token: string };
+
+      const beforeRotate = await fetch(`http://127.0.0.1:${server.port}/health`, {
+        headers: { Authorization: `Bearer ${grant.access_token}` },
+      });
+      expect(beforeRotate.status).toBe(200);
+
+      const current = clients[0]!;
+      clients = [
+        {
+          ...current,
+          credentialVersion: 2,
+          auth: { type: 'token', tokenHash: hashApiToken('rotated-api-token') },
+        },
+      ];
+
+      const afterRotate = await fetch(`http://127.0.0.1:${server.port}/health`, {
+        headers: { Authorization: `Bearer ${grant.access_token}` },
+      });
+      expect(afterRotate.status).toBe(401);
+
+      const refresh = await fetch(`http://127.0.0.1:${server.port}/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: grant.refresh_token,
+          client_id: oauthClientId,
+        }),
+      });
+      const refreshBody = await refresh.json() as { error?: string };
+      expect(refresh.status).toBe(400);
+      expect(refreshBody.error).toBe('invalid_grant');
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('rejects OAuth approval with an invalid scoped API token', async () => {
     const router = new ToolRouter();
     await router.initialize();
@@ -1492,6 +1598,42 @@ describe('startHttpServer lifecycle', () => {
     }
   });
 
+  it('enforces client binding for direct bearer-token requests', async () => {
+    const router = new ToolRouter();
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const server = await startHttpServer(router, {
+      port: 0,
+      tokenPath,
+      clients: [
+        {
+          id: 'codex',
+          name: 'Codex CLI',
+          clientBinding: 'codex-cli',
+          auth: { type: 'token', tokenHash: hashApiToken('codex-local-token') },
+          rawToolsEnabled: true,
+          permissions: [],
+        },
+      ],
+    });
+
+    try {
+      const rejected = await fetch(`http://127.0.0.1:${server.port}/health`, {
+        headers: { Authorization: 'Bearer codex-local-token', 'User-Agent': 'curl/8.0' },
+      });
+      expect(rejected.status).toBe(401);
+
+      const accepted = await fetch(`http://127.0.0.1:${server.port}/health`, {
+        headers: { Authorization: 'Bearer codex-local-token', 'User-Agent': 'Codex-CLI/1.0' },
+      });
+      expect(accepted.status).toBe(200);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('filters MCP tools/list and denies tool calls by resolved client permissions', async () => {
     const { index, tmp: indexTmp } = await createTextIndexServerFixture();
     const router = new ToolRouter(undefined, [], { contextIndex: index });
@@ -1525,6 +1667,63 @@ describe('startHttpServer lifecycle', () => {
       });
       expect(denied.result.isError).toBe(true);
       expect(denied.result.content[0].text).toContain('missing_permission path=/workspace/note.md action=read');
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+      fs.rmSync(indexTmp, { recursive: true, force: true });
+    }
+  });
+
+  it('applies edited token permissions to existing MCP sessions on the next request', async () => {
+    const { index, tmp: indexTmp } = await createTextIndexServerFixture();
+    const router = new ToolRouter(undefined, [], { contextIndex: index });
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    let clients: ClientConfig[] = [
+      {
+        id: 'writer',
+        name: 'Writer client',
+        auth: { type: 'token', tokenHash: hashApiToken('writer-token') },
+        rawToolsEnabled: true,
+        permissions: [{ path: '/workspace/**', actions: ['search', 'read', 'write'] }],
+      },
+    ];
+    const server = await startHttpServer(router, {
+      port: 0,
+      tokenPath,
+      clients: () => clients,
+    });
+
+    try {
+      const sessionId = await initializeMcpSession(server.port, 'writer-token');
+      const initialWrite = await mcpJsonRequest(server.port, 'writer-token', sessionId, 2, 'tools/call', {
+        name: 'write',
+        arguments: { path: '/workspace/new.md', content: 'before edit' },
+      });
+      expect(initialWrite.result.isError).not.toBe(true);
+
+      const current = clients[0]!;
+      clients = [
+        {
+          ...current,
+          permissions: [{ path: '/workspace/**', actions: ['search', 'read'] }],
+        },
+      ];
+
+      const listTools = await mcpJsonRequest(server.port, 'writer-token', sessionId, 3, 'tools/list', {});
+      expect(listTools.result.tools.map((tool: { name: string }) => tool.name)).toEqual([
+        'search',
+        'list',
+        'read',
+      ]);
+
+      const deniedWrite = await mcpJsonRequest(server.port, 'writer-token', sessionId, 4, 'tools/call', {
+        name: 'write',
+        arguments: { path: '/workspace/after-edit.md', content: 'after edit' },
+      });
+      expect(deniedWrite.result.isError).toBe(true);
+      expect(deniedWrite.result.content[0].text).toContain('missing_permission path=/workspace/after-edit.md action=write');
     } finally {
       await server.close();
       fs.rmSync(tmp, { recursive: true, force: true });

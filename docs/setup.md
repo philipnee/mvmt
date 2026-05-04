@@ -29,13 +29,13 @@ Use this path for a local smoke test:
 
 ```bash
 mvmt mounts add documents ~/Documents --mount-path /documents --read-only
-mvmt token add codex --read /documents --ttl 7d
+mvmt token add codex --scope documents:read --expires 7d
 mvmt reindex
 mvmt serve -i
 codex mcp add mvmt --url http://127.0.0.1:4141/mcp
 ```
 
-When the client asks for authentication, paste the `mvmt_...` API token printed
+When the client asks for authentication, paste the `mvmt_t_...` API token printed
 by `mvmt token add`.
 
 Then ask the client to:
@@ -120,7 +120,7 @@ mvmt token
 Create a token:
 
 ```bash
-mvmt token add codex --read /notes --ttl 7d
+mvmt token add codex --scope notes:read --expires 7d
 ```
 
 The plaintext token is printed once. mvmt stores only a scrypt verifier.
@@ -131,7 +131,7 @@ automatically during startup. Use `mvmt token session` only for legacy local
 testing when no scoped API tokens are configured.
 
 ```bash
-mvmt token rotate codex --ttl 30d
+mvmt token rotate codex --expires 30d --yes
 ```
 
 Running mvmt processes load API-token changes on the next auth request.
@@ -153,16 +153,16 @@ Use this after adding a mount or changing files outside mvmt.
 Create a scoped token first:
 
 ```bash
-mvmt token add codex --read /notes --ttl 7d
+mvmt token add codex --scope notes:read --expires 7d
 ```
 
-Use the printed `mvmt_...` token when Codex asks for authentication.
+Use the printed `mvmt_t_...` token when Codex asks for authentication.
 
 ```bash
 codex mcp add mvmt --url http://127.0.0.1:4141/mcp
 ```
 
-When prompted, paste the `mvmt_...` token printed by `mvmt token add`.
+When prompted, paste the `mvmt_t_...` token printed by `mvmt token add`.
 
 ## Connect Other Clients
 
@@ -193,7 +193,7 @@ See [Client Setup](client-setup.md) for more examples.
 Check server health:
 
 ```bash
-TOKEN="<paste mvmt_... token from mvmt token add>"
+TOKEN="<paste mvmt_t_... token from mvmt token add>"
 curl -i http://127.0.0.1:4141/health \
   -H "Authorization: Bearer $TOKEN"
 ```
@@ -260,6 +260,6 @@ mvmt serve -i --port 4142
 Codex only sees environment variables from the shell that launched it.
 
 ```bash
-export MVMT_TOKEN="<paste mvmt_... token here>"
+export MVMT_TOKEN="<paste mvmt_t_... token here>"
 codex
 ```

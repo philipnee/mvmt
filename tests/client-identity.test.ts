@@ -34,11 +34,12 @@ function oauthClient(id: string, oauthClientIds: string[], overrides: Partial<Cl
   };
 }
 
-function fakeOauthAccessToken(clientId: string, mvmtClientId?: string): AccessToken {
+function fakeOauthAccessToken(clientId: string, mvmtClientId?: string, mvmtClientCredentialVersion?: number): AccessToken {
   return {
     token: 'access-token-stub',
     clientId,
     mvmtClientId,
+    mvmtClientCredentialVersion,
     audience: 'http://127.0.0.1:4141/mcp',
     expiresAt: Date.now() + 60_000,
   };
@@ -103,12 +104,13 @@ describe('resolveClientIdentity', () => {
 
     it('maps an OAuth access token to the scoped API-token client selected at authorization time', () => {
       const codex = tokenClient('codex', 'codex-token', {
+        credentialVersion: 2,
         permissions: [{ path: '/workspace/**', actions: ['search', 'read'] }],
       });
       const identity = resolveClientIdentity({
         authHeader: 'Bearer mvmtv1.something',
         clients: [codex],
-        oauthAccessToken: fakeOauthAccessToken('unknown-dcr-client', 'codex'),
+        oauthAccessToken: fakeOauthAccessToken('unknown-dcr-client', 'codex', 2),
         validateSession: ALWAYS_FALSE,
       });
 
@@ -116,6 +118,32 @@ describe('resolveClientIdentity', () => {
       expect(identity?.id).toBe('codex');
       expect(identity?.oauthClientId).toBe('unknown-dcr-client');
       expect(identity?.permissions).toEqual([{ path: '/workspace/**', actions: ['search', 'read'] }]);
+    });
+
+    it('rejects an OAuth access token minted before scoped API-token rotation', () => {
+      const codex = tokenClient('codex', 'codex-token', {
+        credentialVersion: 2,
+      });
+      const identity = resolveClientIdentity({
+        authHeader: 'Bearer mvmtv1.something',
+        clients: [codex],
+        oauthAccessToken: fakeOauthAccessToken('unknown-dcr-client', 'codex', 1),
+        validateSession: ALWAYS_FALSE,
+      });
+
+      expect(identity).toBeUndefined();
+    });
+
+    it('treats legacy OAuth tokens and token clients as credential version 1', () => {
+      const codex = tokenClient('codex', 'codex-token');
+      const identity = resolveClientIdentity({
+        authHeader: 'Bearer mvmtv1.something',
+        clients: [codex],
+        oauthAccessToken: fakeOauthAccessToken('unknown-dcr-client', 'codex'),
+        validateSession: ALWAYS_FALSE,
+      });
+
+      expect(identity?.id).toBe('codex');
     });
 
     it('rejects an OAuth access token when the selected scoped token has expired', () => {
@@ -127,6 +155,21 @@ describe('resolveClientIdentity', () => {
         clients: [codex],
         oauthAccessToken: fakeOauthAccessToken('dcr-client', 'codex'),
         validateSession: ALWAYS_FALSE,
+      });
+
+      expect(identity).toBeUndefined();
+    });
+
+    it('rejects an OAuth access token when the selected scoped token binding does not match', () => {
+      const codex = tokenClient('codex', 'codex-token', {
+        clientBinding: 'chatgpt',
+      });
+      const identity = resolveClientIdentity({
+        authHeader: 'Bearer mvmtv1.something',
+        clients: [codex],
+        oauthAccessToken: fakeOauthAccessToken('claude', 'codex'),
+        validateSession: ALWAYS_FALSE,
+        clientHint: 'claude',
       });
 
       expect(identity).toBeUndefined();
@@ -189,6 +232,30 @@ describe('resolveClientIdentity', () => {
       expect(identity?.source).toBe('token');
       expect(identity?.id).toBe('codex');
       expect(identity?.rawToolsEnabled).toBe(true);
+    });
+
+    it('requires configured token client bindings to match the request hint', () => {
+      const codex = tokenClient('codex', 'codex-plaintext-token', {
+        clientBinding: 'claude-desktop',
+      });
+
+      const rejected = resolveClientIdentity({
+        authHeader: 'Bearer codex-plaintext-token',
+        clients: [codex],
+        oauthAccessToken: undefined,
+        validateSession: ALWAYS_FALSE,
+        clientHint: 'curl/8.0',
+      });
+      const accepted = resolveClientIdentity({
+        authHeader: 'Bearer codex-plaintext-token',
+        clients: [codex],
+        oauthAccessToken: undefined,
+        validateSession: ALWAYS_FALSE,
+        clientHint: 'Claude-Desktop/1.0',
+      });
+
+      expect(rejected).toBeUndefined();
+      expect(accepted?.id).toBe('codex');
     });
 
     it('rejects an expired configured token client even when the bearer matches', () => {

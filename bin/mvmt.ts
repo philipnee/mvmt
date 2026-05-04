@@ -47,7 +47,7 @@ program.addHelpText('after', examples([
   ['mvmt serve -i', 'start locally with the interactive prompt'],
   ['mvmt serve --path ~/Documents', 'serve one read-only folder for this run'],
   ['mvmt mounts add notes ~/notes --mount-path /notes --read-only', 'add a read-only mount'],
-  ['mvmt token add codex --read /notes', 'create a scoped API token'],
+  ['mvmt token add codex --scope notes:read', 'create a scoped API token'],
   ['mvmt doctor', 'validate config and mount roots'],
 ]));
 
@@ -215,19 +215,22 @@ tokenCommand
 tokenCommand
   .command('add [id]')
   .alias('create')
-  .description('Create or update a scoped API token')
+  .description('Create a scoped API token and print it once')
   .option('-c, --config <path>', 'Config file path')
   .option('--name <text>', 'Display name')
   .option('--description <text>', 'Optional description')
-  .option('--ttl <duration>', 'Token lifetime, such as 30m, 7d, 30d, or never')
+  .option('--scope <scope>', 'Grant scope such as all:read or notes:write (repeatable, comma-separated)', collectValues)
+  .option('--client <identity>', 'Bind token to a client identity label')
+  .option('--expires <duration>', 'Token lifetime, such as 30m, 7d, 30d, or never')
+  .option('--ttl <duration>', 'Alias for --expires')
   .option('--read <mount>', 'Grant search/read on a mount name or path (repeatable)', collectValues)
   .option('--write <mount>', 'Grant search/read/write/remove on a writable mount (repeatable)', collectValues)
   .addHelpText('after', examples([
-    ['mvmt token add codex --read /notes --ttl 7d', 'create a token that can search/read /notes for 7 days'],
-    ['mvmt token add codex --write workspace --ttl never', 'grant write/remove on the workspace mount'],
+    ['mvmt token add codex --scope notes:read --expires 7d', 'create a token that can search/read notes for 7 days'],
+    ['mvmt token add laptop-claude --scope all:read --client claude-desktop --expires never', 'create a read-only token for Claude Desktop'],
     ['mvmt token add', 'interactive token setup'],
   ]))
-  .action(async (id: string | undefined, options: { config?: string; name?: string; description?: string; ttl?: string; read?: string[]; write?: string[] }, command: Command) => {
+  .action(async (id: string | undefined, options: { config?: string; name?: string; description?: string; scope?: string[]; client?: string; expires?: string; ttl?: string; read?: string[]; write?: string[] }, command: Command) => {
     await addApiToken(id, withInheritedConfig(options, command));
   });
 
@@ -237,10 +240,13 @@ tokenCommand
   .option('-c, --config <path>', 'Config file path')
   .option('--name <text>', 'Display name')
   .option('--description <text>', 'Optional description')
-  .option('--ttl <duration>', 'Token lifetime, such as 30m, 7d, 30d, or never')
+  .option('--scope <scope>', 'Replace scopes, such as all:read or notes:write (repeatable, comma-separated)', collectValues)
+  .option('--client <identity>', 'Replace client identity binding, or "any" to clear')
+  .option('--expires <duration>', 'Token lifetime, such as 30m, 7d, 30d, or never')
+  .option('--ttl <duration>', 'Alias for --expires')
   .option('--read <mount>', 'Grant search/read on a mount name or path (repeatable)', collectValues)
   .option('--write <mount>', 'Grant search/read/write/remove on a writable mount (repeatable)', collectValues)
-  .action(async (id: string | undefined, options: { config?: string; name?: string; description?: string; ttl?: string; read?: string[]; write?: string[] }, command: Command) => {
+  .action(async (id: string | undefined, options: { config?: string; name?: string; description?: string; scope?: string[]; client?: string; expires?: string; ttl?: string; read?: string[]; write?: string[] }, command: Command) => {
     await editApiToken(id, withInheritedConfig(options, command));
   });
 
@@ -248,8 +254,10 @@ tokenCommand
   .command('rotate [id]')
   .description('Rotate a scoped API token and print the replacement once')
   .option('-c, --config <path>', 'Config file path')
-  .option('--ttl <duration>', 'Replacement lifetime, such as 30m, 7d, 30d, or never')
-  .action(async (id: string | undefined, options: { config?: string; ttl?: string }, command: Command) => {
+  .option('--expires <duration>', 'Replacement lifetime, such as 30m, 7d, 30d, or never')
+  .option('--ttl <duration>', 'Alias for --expires')
+  .option('-y, --yes', 'Rotate without prompting for confirmation')
+  .action(async (id: string | undefined, options: { config?: string; expires?: string; ttl?: string; yes?: boolean }, command: Command) => {
     await rotateApiToken(id, withInheritedConfig(options, command));
   });
 
@@ -304,19 +312,22 @@ apiTokensCommand
 apiTokensCommand
   .command('add [id]')
   .alias('create')
-  .description('Create or update a scoped API token')
+  .description('Create a scoped API token and print it once')
   .option('-c, --config <path>', 'Config file path')
   .option('--name <text>', 'Display name')
   .option('--description <text>', 'Optional description')
-  .option('--ttl <duration>', 'Token lifetime, such as 30m, 7d, 30d, or never')
+  .option('--scope <scope>', 'Grant scope such as all:read or notes:write (repeatable, comma-separated)', collectValues)
+  .option('--client <identity>', 'Bind token to a client identity label')
+  .option('--expires <duration>', 'Token lifetime, such as 30m, 7d, 30d, or never')
+  .option('--ttl <duration>', 'Alias for --expires')
   .option('--read <mount>', 'Grant search/read on a mount name or path (repeatable)', collectValues)
   .option('--write <mount>', 'Grant search/read/write/remove on a writable mount (repeatable)', collectValues)
   .addHelpText('after', examples([
-    ['mvmt token add codex --read /notes --ttl 7d', 'create a token that can search/read /notes for 7 days'],
-    ['mvmt token add codex --write workspace', 'grant write/remove on the workspace mount'],
+    ['mvmt token add codex --scope notes:read --expires 7d', 'create a token that can search/read notes for 7 days'],
+    ['mvmt token add laptop-claude --scope all:read --client claude-desktop --expires never', 'create a read-only token for Claude Desktop'],
     ['mvmt token add', 'interactive token setup'],
   ]))
-  .action(async (id: string | undefined, options: { config?: string; name?: string; description?: string; ttl?: string; read?: string[]; write?: string[] }, command: Command) => {
+  .action(async (id: string | undefined, options: { config?: string; name?: string; description?: string; scope?: string[]; client?: string; expires?: string; ttl?: string; read?: string[]; write?: string[] }, command: Command) => {
     await addApiToken(id, withInheritedConfig(options, command));
   });
 
@@ -326,10 +337,13 @@ apiTokensCommand
   .option('-c, --config <path>', 'Config file path')
   .option('--name <text>', 'Display name')
   .option('--description <text>', 'Optional description')
-  .option('--ttl <duration>', 'Token lifetime, such as 30m, 7d, 30d, or never')
+  .option('--scope <scope>', 'Replace scopes, such as all:read or notes:write (repeatable, comma-separated)', collectValues)
+  .option('--client <identity>', 'Replace client identity binding, or "any" to clear')
+  .option('--expires <duration>', 'Token lifetime, such as 30m, 7d, 30d, or never')
+  .option('--ttl <duration>', 'Alias for --expires')
   .option('--read <mount>', 'Grant search/read on a mount name or path (repeatable)', collectValues)
   .option('--write <mount>', 'Grant search/read/write/remove on a writable mount (repeatable)', collectValues)
-  .action(async (id: string | undefined, options: { config?: string; name?: string; description?: string; ttl?: string; read?: string[]; write?: string[] }, command: Command) => {
+  .action(async (id: string | undefined, options: { config?: string; name?: string; description?: string; scope?: string[]; client?: string; expires?: string; ttl?: string; read?: string[]; write?: string[] }, command: Command) => {
     await editApiToken(id, withInheritedConfig(options, command));
   });
 
@@ -337,8 +351,10 @@ apiTokensCommand
   .command('rotate [id]')
   .description('Rotate a scoped API token and print the replacement once')
   .option('-c, --config <path>', 'Config file path')
-  .option('--ttl <duration>', 'Replacement lifetime, such as 30m, 7d, 30d, or never')
-  .action(async (id: string | undefined, options: { config?: string; ttl?: string }, command: Command) => {
+  .option('--expires <duration>', 'Replacement lifetime, such as 30m, 7d, 30d, or never')
+  .option('--ttl <duration>', 'Alias for --expires')
+  .option('-y, --yes', 'Rotate without prompting for confirmation')
+  .action(async (id: string | undefined, options: { config?: string; expires?: string; ttl?: string; yes?: boolean }, command: Command) => {
     await rotateApiToken(id, withInheritedConfig(options, command));
   });
 

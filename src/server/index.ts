@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'crypto';
 import { Server as HttpServer } from 'node:http';
 import express, { Request, Response } from 'express';
+import type { AccessToken } from './oauth.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -22,7 +23,15 @@ import {
 } from './oauth.js';
 import { rateLimit } from './rate-limit.js';
 import { ClientConfig } from '../config/schema.js';
-import { attachClientIdentity, ClientIdentity, isQuarantined, readClientIdentity, resolveClientIdentity } from './client-identity.js';
+import {
+  attachClientIdentity,
+  ClientIdentity,
+  clientBindingMatches,
+  clientCredentialVersion,
+  isQuarantined,
+  readClientIdentity,
+  resolveClientIdentity,
+} from './client-identity.js';
 
 // Rate limits are defense-in-depth against brute-force and DoS,
 // primarily meaningful when mvmt is exposed via a tunnel. Auth-gated
@@ -37,8 +46,13 @@ const DEFAULT_HEALTH_RATE_LIMIT = { windowMs: 60_000, max: 120 };
 type McpSession = {
   transport: StreamableHTTPServerTransport;
   server: Server;
+  clientIdentityRef: ClientIdentityRef;
   clientIdentity?: ClientIdentity;
   lastActivity: number;
+};
+
+type ClientIdentityRef = {
+  current?: ClientIdentity;
 };
 
 export interface RateLimitOverrides {
@@ -97,7 +111,10 @@ export const MVMT_SERVER_INSTRUCTIONS = [
   'Do not use mvmt for general web or current-events questions unless the user asks about local files. Never write or remove unless the user explicitly asks to create, overwrite, or delete a specific file. If search returns no useful results, say that instead of inventing local file contents.',
 ].join('\n');
 
-export function createMcpServer(router: ToolRouter, clientIdentity?: ClientIdentity): Server {
+export function createMcpServer(router: ToolRouter, clientIdentity?: ClientIdentity | (() => ClientIdentity | undefined)): Server {
+  const resolveClientIdentityForRequest = typeof clientIdentity === 'function'
+    ? clientIdentity
+    : () => clientIdentity;
   const server = new Server(
     { name: 'mvmt', version: '0.1.0' },
     {
@@ -107,7 +124,7 @@ export function createMcpServer(router: ToolRouter, clientIdentity?: ClientIdent
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: router.getAllTools(clientIdentity).map((tool) => ({
+    tools: router.getAllTools(resolveClientIdentityForRequest()).map((tool) => ({
       name: tool.namespacedName,
       description: tool.description,
       inputSchema: tool.inputSchema as { type: 'object'; properties?: Record<string, object>; required?: string[] },
@@ -116,7 +133,11 @@ export function createMcpServer(router: ToolRouter, clientIdentity?: ClientIdent
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     try {
-      const result = await router.callTool(request.params.name, request.params.arguments ?? {}, clientIdentity);
+      const result = await router.callTool(
+        request.params.name,
+        request.params.arguments ?? {},
+        resolveClientIdentityForRequest(),
+      );
       return result as any;
     } catch (err) {
       return {
@@ -244,6 +265,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       oauthAccessToken,
       validateSession: (header) => validateSessionToken(header, tokenPath),
       allowLegacyDefault: resolveAllowLegacyDefaultClient(options.allowLegacyDefaultClient),
+      clientHint: requestClientHint(req, oauthAccessToken?.clientId),
     });
     if (identity && isQuarantined(identity)) {
       // Quarantined identities are authenticated (the OAuth access token
@@ -461,7 +483,12 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     }
 
     const requestId = params.requestId ?? randomUUID();
-    const approval = resolveAuthorizeApproval(req.body ?? {}, resolveClients(options.clients), tokenPath);
+    const approval = resolveAuthorizeApproval(
+      req.body ?? {},
+      resolveClients(options.clients),
+      tokenPath,
+      requestClientHint(req, params.clientId),
+    );
     if (!approval.ok) {
       const denyDetail = formatAuthorizeLogDetail({
         phase: approval.phase,
@@ -482,6 +509,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     const authCode = oauth.issueCode({
       clientId: params.clientId,
       mvmtClientId: approval.mvmtClientId,
+      mvmtClientCredentialVersion: approval.mvmtClientCredentialVersion,
       redirectUri: params.redirectUri,
       resource: params.resource,
       codeChallenge: params.codeChallenge,
@@ -530,6 +558,13 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
         }
 
         const tokens = oauth.exchangeCode({ code, clientId, redirectUri, resource, codeVerifier });
+        if (!oauthGrantMatchesCurrentClient(
+          tokens.accessToken,
+          resolveClients(options.clients),
+          requestClientHint(req, clientId),
+        )) {
+          throw new OAuthError('invalid_grant', 'Scoped API token was rotated or removed');
+        }
         const tokenDetail = `issued grant=authorization_code aud=${tokens.accessToken.audience ? safeHost(tokens.accessToken.audience) : '(none)'}`;
         logHttpRequest(requestLog, req, 200, 'oauth.token', tokenDetail, clientId);
         res.json({
@@ -552,6 +587,13 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       }
 
       const tokens = oauth.exchangeRefreshToken({ refreshToken, clientId, scope });
+      if (!oauthGrantMatchesCurrentClient(
+        tokens.accessToken,
+        resolveClients(options.clients),
+        requestClientHint(req, clientId),
+      )) {
+        throw new OAuthError('invalid_grant', 'Scoped API token was rotated or removed');
+      }
       const tokenDetail = `issued grant=refresh_token aud=${tokens.accessToken.audience ? safeHost(tokens.accessToken.audience) : '(none)'}`;
       logHttpRequest(requestLog, req, 200, 'oauth.token', tokenDetail, clientId);
       res.json({
@@ -653,10 +695,13 @@ async function handleMcpRequest(
 
   if (sessionId && sessions.has(sessionId)) {
     const session = sessions.get(sessionId)!;
-    if (!sameClientIdentity(session.clientIdentity, readClientIdentity(req))) {
+    const requestIdentity = readClientIdentity(req);
+    if (!sameClientIdentity(session.clientIdentity, requestIdentity)) {
       res.status(403).json({ error: 'mcp_session_client_mismatch' });
       return;
     }
+    session.clientIdentity = requestIdentity;
+    session.clientIdentityRef.current = requestIdentity;
     session.lastActivity = Date.now();
     if (isStandaloneSseRequest(req)) {
       session.transport.closeStandaloneSSEStream();
@@ -673,8 +718,8 @@ async function handleMcpRequest(
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: () => randomUUID(),
   });
-  const clientIdentity = readClientIdentity(req);
-  const server = createMcpServer(router, clientIdentity);
+  const clientIdentityRef: ClientIdentityRef = { current: readClientIdentity(req) };
+  const server = createMcpServer(router, () => clientIdentityRef.current);
 
   transport.onerror = (error) => {
     if (isBenignDuplicateSseConflict(error)) {
@@ -693,7 +738,13 @@ async function handleMcpRequest(
   await transport.handleRequest(req, res, req.body);
 
   if (transport.sessionId) {
-    sessions.set(transport.sessionId, { transport, server, clientIdentity, lastActivity: Date.now() });
+    sessions.set(transport.sessionId, {
+      transport,
+      server,
+      clientIdentityRef,
+      clientIdentity: clientIdentityRef.current,
+      lastActivity: Date.now(),
+    });
   }
 }
 
@@ -906,19 +957,34 @@ function firstHeaderValue(value: string | string[] | undefined): string | undefi
   return value;
 }
 
+function requestClientHint(req: Request, oauthClientId?: string): string | undefined {
+  const values = [
+    oauthClientId,
+    firstHeaderValue(req.headers['user-agent']),
+  ].filter((value): value is string => Boolean(value));
+  return values.length > 0 ? values.join(' ') : undefined;
+}
+
 type AuthorizeApproval =
-  | { ok: true; mvmtClientId?: string }
+  | { ok: true; mvmtClientId?: string; mvmtClientCredentialVersion?: number }
   | { ok: false; phase: string; message: string };
 
 function resolveAuthorizeApproval(
   body: Record<string, unknown>,
   clients: readonly ClientConfig[],
   tokenPath: string | undefined,
+  clientHint?: string,
 ): AuthorizeApproval {
   const apiTokenRaw = stringField(body.api_token);
   if (apiTokenRaw) {
-    const client = findApiTokenClient(apiTokenRaw, clients);
-    if (client) return { ok: true, mvmtClientId: client.id };
+    const client = findApiTokenClient(apiTokenRaw, clients, clientHint);
+    if (client) {
+      return {
+        ok: true,
+        mvmtClientId: client.id,
+        mvmtClientCredentialVersion: clientCredentialVersion(client),
+      };
+    }
     return {
       ok: false,
       phase: 'deny_invalid_api_token',
@@ -946,13 +1012,25 @@ function resolveAuthorizeApproval(
   };
 }
 
-function findApiTokenClient(token: string, clients: readonly ClientConfig[]): ClientConfig | undefined {
+function findApiTokenClient(token: string, clients: readonly ClientConfig[], clientHint?: string): ClientConfig | undefined {
   for (const client of clients) {
     if (client.auth.type !== 'token') continue;
     if (isExpired(client.expiresAt)) continue;
+    if (!clientBindingMatches(client.clientBinding, clientHint)) continue;
     if (verifyApiToken(token, client.auth.tokenHash)) return client;
   }
   return undefined;
+}
+
+function oauthGrantMatchesCurrentClient(token: AccessToken, clients: readonly ClientConfig[], clientHint?: string): boolean {
+  if (!token.mvmtClientId) return true;
+  const client = clients.find((entry) => entry.id === token.mvmtClientId && entry.auth.type === 'token');
+  return Boolean(
+    client
+      && !isExpired(client.expiresAt)
+      && clientCredentialVersion(client) === (token.mvmtClientCredentialVersion ?? 1)
+      && clientBindingMatches(client.clientBinding, clientHint),
+  );
 }
 
 // Used in request logs for redirect/resource URIs. We log the host only

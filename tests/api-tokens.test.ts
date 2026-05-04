@@ -23,10 +23,11 @@ describe('API token config helpers', () => {
       id: 'codex',
       name: 'Codex CLI',
       description: 'Used by Codex for the mvmt repo',
-      ttl: '7d',
+      expires: '7d',
       now: Date.parse('2026-04-29T12:00:00.000Z'),
       plaintextToken: 'plain-token',
-      permissions: [{ mount: '/document', mode: 'read' }],
+      clientBinding: 'codex',
+      permissions: [{ source: '/document', mode: 'read' }],
     });
 
     expect(result.created).toBe(true);
@@ -35,7 +36,10 @@ describe('API token config helpers', () => {
       id: 'codex',
       name: 'Codex CLI',
       description: 'Used by Codex for the mvmt repo',
+      createdAt: '2026-04-29T12:00:00.000Z',
+      credentialVersion: 1,
       expiresAt: '2026-05-06T12:00:00.000Z',
+      clientBinding: 'codex',
       auth: { type: 'token' },
       rawToolsEnabled: false,
       permissions: [{ path: '/document/**', actions: ['search', 'read'] }],
@@ -47,7 +51,7 @@ describe('API token config helpers', () => {
     }
   });
 
-  it('updates an existing token permission without rotating its secret', () => {
+  it('edits an existing token permission without rotating its secret', () => {
     const config = parseConfig({
       version: 1,
       mounts: [
@@ -63,9 +67,9 @@ describe('API token config helpers', () => {
       ],
     });
 
-    const result = addApiTokenToConfig(config, {
+    const result = editApiTokenInConfig(config, 'codex', {
       id: 'codex',
-      permissions: [{ mount: 'workspace', mode: 'write' }],
+      permissions: [{ source: 'workspace', mode: 'write' }],
     });
 
     expect(result.created).toBe(false);
@@ -73,6 +77,47 @@ describe('API token config helpers', () => {
     expect(result.client.auth).toEqual({ type: 'token', tokenHash: EXISTING_TOKEN_VERIFIER });
     expect(result.client.permissions).toEqual([
       { path: '/workspace/**', actions: ['search', 'read', 'write'] },
+    ]);
+  });
+
+  it('rejects creating over an existing named token', () => {
+    const config = parseConfig({
+      version: 1,
+      mounts: [
+        { name: 'workspace', type: 'local_folder', path: '/workspace', root: '/tmp/workspace' },
+      ],
+      clients: [
+        {
+          id: 'codex',
+          name: 'Codex CLI',
+          auth: { type: 'token', tokenHash: EXISTING_TOKEN_VERIFIER },
+          permissions: [{ path: '/workspace/**', actions: ['search', 'read'] }],
+        },
+      ],
+    });
+
+    expect(() => addApiTokenToConfig(config, {
+      id: 'codex',
+      permissions: [{ source: 'workspace', mode: 'read' }],
+    })).toThrow('already exists');
+  });
+
+  it('creates all-access scopes with the global permission path', () => {
+    const config = parseConfig({
+      version: 1,
+      mounts: [
+        { name: 'workspace', type: 'local_folder', path: '/workspace', root: '/tmp/workspace' },
+      ],
+    });
+
+    const result = addApiTokenToConfig(config, {
+      id: 'admin',
+      permissions: [{ source: 'all', mode: 'write' }],
+      plaintextToken: 'plain-token',
+    });
+
+    expect(result.client.permissions).toEqual([
+      { path: '/**', actions: ['search', 'read', 'write'] },
     ]);
   });
 
@@ -98,8 +143,8 @@ describe('API token config helpers', () => {
     const result = editApiTokenInConfig(config, 'codex', {
       name: 'Codex',
       description: 'updated description',
-      ttl: 'never',
-      permissions: [{ mount: '/workspace', mode: 'write' }],
+      expires: 'never',
+      permissions: [{ source: '/workspace', mode: 'write' }],
     });
 
     expect(result.created).toBe(false);
@@ -127,6 +172,7 @@ describe('API token config helpers', () => {
           id: 'codex',
           name: 'Codex CLI',
           description: 'keep this',
+          credentialVersion: 4,
           expiresAt: '2026-05-06T12:00:00.000Z',
           auth: { type: 'token', tokenHash: EXISTING_TOKEN_VERIFIER },
           permissions: [{ path: '/notes/**', actions: ['search', 'read'] }],
@@ -142,6 +188,7 @@ describe('API token config helpers', () => {
       id: 'codex',
       name: 'Codex CLI',
       description: 'keep this',
+      credentialVersion: 5,
       expiresAt: '2026-05-06T12:00:00.000Z',
       permissions: [{ path: '/notes/**', actions: ['search', 'read'] }],
     });
@@ -152,7 +199,7 @@ describe('API token config helpers', () => {
     }
   });
 
-  it('refreshes the default ttl when rotating an expired token', () => {
+  it('preserves an expired token expiry unless rotate callers replace it', () => {
     const config = parseConfig({
       version: 1,
       mounts: [
@@ -173,7 +220,8 @@ describe('API token config helpers', () => {
       now: Date.parse('2026-04-30T16:00:00.000Z'),
     });
 
-    expect(result.client.expiresAt).toBe('2026-05-30T16:00:00.000Z');
+    expect(result.client.expiresAt).toBe('2026-04-30T06:24:31.469Z');
+    expect(result.client.credentialVersion).toBe(2);
     expect(result.client.auth.type).toBe('token');
     if (result.client.auth.type === 'token') {
       expect(verifyApiToken('new-plaintext-token', result.client.auth.tokenHash)).toBe(true);
@@ -215,7 +263,7 @@ describe('API token config helpers', () => {
 
     expect(() => addApiTokenToConfig(config, {
       id: 'codex',
-      permissions: [{ mount: 'document', mode: 'write' }],
+      permissions: [{ source: 'document', mode: 'write' }],
       plaintextToken: 'plain-token',
     })).toThrow('read-only');
   });

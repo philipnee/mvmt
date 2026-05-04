@@ -6,9 +6,15 @@ export const AUDIT_LOG_PATH = path.join(os.homedir(), '.mvmt', 'audit.log');
 
 export interface AuditEntry {
   ts: string;
+  event?: 'token.add' | 'token.edit' | 'token.rotate' | 'token.remove' | 'token.use';
   connectorId: string;
   tool: string;
   clientId?: string;
+  name?: string;
+  scope?: string;
+  client?: string;
+  expires?: string | null;
+  result?: 'success' | 'error';
   argKeys: string[];
   argPreview: string;
   redactions?: Array<{

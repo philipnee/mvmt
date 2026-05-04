@@ -172,44 +172,73 @@ describe('CLI usability', () => {
         'codex',
         '--config',
         configPath,
-        '--read',
-        '/notes',
+        '--scope',
+        'notes:read',
         '--name',
         'Codex CLI',
         '--description',
         'Local Codex token',
-        '--ttl',
+        '--expires',
         '7d',
       ]);
-      expect(stdout).toContain('API token codex created');
-      expect(stdout).toContain('API token (shown once)');
-      expect(stdout).toContain('id: codex');
-      expect(stdout).toContain('token: mvmt_');
-      expect(stdout).toContain('expires:');
-      expect(stdout).toContain('Paste this token into the mvmt OAuth approval page');
+      expect(stdout).toContain('Token created.');
+      expect(stdout).toContain('Name:    codex');
+      expect(stdout).toContain('Scope:   notes:read');
+      expect(stdout).toContain('Token:   mvmt_t_');
+      expect(stdout).toContain('Expires:');
+      expect(stdout).toContain('For OAuth clients, paste this token into the mvmt approval page');
 
       const { stdout: list } = await runCli(['token', '--config', configPath]);
-      expect(list).toContain('Tokens');
-      expect(list).toContain('    codex');
-      expect(list).toContain('      name: Codex CLI');
-      expect(list).toContain('      description: Local Codex token');
-      expect(list).toContain('      expires:');
-      expect(list).toContain('      can: search, read');
-      expect(list).toContain('      path: /notes/**');
-      expect(list).toContain('      token: hidden, rotate to replace');
+      expect(list).toContain('NAME');
+      expect(list).toContain('SCOPE');
+      expect(list).toContain('codex');
+      expect(list).toContain('notes:read');
+      expect(list).toContain('(any)');
 
       const { stdout: json } = await runCli(['token', '--config', configPath, '--json']);
       expect(JSON.parse(json)).toMatchObject({
         tokens: [
           {
-            id: 'codex',
-            name: 'Codex CLI',
-            description: 'Local Codex token',
+            name: 'codex',
+            scope: 'notes:read',
+            client: null,
+            createdAt: expect.any(String),
+            lastUsedAt: null,
             expiresAt: expect.any(String),
-            permissions: [{ path: '/notes/**', actions: ['search', 'read'] }],
           },
         ],
       });
+      await fs.writeFile(path.join(tmp, 'audit.log'), `${JSON.stringify({
+        ts: new Date(Date.now() - 12 * 60 * 1000).toISOString(),
+        event: 'token.use',
+        connectorId: 'mvmt',
+        tool: 'search',
+        clientId: 'codex',
+        name: 'codex',
+        argKeys: [],
+        argPreview: '{}',
+        isError: false,
+        durationMs: 1,
+      })}\n`, 'utf-8');
+      const { stdout: listWithUse } = await runCli(['token', '--config', configPath]);
+      expect(listWithUse).toContain('12 minutes ago');
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('shows a safe empty state for token listing', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    const configPath = path.join(tmp, 'config.yaml');
+    try {
+      await saveConfig(configPath, parseConfig({ version: 1 }));
+
+      const { stdout } = await runCli(['token', '--config', configPath]);
+      expect(stdout).toContain('No tokens configured.');
+      expect(stdout).toContain('Create one with: mvmt token add <name>');
+
+      const { stdout: json } = await runCli(['token', '--config', configPath, '--json']);
+      expect(JSON.parse(json)).toEqual({ tokens: [] });
     } finally {
       await fs.rm(tmp, { recursive: true, force: true });
     }
@@ -270,20 +299,19 @@ describe('CLI usability', () => {
         'codex',
         '--config',
         configPath,
-        '--write',
-        '/workspace',
+        '--scope',
+        'workspace:write',
         '--description',
         'Updated token',
-        '--ttl',
+        '--expires',
         'never',
       ]);
-      expect(stdout).toContain('API token codex updated');
+      expect(stdout).toContain('Token updated.');
       expect(stdout).toContain('Existing token value was not changed.');
 
       const { stdout: list } = await runCli(['token', '--config', configPath]);
-      expect(list).toContain('description: Updated token');
-      expect(list).toContain('expires: never');
-      expect(list).toContain('can: search, read, write');
+      expect(list).toContain('workspace:write');
+      expect(list).toContain('never');
     } finally {
       await fs.rm(tmp, { recursive: true, force: true });
     }
@@ -309,11 +337,10 @@ describe('CLI usability', () => {
         '--read',
         '/notes',
       ]);
-      const { stdout } = await runCli(['token', 'rotate', 'codex', '--config', configPath]);
+      const { stdout } = await runCli(['token', 'rotate', 'codex', '--config', configPath, '--yes']);
 
-      expect(stdout).toContain('API token codex updated');
-      expect(stdout).toContain('API token (shown once)');
-      expect(stdout).toContain('token: mvmt_');
+      expect(stdout).toContain('Token rotated.');
+      expect(stdout).toContain('Token:   mvmt_t_');
     } finally {
       await fs.rm(tmp, { recursive: true, force: true });
     }
