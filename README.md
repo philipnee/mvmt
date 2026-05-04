@@ -219,7 +219,8 @@ through OAuth 2.1 + PKCE.
 
 mvmt supports RFC 7591 Dynamic Client Registration. Issued OAuth access tokens
 are audience-bound to the current mvmt resource, so a token minted for one mvmt
-instance cannot be replayed against another.
+instance cannot be replayed against another. OAuth refresh tokens are rotated on
+each use; replaying an old refresh token revokes that refresh-token family.
 
 Claude Desktop is different: it launches mvmt over stdio, so there is no HTTP
 listener and no bearer token header.
@@ -379,12 +380,25 @@ If a client asks for an authorization token, paste the printed `mvmt_t_...`
 value. If a web client sends you through OAuth, paste the same token into the
 mvmt approval page.
 
+`--client` is an intended-client hint checked against the request client label
+or User-Agent. It helps catch misconfiguration, but it is not a cryptographic
+binding if the plaintext token leaks.
+
 Once API tokens are present, `/mcp` becomes strict:
 
 - bearer tokens must match a configured client `tokenHash`;
 - OAuth access tokens inherit the API-token identity selected on the approval page;
 - the session token no longer grants data-plane access;
 - unknown OAuth clients are quarantined with zero permissions.
+
+Policy changes take effect on the next auth request. Narrowing token scope
+(for example write to read, removing a path, or `--no-permissions`) applies to
+existing OAuth grants without reauthorization. Adding access, moving access to a
+different path, or editing `clientBinding` bumps that token's credential version,
+so OAuth access and refresh tokens selected through the old policy stop working.
+`mvmt token rotate <id>` replaces only that API token's secret; `mvmt token
+session-rotate` rotates the internal session token and OAuth signing key,
+revoking OAuth access tokens across clients.
 
 Tunnel mode can start with no API tokens, but MCP data access rejects the
 legacy session token. Add API tokens to grant access. For temporary debugging
@@ -449,6 +463,7 @@ must not match `protect`.
 | `mvmt token` | List scoped API tokens |
 | `mvmt token add [name]` | Create a scoped API token and print it once |
 | `mvmt token edit [id]` | Edit a scoped API token |
+| `mvmt token edit [id] --no-permissions` | Keep a token but remove all data access |
 | `mvmt token rotate [id] --yes` | Replace a scoped API token secret |
 | `mvmt token remove [id]` | Remove a scoped API token |
 | `mvmt token session` | Hidden compatibility command for the internal session token |

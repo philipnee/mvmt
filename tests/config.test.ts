@@ -3,7 +3,7 @@ import fssync from 'fs';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
-import { expandHome, loadConfig, parseConfig, readConfig, saveConfig } from '../src/config/loader.js';
+import { expandHome, loadConfig, parseConfig, readConfig, saveConfig, withConfigLock } from '../src/config/loader.js';
 import {
   DEFAULT_MOUNT_EXCLUDE_PATTERNS,
   DEFAULT_MOUNT_PROTECT_PATTERNS,
@@ -68,6 +68,33 @@ describe('saveConfig', () => {
     expect(stat.mode & 0o777).toBe(0o600);
 
     await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('serializes config mutations with the config lock', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-config-lock-'));
+    const configPath = path.join(dir, 'config.yaml');
+    let active = 0;
+    let maxActive = 0;
+
+    try {
+      await Promise.all([
+        withConfigLock(configPath, async () => {
+          active += 1;
+          maxActive = Math.max(maxActive, active);
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          active -= 1;
+        }),
+        withConfigLock(configPath, async () => {
+          active += 1;
+          maxActive = Math.max(maxActive, active);
+          active -= 1;
+        }),
+      ]);
+
+      expect(maxActive).toBe(1);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 });
 

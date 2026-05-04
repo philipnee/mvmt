@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { confirm, input, select } from '@inquirer/prompts';
 import chalk from 'chalk';
-import { getConfigPath, loadConfig, saveConfig } from '../config/loader.js';
+import { getConfigPath, loadConfig, saveConfig, withConfigLock } from '../config/loader.js';
 import {
   ClientConfig,
   ConfigSchema,
@@ -36,7 +36,9 @@ export interface AddApiTokenOptions extends ApiTokensCommandOptions {
   write?: string[];
 }
 
-export interface EditApiTokenOptions extends AddApiTokenOptions {}
+export interface EditApiTokenOptions extends AddApiTokenOptions {
+  permissions?: boolean;
+}
 
 export interface RemoveApiTokenOptions extends ApiTokensCommandOptions {
   yes?: boolean;
@@ -63,6 +65,7 @@ export interface ApiTokenInput {
   now?: number;
   clientBinding?: string | null;
   permissions: ApiTokenPermissionInput[];
+  replacePermissions?: boolean;
   plaintextToken?: string;
 }
 
@@ -71,6 +74,8 @@ export interface ApiTokenUpdateResult {
   created: boolean;
   plaintextToken?: string;
   client: ClientConfig;
+  credentialVersionChanged?: boolean;
+  permissionsReplaced?: boolean;
 }
 
 interface PolicySource {
@@ -129,8 +134,12 @@ export async function addApiToken(id: string | undefined, options: AddApiTokenOp
       ? apiTokenInputFromOptions(config, id, options)
       : await promptForApiTokenInput(config, id, options);
 
-    const result = addApiTokenToConfig(config, inputValue);
-    await saveConfig(configPath, result.config);
+    const result = await withConfigLock(configPath, async () => {
+      const latest = loadConfig(configPath);
+      const update = addApiTokenToConfig(latest, inputValue);
+      await saveConfig(configPath, update.config);
+      return update;
+    });
     recordTokenLifecycle(configPath, 'token.add', result.config, result.client);
     printApiTokenSaved(configPath, result);
     console.log(chalk.dim('Running mvmt processes load API-token changes on the next auth request.'));
@@ -152,8 +161,12 @@ export async function editApiToken(id: string | undefined, options: EditApiToken
       return;
     }
 
-    const result = editApiTokenInConfig(config, tokenId, inputValue);
-    await saveConfig(configPath, result.config);
+    const result = await withConfigLock(configPath, async () => {
+      const latest = loadConfig(configPath);
+      const update = editApiTokenInConfig(latest, tokenId, inputValue);
+      await saveConfig(configPath, update.config);
+      return update;
+    });
     recordTokenLifecycle(configPath, 'token.edit', result.config, result.client);
     printApiTokenSaved(configPath, result);
     console.log(chalk.dim('Running mvmt processes load API-token changes on the next auth request.'));
@@ -167,7 +180,6 @@ export async function removeApiToken(id: string | undefined, options: RemoveApiT
     const configPath = resolveApiTokensConfigPath(options.config);
     const config = loadConfig(configPath);
     const tokenId = id ?? await promptForApiTokenId(config, 'Remove which API token?');
-    const existing = findTokenClient(config, tokenId);
     const ok = options.yes ? true : await confirmDestructive(
       `This will permanently delete '${tokenId}' and disconnect clients using it.`,
     );
@@ -176,9 +188,14 @@ export async function removeApiToken(id: string | undefined, options: RemoveApiT
       return;
     }
 
-    const nextConfig = removeApiTokenFromConfig(config, tokenId);
-    await saveConfig(configPath, nextConfig);
-    recordTokenLifecycle(configPath, 'token.remove', config, existing);
+    const update = await withConfigLock(configPath, async () => {
+      const latest = loadConfig(configPath);
+      const latestExisting = findTokenClient(latest, tokenId);
+      const nextConfig = removeApiTokenFromConfig(latest, tokenId);
+      await saveConfig(configPath, nextConfig);
+      return { config: latest, client: latestExisting };
+    });
+    recordTokenLifecycle(configPath, 'token.remove', update.config, update.client);
     console.log(chalk.green(`Token '${tokenId}' removed.`));
     console.log(chalk.dim('Running mvmt processes unload API-token changes on the next auth request.'));
   } catch (err) {
@@ -199,10 +216,14 @@ export async function rotateApiToken(id: string | undefined, options: RotateApiT
       return;
     }
 
-    const result = rotateApiTokenInConfig(config, tokenId, undefined, {
-      expires: options.expires ?? options.ttl,
+    const result = await withConfigLock(configPath, async () => {
+      const latest = loadConfig(configPath);
+      const update = rotateApiTokenInConfig(latest, tokenId, undefined, {
+        expires: options.expires ?? options.ttl,
+      });
+      await saveConfig(configPath, update.config);
+      return update;
     });
-    await saveConfig(configPath, result.config);
     recordTokenLifecycle(configPath, 'token.rotate', result.config, result.client);
     printApiTokenSaved(configPath, result);
     console.log(chalk.dim('Running mvmt processes load API-token changes on the next auth request.'));
@@ -281,12 +302,17 @@ export function editApiTokenInConfig(
   const expiresAt = inputValue.expires !== undefined
     ? resolveExpiresAt(inputValue)
     : existing.expiresAt;
-  const permissions = inputValue.permissions.length > 0
-    ? applyPermissionInputs(config, [], inputValue.permissions)
+  const replacePermissions = inputValue.replacePermissions ?? inputValue.permissions.length > 0;
+  const permissions = replacePermissions
+    ? applyPermissionInputs(config, [], inputValue.permissions, { allowEmpty: true })
     : existing.permissions;
   const clientBinding = inputValue.clientBinding !== undefined
     ? normalizeClientBinding(inputValue.clientBinding)
     : existing.clientBinding;
+  const shouldBumpCredentialVersion = (
+    (replacePermissions && !permissionsSubsetOf(permissions, existing.permissions))
+    || (inputValue.clientBinding !== undefined && clientBinding !== existing.clientBinding)
+  );
   const { expiresAt: _oldExpiresAt, clientBinding: _oldClientBinding, ...existingWithoutOptionalPolicy } = existing;
   const nextClient: ClientConfig = {
     ...existingWithoutOptionalPolicy,
@@ -294,6 +320,7 @@ export function editApiTokenInConfig(
     name,
     description,
     ...(expiresAt ? { expiresAt } : {}),
+    ...(shouldBumpCredentialVersion ? { credentialVersion: (existing.credentialVersion ?? 1) + 1 } : {}),
     ...(clientBinding ? { clientBinding } : {}),
     auth: existing.auth,
     rawToolsEnabled: existing.rawToolsEnabled,
@@ -304,7 +331,13 @@ export function editApiTokenInConfig(
     nextClient,
   ];
   const nextConfig = ConfigSchema.parse({ ...config, clients });
-  return { config: nextConfig, created: false, client: nextClient };
+  return {
+    config: nextConfig,
+    created: false,
+    client: nextClient,
+    credentialVersionChanged: shouldBumpCredentialVersion,
+    permissionsReplaced: replacePermissions,
+  };
 }
 
 export function rotateApiTokenInConfig(
@@ -350,11 +383,15 @@ export function removeApiTokenFromConfig(config: MvmtConfig, id: string): MvmtCo
 function apiTokenInputFromOptions(
   config: MvmtConfig,
   id: string | undefined,
-  options: AddApiTokenOptions,
+  options: AddApiTokenOptions | EditApiTokenOptions,
   parseOptions: { requirePermissions?: boolean } = {},
 ): ApiTokenInput {
   if (!id) throw new Error('Token name is required when using non-interactive token options.');
   const permissions = parsePermissionInputsFromOptions(config, options);
+  const noPermissions = 'permissions' in options && options.permissions === false;
+  if (noPermissions && permissions.length > 0) {
+    throw new Error('Use either --no-permissions or --scope/--read/--write, not both.');
+  }
   if (permissions.length === 0 && parseOptions.requirePermissions !== false) {
     throw new Error('Add at least one scope with --scope <scope> (for example all:read).');
   }
@@ -367,6 +404,7 @@ function apiTokenInputFromOptions(
     expires,
     clientBinding: options.client !== undefined ? normalizeClientBindingOption(options.client) : undefined,
     permissions,
+    replacePermissions: permissions.length > 0 || noPermissions,
   };
 }
 
@@ -484,6 +522,9 @@ async function promptForPermissionInputs(
   if (sources.length === 0) {
     throw new Error('No enabled connectors or mounts. Add a mount with `mvmt mounts add <name> <folder>` first.');
   }
+  if (mode === 'write' && sources.every((source) => !source.writeAccess)) {
+    throw new Error('No writable connectors or mounts. Enable write access first with `mvmt mounts edit <name> --write`.');
+  }
   const inputs: ApiTokenPermissionInput[] = [];
   let addMore = true;
   while (addMore) {
@@ -492,9 +533,12 @@ async function promptForPermissionInputs(
       choices: sources.map((candidate) => ({
         name: `${candidate.id} (${candidate.path}, ${candidate.writeAccess ? 'read/write' : 'read-only'})`,
         value: candidate,
+        ...(mode === 'write' && !candidate.writeAccess
+          ? { disabled: 'read-only; enable write access on the mount first' }
+          : {}),
       })),
     });
-    inputs.push({ source: source.id, mode: source.writeAccess ? mode : 'read' });
+    inputs.push({ source: source.id, mode });
     addMore = await confirm({ message: 'Add another connector permission?', default: false });
   }
   if (inputs.length === 0) throw new Error('API token needs at least one scope.');
@@ -540,8 +584,12 @@ function applyPermissionInputs(
   config: MvmtConfig,
   currentPermissions: readonly PermissionConfig[],
   inputs: readonly ApiTokenPermissionInput[],
+  options: { allowEmpty?: boolean } = {},
 ): PermissionConfig[] {
-  if (inputs.length === 0) throw new Error('API token needs at least one scope.');
+  if (inputs.length === 0) {
+    if (options.allowEmpty) return [];
+    throw new Error('API token needs at least one scope.');
+  }
   const next = [...currentPermissions];
   for (const inputValue of inputs) {
     const permission = permissionForInput(config, inputValue);
@@ -553,6 +601,32 @@ function applyPermissionInputs(
     }
   }
   return next;
+}
+
+function permissionsSubsetOf(
+  candidate: readonly PermissionConfig[],
+  existing: readonly PermissionConfig[],
+): boolean {
+  return candidate.every((candidatePermission) => (
+    existing.some((existingPermission) => permissionCovers(existingPermission, candidatePermission))
+  ));
+}
+
+function permissionCovers(existing: PermissionConfig, candidate: PermissionConfig): boolean {
+  if (!pathPatternCovers(existing.path, candidate.path)) return false;
+  const existingActions = new Set(existing.actions);
+  return candidate.actions.every((action) => existingActions.has(action));
+}
+
+function pathPatternCovers(existingPath: string, candidatePath: string): boolean {
+  if (existingPath === '/**') return true;
+  if (existingPath === candidatePath) return true;
+  if (!existingPath.endsWith('/**')) return false;
+
+  const existingBase = existingPath.slice(0, -3);
+  if (!existingBase) return true;
+  if (candidatePath === existingBase) return true;
+  return candidatePath.startsWith(`${existingBase}/`);
 }
 
 function permissionForInput(config: MvmtConfig, inputValue: ApiTokenPermissionInput): PermissionConfig {
@@ -693,6 +767,13 @@ export function printApiTokenSaved(configPath: string, result: ApiTokenUpdateRes
   } else {
     console.log('');
     console.log(chalk.dim('Existing token value was not changed.'));
+    if (result.credentialVersionChanged) {
+      console.log(chalk.dim('Existing OAuth grants must reauthorize because this edit added access or changed client binding.'));
+    } else if (result.permissionsReplaced) {
+      console.log(chalk.dim('Permission edit did not add access; existing OAuth grants keep working and current limits apply on the next request.'));
+    } else {
+      console.log(chalk.dim('Existing OAuth grants keep working.'));
+    }
   }
   console.log(chalk.dim(`Config: ${configPath}`));
 }
@@ -711,7 +792,7 @@ function hasAddOptions(options: AddApiTokenOptions): boolean {
 }
 
 function hasEditOptions(options: EditApiTokenOptions): boolean {
-  return hasAddOptions(options);
+  return hasAddOptions(options) || options.permissions === false;
 }
 
 function resolveExpiresAt(inputValue: ApiTokenInput): string | undefined {

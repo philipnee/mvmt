@@ -108,3 +108,11 @@ Audit log rotation is manual today.
 - Run `mvmt doctor`, `mvmt mounts list`, and `mvmt token` when debugging access.
 - Revoke or rotate a token when a client is lost, compromised, or no longer
   needed.
+- Treat `--client` as an intended-client hint, not a security boundary. It can
+  catch accidental use by the wrong client, but the plaintext token remains the
+  credential to protect.
+- Use `mvmt token edit <id> --no-permissions` to keep a token record while
+  removing all data access.
+- Use `mvmt token rotate <id>` to invalidate one API token. Use `mvmt token
+  session-rotate` when you need to rotate the internal session token and OAuth
+  signing key across clients.

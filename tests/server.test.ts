@@ -1731,6 +1731,71 @@ describe('startHttpServer lifecycle', () => {
     }
   });
 
+  it('denies writes after a token changes from path-specific write to all read', async () => {
+    const { index, tmp: indexTmp } = await createTextIndexServerFixture();
+    const router = new ToolRouter(undefined, [], { contextIndex: index });
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    let clients: ClientConfig[] = [
+      {
+        id: 'claude',
+        name: 'Claude',
+        auth: { type: 'token', tokenHash: hashApiToken('claude-token') },
+        rawToolsEnabled: true,
+        permissions: [{ path: '/workspace/**', actions: ['search', 'read', 'write'] }],
+      },
+    ];
+    const server = await startHttpServer(router, {
+      port: 0,
+      tokenPath,
+      clients: () => clients,
+    });
+
+    try {
+      const sessionId = await initializeMcpSession(server.port, 'claude-token');
+      const initialWrite = await mcpJsonRequest(server.port, 'claude-token', sessionId, 2, 'tools/call', {
+        name: 'write',
+        arguments: { path: '/workspace/before-edit.md', content: 'before edit' },
+      });
+      expect(initialWrite.result.isError).not.toBe(true);
+
+      const current = clients[0]!;
+      clients = [
+        {
+          ...current,
+          permissions: [{ path: '/**', actions: ['search', 'read'] }],
+        },
+      ];
+
+      const listTools = await mcpJsonRequest(server.port, 'claude-token', sessionId, 3, 'tools/list', {});
+      expect(listTools.result.tools.map((tool: { name: string }) => tool.name)).toEqual([
+        'search',
+        'list',
+        'read',
+      ]);
+
+      const listMounts = await mcpJsonRequest(server.port, 'claude-token', sessionId, 4, 'tools/call', {
+        name: 'list',
+        arguments: {},
+      });
+      expect(JSON.parse(listMounts.result.content[0].text).entries).toEqual([
+        expect.objectContaining({ path: '/workspace', write_access: false }),
+      ]);
+
+      const deniedWrite = await mcpJsonRequest(server.port, 'claude-token', sessionId, 5, 'tools/call', {
+        name: 'write',
+        arguments: { path: '/workspace/after-edit.md', content: 'after edit' },
+      });
+      expect(deniedWrite.result.isError).toBe(true);
+      expect(deniedWrite.result.content[0].text).toContain('missing_permission path=/workspace/after-edit.md action=write');
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+      fs.rmSync(indexTmp, { recursive: true, force: true });
+    }
+  });
+
   it('serves mount tools over MCP for clients without raw tool access', async () => {
     const { index, tmp: indexTmp } = await createTextIndexServerFixture({
       mountName: 'notes',

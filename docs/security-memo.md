@@ -66,12 +66,25 @@ Scoped bearer credentials use API tokens:
 mvmt token add
 mvmt token list
 mvmt token edit
+mvmt token edit <id> --no-permissions
 mvmt token rotate
 mvmt token remove
 ```
 
 The plaintext API token is printed once. mvmt stores only a scrypt verifier in
 config.
+
+`--client` is an intended-client hint, not a cryptographic binding. It is
+checked against the request client label or User-Agent to catch accidental use by
+the wrong client, but a leaked plaintext token is still the secret to revoke.
+
+Scope edits that add access bump the token credential version, which invalidates
+OAuth grants selected through the old policy on the next request. Narrowing a
+scope, including removing paths or clearing permissions, applies to existing
+grants without reauthorization. Client-binding edits also bump the credential
+version. `mvmt token rotate <id>` rotates one API-token secret. `mvmt token
+session-rotate` rotates the internal session token and OAuth signing key, which
+revokes OAuth access tokens across clients.
 
 ## Per-Client Policy
 

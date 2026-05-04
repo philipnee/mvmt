@@ -1,7 +1,7 @@
 import chalk from 'chalk';
 import { confirm } from '@inquirer/prompts';
 import { TextContextIndex, defaultTextIndexPath } from '../context/text-index.js';
-import { configExists, loadConfig, resolveConfigPath, saveConfig } from '../config/loader.js';
+import { configExists, loadConfig, readConfig, resolveConfigPath, saveConfig } from '../config/loader.js';
 import { MvmtConfig, TunnelSchema } from '../config/schema.js';
 import { createTemporaryFilesystemConfig } from './config.js';
 import { setupConfig } from './init.js';
@@ -263,8 +263,12 @@ export function hasEnabledMounts(config: Pick<MvmtConfig, 'mounts'>): boolean {
 
 export function createLiveClientsResolver(configPath: string, config: MvmtConfig): () => MvmtConfig['clients'] {
   return () => {
-    const latest = loadConfig(configPath);
-    config.clients = latest.clients;
+    try {
+      const latest = readConfig(configPath);
+      config.clients = latest.clients;
+    } catch {
+      // Keep the last known-good policy until the next successful reload.
+    }
     return config.clients;
   };
 }

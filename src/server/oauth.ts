@@ -36,6 +36,8 @@ export interface AccessToken {
 
 export interface RefreshToken {
   token: string;
+  id: string;
+  familyId: string;
   clientId: string;
   mvmtClientId?: string;
   mvmtClientCredentialVersion?: number;
@@ -86,7 +88,15 @@ export interface OAuthStoreOptions {
   // outstanding tokens without requiring a server restart.
   signingKey?: string | (() => string);
   clientsPath?: string;
+  refreshTokensPath?: string;
   now?: () => number;
+}
+
+interface ActiveRefreshTokenRecord {
+  familyId: string;
+  tokenId: string;
+  clientId: string;
+  expiresAt: number;
 }
 
 const DEFAULT_CODE_TTL_MS = 10 * 60 * 1000;
@@ -118,7 +128,10 @@ export class OAuthStore {
   private readonly maxRedirectUrisPerClient: number;
   private readonly resolveSigningKey: () => string;
   private readonly clientsPath?: string;
+  private readonly refreshTokensPath?: string;
   private readonly now: () => number;
+  private readonly activeRefreshTokens = new Map<string, ActiveRefreshTokenRecord>();
+  private readonly revokedRefreshTokenFamilies = new Set<string>();
 
   constructor(options: OAuthStoreOptions = {}) {
     this.codeTtlMs = options.codeTtlMs ?? DEFAULT_CODE_TTL_MS;
@@ -137,8 +150,10 @@ export class OAuthStore {
       this.resolveSigningKey = () => ephemeral;
     }
     this.clientsPath = options.clientsPath;
+    this.refreshTokensPath = options.refreshTokensPath;
     this.now = options.now ?? Date.now;
     this.loadClientsFromDisk();
+    this.loadRefreshTokensFromDisk();
   }
 
   get tokenTtlSeconds(): number {
@@ -238,6 +253,76 @@ export class OAuthStore {
     }
   }
 
+  private loadRefreshTokensFromDisk(): void {
+    if (!this.refreshTokensPath) return;
+    let raw: string;
+    try {
+      raw = fs.readFileSync(this.refreshTokensPath, 'utf-8');
+    } catch {
+      return;
+    }
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!parsed || typeof parsed !== 'object') return;
+      const active = (parsed as { active?: unknown }).active;
+      if (Array.isArray(active)) {
+        for (const entry of active) {
+          if (!entry || typeof entry !== 'object') continue;
+          const candidate = entry as Partial<ActiveRefreshTokenRecord>;
+          if (
+            typeof candidate.familyId !== 'string'
+            || typeof candidate.tokenId !== 'string'
+            || typeof candidate.clientId !== 'string'
+            || typeof candidate.expiresAt !== 'number'
+            || !Number.isFinite(candidate.expiresAt)
+          ) {
+            continue;
+          }
+          if (candidate.expiresAt >= this.now()) {
+            this.activeRefreshTokens.set(candidate.familyId, {
+              familyId: candidate.familyId,
+              tokenId: candidate.tokenId,
+              clientId: candidate.clientId,
+              expiresAt: candidate.expiresAt,
+            });
+          }
+        }
+      }
+      const revokedFamilies = (parsed as { revokedFamilies?: unknown }).revokedFamilies;
+      if (Array.isArray(revokedFamilies)) {
+        for (const familyId of revokedFamilies) {
+          if (typeof familyId === 'string' && familyId.length > 0) {
+            this.revokedRefreshTokenFamilies.add(familyId);
+          }
+        }
+      }
+    } catch {
+      // Ignore corrupt refresh state; replayed refresh tokens fail closed.
+    }
+  }
+
+  private persistRefreshTokens(): void {
+    if (!this.refreshTokensPath) return;
+    const data = JSON.stringify({
+      active: [...this.activeRefreshTokens.values()],
+      revokedFamilies: [...this.revokedRefreshTokenFamilies],
+    });
+    try {
+      fs.mkdirSync(path.dirname(this.refreshTokensPath), { recursive: true });
+      const tempPath = `${this.refreshTokensPath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+      fs.writeFileSync(tempPath, data, { mode: 0o600 });
+      if (process.platform !== 'win32') {
+        fs.chmodSync(tempPath, 0o600);
+      }
+      fs.renameSync(tempPath, this.refreshTokensPath);
+    } catch (err) {
+      throw new OAuthError(
+        'server_error',
+        err instanceof Error ? err.message : 'Failed to persist OAuth refresh-token state',
+      );
+    }
+  }
+
   issueCode(input: IssueCodeInput): AuthorizationCode {
     const code = crypto.randomBytes(32).toString('base64url');
     const entry: AuthorizationCode = {
@@ -311,6 +396,7 @@ export class OAuthStore {
     if (refreshToken.clientId !== input.clientId) {
       throw new OAuthError('invalid_grant', 'Client mismatch for refresh token');
     }
+    this.validateActiveRefreshToken(refreshToken);
 
     return this.issueTokenGrant({
       clientId: refreshToken.clientId,
@@ -318,10 +404,11 @@ export class OAuthStore {
       mvmtClientCredentialVersion: refreshToken.mvmtClientCredentialVersion,
       scope: resolveRefreshScope(refreshToken.scope, input.scope),
       audience: refreshToken.audience,
+      refreshFamilyId: refreshToken.familyId,
     });
   }
 
-  issueTokenGrant(input: { clientId: string; mvmtClientId?: string; mvmtClientCredentialVersion?: number; scope?: string; audience?: string }): TokenGrant {
+  issueTokenGrant(input: { clientId: string; mvmtClientId?: string; mvmtClientCredentialVersion?: number; scope?: string; audience?: string; refreshFamilyId?: string }): TokenGrant {
     return {
       accessToken: this.issueAccessToken(input),
       refreshToken: this.issueRefreshToken(input),
@@ -350,9 +437,13 @@ export class OAuthStore {
     };
   }
 
-  issueRefreshToken(input: { clientId: string; mvmtClientId?: string; mvmtClientCredentialVersion?: number; scope?: string; audience?: string }): RefreshToken {
+  issueRefreshToken(input: { clientId: string; mvmtClientId?: string; mvmtClientCredentialVersion?: number; scope?: string; audience?: string; refreshFamilyId?: string }): RefreshToken {
     const expiresAt = this.now() + this.refreshTokenTtlMs;
+    const id = crypto.randomBytes(16).toString('base64url');
+    const familyId = input.refreshFamilyId ?? crypto.randomBytes(16).toString('base64url');
     const token = this.issueSignedToken(REFRESH_TOKEN_PREFIX, {
+      jti: id,
+      familyId,
       clientId: input.clientId,
       mvmtClientId: input.mvmtClientId,
       mvmtClientCredentialVersion: input.mvmtClientCredentialVersion,
@@ -360,9 +451,28 @@ export class OAuthStore {
       aud: input.audience,
       expiresAt,
     });
+    const previousActive = this.activeRefreshTokens.get(familyId);
+    this.activeRefreshTokens.set(familyId, {
+      familyId,
+      tokenId: id,
+      clientId: input.clientId,
+      expiresAt,
+    });
+    try {
+      this.persistRefreshTokens();
+    } catch (err) {
+      if (previousActive) {
+        this.activeRefreshTokens.set(familyId, previousActive);
+      } else {
+        this.activeRefreshTokens.delete(familyId);
+      }
+      throw err;
+    }
 
     return {
       token,
+      id,
+      familyId,
       clientId: input.clientId,
       mvmtClientId: input.mvmtClientId,
       mvmtClientCredentialVersion: input.mvmtClientCredentialVersion,
@@ -406,6 +516,20 @@ export class OAuthStore {
     for (const [code, entry] of this.codes) {
       if (entry.expiresAt < now || entry.consumed) this.codes.delete(code);
     }
+    let refreshStateChanged = false;
+    for (const [familyId, entry] of this.activeRefreshTokens) {
+      if (entry.expiresAt < now) {
+        this.activeRefreshTokens.delete(familyId);
+        refreshStateChanged = true;
+      }
+    }
+    if (refreshStateChanged) {
+      try {
+        this.persistRefreshTokens();
+      } catch {
+        // Expired entries were already removed in memory; future writes retry persistence.
+      }
+    }
   }
 
   private parseAccessToken(token: string): AccessToken | undefined {
@@ -425,8 +549,11 @@ export class OAuthStore {
   private parseRefreshToken(token: string): RefreshToken | undefined {
     const parsed = this.parseSignedToken(token, REFRESH_TOKEN_PREFIX);
     if (!parsed) return undefined;
+    if (!parsed.jti || !parsed.familyId) return undefined;
     return {
       token,
+      id: parsed.jti,
+      familyId: parsed.familyId,
       clientId: parsed.clientId,
       mvmtClientId: parsed.mvmtClientId,
       mvmtClientCredentialVersion: parsed.mvmtClientCredentialVersion,
@@ -436,14 +563,43 @@ export class OAuthStore {
     };
   }
 
+  private validateActiveRefreshToken(refreshToken: RefreshToken): void {
+    const active = this.activeRefreshTokens.get(refreshToken.familyId);
+    if (this.revokedRefreshTokenFamilies.has(refreshToken.familyId)) {
+      throw new OAuthError('invalid_grant', 'Refresh token family was revoked');
+    }
+    if (!active) {
+      throw new OAuthError('invalid_grant', 'Refresh token not found');
+    }
+    if (active.expiresAt < this.now()) {
+      this.activeRefreshTokens.delete(refreshToken.familyId);
+      this.persistRefreshTokens();
+      throw new OAuthError('invalid_grant', 'Refresh token expired');
+    }
+    if (active.clientId !== refreshToken.clientId) {
+      this.revokeRefreshTokenFamily(refreshToken.familyId);
+      throw new OAuthError('invalid_grant', 'Client mismatch for refresh token');
+    }
+    if (active.tokenId !== refreshToken.id) {
+      this.revokeRefreshTokenFamily(refreshToken.familyId);
+      throw new OAuthError('invalid_grant', 'Refresh token already used');
+    }
+  }
+
+  private revokeRefreshTokenFamily(familyId: string): void {
+    this.activeRefreshTokens.delete(familyId);
+    this.revokedRefreshTokenFamilies.add(familyId);
+    this.persistRefreshTokens();
+  }
+
   private issueSignedToken(
     prefix: string,
-    payloadObject: { clientId: string; mvmtClientId?: string; mvmtClientCredentialVersion?: number; scope?: string; aud?: string; expiresAt: number },
+    payloadObject: { jti?: string; familyId?: string; clientId: string; mvmtClientId?: string; mvmtClientCredentialVersion?: number; scope?: string; aud?: string; expiresAt: number },
   ): string {
     const payload = Buffer.from(
       JSON.stringify({
         ...payloadObject,
-        jti: crypto.randomBytes(16).toString('base64url'),
+        jti: payloadObject.jti ?? crypto.randomBytes(16).toString('base64url'),
       }),
       'utf-8',
     ).toString('base64url');
@@ -456,7 +612,7 @@ export class OAuthStore {
   private parseSignedToken(
     token: string,
     expectedPrefix: string,
-  ): { clientId: string; mvmtClientId?: string; mvmtClientCredentialVersion?: number; scope?: string; aud?: string; expiresAt: number } | undefined {
+  ): { jti?: string; familyId?: string; clientId: string; mvmtClientId?: string; mvmtClientCredentialVersion?: number; scope?: string; aud?: string; expiresAt: number } | undefined {
     const parts = token.split('.');
     if (parts.length !== 3 || parts[0] !== expectedPrefix) return undefined;
 
@@ -472,9 +628,13 @@ export class OAuthStore {
         mvmtClientCredentialVersion?: unknown;
         scope?: unknown;
         aud?: unknown;
+        jti?: unknown;
+        familyId?: unknown;
         expiresAt?: unknown;
       };
       if (typeof decoded.clientId !== 'string') return undefined;
+      if (decoded.jti !== undefined && typeof decoded.jti !== 'string') return undefined;
+      if (decoded.familyId !== undefined && typeof decoded.familyId !== 'string') return undefined;
       if (decoded.mvmtClientId !== undefined && typeof decoded.mvmtClientId !== 'string') return undefined;
       const mvmtClientCredentialVersion = decoded.mvmtClientCredentialVersion;
       if (
@@ -490,6 +650,8 @@ export class OAuthStore {
       if (typeof decoded.expiresAt !== 'number' || !Number.isFinite(decoded.expiresAt)) return undefined;
       if (decoded.expiresAt < this.now()) return undefined;
       return {
+        jti: decoded.jti,
+        familyId: decoded.familyId,
         clientId: decoded.clientId,
         mvmtClientId: decoded.mvmtClientId,
         mvmtClientCredentialVersion,
