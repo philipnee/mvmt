@@ -27,7 +27,13 @@ export const listTool: ContextToolModule = {
     const entries = await index.list(inputPath);
     return jsonResult({
       path: inputPath,
-      entries: entries.filter((entry) => access.pathMayExposeEntry(entry.path, 'read')),
+      entries: entries
+        .filter((entry) => access.pathMayExposeEntry(entry.path, 'read'))
+        .map((entry) => (
+          entry.write_access === undefined
+            ? entry
+            : { ...entry, write_access: entry.write_access && access.pathAllowed(entry.path, 'write') }
+        )),
     });
   },
 };
