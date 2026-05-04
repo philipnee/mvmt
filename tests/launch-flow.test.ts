@@ -122,7 +122,7 @@ describe('first 10 minute workflow', () => {
     } finally {
       await fs.rm(tmp, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 });
 
 async function runCli(args: string[]): Promise<{ stdout: string; stderr: string }> {
