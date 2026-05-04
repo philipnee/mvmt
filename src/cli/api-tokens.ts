@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { confirm, input, select } from '@inquirer/prompts';
 import chalk from 'chalk';
-import { getConfigPath, loadConfig, saveConfig } from '../config/loader.js';
+import { getConfigPath, loadConfig, saveConfig, withConfigLock } from '../config/loader.js';
 import {
   ClientConfig,
   ConfigSchema,
@@ -129,8 +129,12 @@ export async function addApiToken(id: string | undefined, options: AddApiTokenOp
       ? apiTokenInputFromOptions(config, id, options)
       : await promptForApiTokenInput(config, id, options);
 
-    const result = addApiTokenToConfig(config, inputValue);
-    await saveConfig(configPath, result.config);
+    const result = await withConfigLock(configPath, async () => {
+      const latest = loadConfig(configPath);
+      const update = addApiTokenToConfig(latest, inputValue);
+      await saveConfig(configPath, update.config);
+      return update;
+    });
     recordTokenLifecycle(configPath, 'token.add', result.config, result.client);
     printApiTokenSaved(configPath, result);
     console.log(chalk.dim('Running mvmt processes load API-token changes on the next auth request.'));
@@ -152,8 +156,12 @@ export async function editApiToken(id: string | undefined, options: EditApiToken
       return;
     }
 
-    const result = editApiTokenInConfig(config, tokenId, inputValue);
-    await saveConfig(configPath, result.config);
+    const result = await withConfigLock(configPath, async () => {
+      const latest = loadConfig(configPath);
+      const update = editApiTokenInConfig(latest, tokenId, inputValue);
+      await saveConfig(configPath, update.config);
+      return update;
+    });
     recordTokenLifecycle(configPath, 'token.edit', result.config, result.client);
     printApiTokenSaved(configPath, result);
     console.log(chalk.dim('Running mvmt processes load API-token changes on the next auth request.'));
@@ -176,9 +184,14 @@ export async function removeApiToken(id: string | undefined, options: RemoveApiT
       return;
     }
 
-    const nextConfig = removeApiTokenFromConfig(config, tokenId);
-    await saveConfig(configPath, nextConfig);
-    recordTokenLifecycle(configPath, 'token.remove', config, existing);
+    const update = await withConfigLock(configPath, async () => {
+      const latest = loadConfig(configPath);
+      const latestExisting = findTokenClient(latest, tokenId);
+      const nextConfig = removeApiTokenFromConfig(latest, tokenId);
+      await saveConfig(configPath, nextConfig);
+      return { config: latest, client: latestExisting };
+    });
+    recordTokenLifecycle(configPath, 'token.remove', update.config, update.client);
     console.log(chalk.green(`Token '${tokenId}' removed.`));
     console.log(chalk.dim('Running mvmt processes unload API-token changes on the next auth request.'));
   } catch (err) {
@@ -199,10 +212,14 @@ export async function rotateApiToken(id: string | undefined, options: RotateApiT
       return;
     }
 
-    const result = rotateApiTokenInConfig(config, tokenId, undefined, {
-      expires: options.expires ?? options.ttl,
+    const result = await withConfigLock(configPath, async () => {
+      const latest = loadConfig(configPath);
+      const update = rotateApiTokenInConfig(latest, tokenId, undefined, {
+        expires: options.expires ?? options.ttl,
+      });
+      await saveConfig(configPath, update.config);
+      return update;
     });
-    await saveConfig(configPath, result.config);
     recordTokenLifecycle(configPath, 'token.rotate', result.config, result.client);
     printApiTokenSaved(configPath, result);
     console.log(chalk.dim('Running mvmt processes load API-token changes on the next auth request.'));

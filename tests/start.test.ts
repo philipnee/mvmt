@@ -55,4 +55,30 @@ describe('start helpers', () => {
     expect(resolveClients()?.map((client) => client.id)).toEqual(['new-token']);
     expect(config.clients?.map((client) => client.id)).toEqual(['new-token']);
   });
+
+  it('keeps the previous client policy when live config reload fails', async () => {
+    const config = parseConfig({
+      version: 1,
+      mounts: [
+        { name: 'notes', type: 'local_folder', path: '/notes', root: tmp },
+      ],
+      clients: [
+        {
+          id: 'known-good',
+          name: 'Known good',
+          auth: { type: 'token', tokenHash: hashApiToken('known-good') },
+          permissions: [{ path: '/notes/**', actions: ['search', 'read'] }],
+        },
+      ],
+    });
+    await saveConfig(configPath, config);
+    const resolveClients = createLiveClientsResolver(configPath, config);
+
+    expect(resolveClients()?.map((client) => client.id)).toEqual(['known-good']);
+
+    await fs.writeFile(configPath, 'version: [', 'utf-8');
+
+    expect(resolveClients()?.map((client) => client.id)).toEqual(['known-good']);
+    expect(config.clients?.map((client) => client.id)).toEqual(['known-good']);
+  });
 });
