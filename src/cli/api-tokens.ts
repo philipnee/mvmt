@@ -74,6 +74,8 @@ export interface ApiTokenUpdateResult {
   created: boolean;
   plaintextToken?: string;
   client: ClientConfig;
+  credentialVersionChanged?: boolean;
+  permissionsReplaced?: boolean;
 }
 
 interface PolicySource {
@@ -308,7 +310,7 @@ export function editApiTokenInConfig(
     ? normalizeClientBinding(inputValue.clientBinding)
     : existing.clientBinding;
   const shouldBumpCredentialVersion = (
-    (replacePermissions && !permissionsEqual(existing.permissions, permissions))
+    (replacePermissions && !permissionsSubsetOf(permissions, existing.permissions))
     || (inputValue.clientBinding !== undefined && clientBinding !== existing.clientBinding)
   );
   const { expiresAt: _oldExpiresAt, clientBinding: _oldClientBinding, ...existingWithoutOptionalPolicy } = existing;
@@ -329,7 +331,13 @@ export function editApiTokenInConfig(
     nextClient,
   ];
   const nextConfig = ConfigSchema.parse({ ...config, clients });
-  return { config: nextConfig, created: false, client: nextClient };
+  return {
+    config: nextConfig,
+    created: false,
+    client: nextClient,
+    credentialVersionChanged: shouldBumpCredentialVersion,
+    permissionsReplaced: replacePermissions,
+  };
 }
 
 export function rotateApiTokenInConfig(
@@ -595,14 +603,30 @@ function applyPermissionInputs(
   return next;
 }
 
-function permissionsEqual(left: readonly PermissionConfig[], right: readonly PermissionConfig[]): boolean {
-  return JSON.stringify(normalizePermissionsForCompare(left)) === JSON.stringify(normalizePermissionsForCompare(right));
+function permissionsSubsetOf(
+  candidate: readonly PermissionConfig[],
+  existing: readonly PermissionConfig[],
+): boolean {
+  return candidate.every((candidatePermission) => (
+    existing.some((existingPermission) => permissionCovers(existingPermission, candidatePermission))
+  ));
 }
 
-function normalizePermissionsForCompare(permissions: readonly PermissionConfig[]): Array<{ path: string; actions: string[] }> {
-  return permissions
-    .map((permission) => ({ path: permission.path, actions: [...permission.actions].sort() }))
-    .sort((a, b) => a.path.localeCompare(b.path));
+function permissionCovers(existing: PermissionConfig, candidate: PermissionConfig): boolean {
+  if (!pathPatternCovers(existing.path, candidate.path)) return false;
+  const existingActions = new Set(existing.actions);
+  return candidate.actions.every((action) => existingActions.has(action));
+}
+
+function pathPatternCovers(existingPath: string, candidatePath: string): boolean {
+  if (existingPath === '/**') return true;
+  if (existingPath === candidatePath) return true;
+  if (!existingPath.endsWith('/**')) return false;
+
+  const existingBase = existingPath.slice(0, -3);
+  if (!existingBase) return true;
+  if (candidatePath === existingBase) return true;
+  return candidatePath.startsWith(`${existingBase}/`);
 }
 
 function permissionForInput(config: MvmtConfig, inputValue: ApiTokenPermissionInput): PermissionConfig {
@@ -743,6 +767,13 @@ export function printApiTokenSaved(configPath: string, result: ApiTokenUpdateRes
   } else {
     console.log('');
     console.log(chalk.dim('Existing token value was not changed.'));
+    if (result.credentialVersionChanged) {
+      console.log(chalk.dim('Existing OAuth grants must reauthorize because this edit added access or changed client binding.'));
+    } else if (result.permissionsReplaced) {
+      console.log(chalk.dim('Permission edit did not add access; existing OAuth grants keep working and current limits apply on the next request.'));
+    } else {
+      console.log(chalk.dim('Existing OAuth grants keep working.'));
+    }
   }
   console.log(chalk.dim(`Config: ${configPath}`));
 }

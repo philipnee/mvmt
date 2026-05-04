@@ -308,10 +308,52 @@ describe('CLI usability', () => {
       ]);
       expect(stdout).toContain('Token updated.');
       expect(stdout).toContain('Existing token value was not changed.');
+      expect(stdout).toContain('Existing OAuth grants must reauthorize because this edit added access or changed client binding.');
 
       const { stdout: list } = await runCli(['token', '--config', configPath]);
       expect(list).toContain('workspace:write');
       expect(list).toContain('never');
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('explains that narrowing a scoped API token does not require OAuth reauthorization', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    const configPath = path.join(tmp, 'config.yaml');
+    const mountRoot = path.join(tmp, 'workspace');
+    try {
+      await fs.mkdir(mountRoot);
+      await saveConfig(configPath, parseConfig({
+        version: 1,
+        mounts: [{ name: 'workspace', type: 'local_folder', path: '/workspace', root: mountRoot, writeAccess: true }],
+      }));
+
+      await runCli([
+        'token',
+        'add',
+        'codex',
+        '--config',
+        configPath,
+        '--write',
+        '/workspace',
+      ]);
+      const { stdout } = await runCli([
+        'token',
+        'edit',
+        'codex',
+        '--config',
+        configPath,
+        '--scope',
+        'workspace:read',
+      ]);
+
+      expect(stdout).toContain('Token updated.');
+      expect(stdout).toContain('Existing token value was not changed.');
+      expect(stdout).toContain('Permission edit did not add access; existing OAuth grants keep working and current limits apply on the next request.');
+
+      const { stdout: list } = await runCli(['token', '--config', configPath]);
+      expect(list).toContain('workspace:read');
     } finally {
       await fs.rm(tmp, { recursive: true, force: true });
     }

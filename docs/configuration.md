@@ -177,10 +177,12 @@ If present, `/mcp` becomes strict:
 | `rawToolsEnabled` | Legacy field. The mount-only runtime ignores raw proxy tools. Keep `false`. |
 | `permissions` | Virtual path/action grants. |
 
-Editing permissions or `clientBinding` bumps the token credential version so
-existing OAuth grants selected through the previous policy are rejected. To keep
-a token configured while disabling data access, run `mvmt token edit <id>
---no-permissions`.
+Editing permissions takes effect on the next auth request. Narrowing a token
+(for example write to read, removing a path, or `--no-permissions`) keeps
+existing OAuth grants alive and applies the tighter limits immediately. Adding
+access or moving access to a different path bumps the token credential version so
+OAuth grants selected through the previous policy are rejected. Editing
+`clientBinding` also bumps the credential version.
 
 Permission actions are:
 

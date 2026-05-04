@@ -391,13 +391,14 @@ Once API tokens are present, `/mcp` becomes strict:
 - the session token no longer grants data-plane access;
 - unknown OAuth clients are quarantined with zero permissions.
 
-Policy changes take effect on the next auth request. Editing token scope or
-client binding bumps that token's credential version, so existing OAuth access
-and refresh tokens selected through the old policy stop working. Use
-`mvmt token edit <id> --no-permissions` to leave a token configured but grant no
-data access. `mvmt token rotate <id>` replaces only that API token's secret;
-`mvmt token session-rotate` rotates the internal session token and OAuth signing
-key, revoking OAuth access tokens across clients.
+Policy changes take effect on the next auth request. Narrowing token scope
+(for example write to read, removing a path, or `--no-permissions`) applies to
+existing OAuth grants without reauthorization. Adding access, moving access to a
+different path, or editing `clientBinding` bumps that token's credential version,
+so OAuth access and refresh tokens selected through the old policy stop working.
+`mvmt token rotate <id>` replaces only that API token's secret; `mvmt token
+session-rotate` rotates the internal session token and OAuth signing key,
+revoking OAuth access tokens across clients.
 
 Tunnel mode can start with no API tokens, but MCP data access rejects the
 legacy session token. Add API tokens to grant access. For temporary debugging
