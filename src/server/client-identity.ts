@@ -93,7 +93,10 @@ export function resolveClientIdentity(input: ResolveClientIdentityInput): Client
       const selected = input.clients.find(
         (c) => c.id === input.oauthAccessToken?.mvmtClientId && c.auth.type === 'token',
       );
-      return selected && !clientExpired(selected) && clientBindingMatches(selected.clientBinding, input.clientHint ?? oauthClientId)
+      return selected
+        && !clientExpired(selected)
+        && clientCredentialVersion(selected) === accessTokenCredentialVersion(input.oauthAccessToken)
+        && clientBindingMatches(selected.clientBinding, input.clientHint ?? oauthClientId)
         ? identityFromConfig(selected, 'oauth', oauthClientId)
         : undefined;
     }
@@ -139,6 +142,14 @@ export function resolveClientIdentity(input: ResolveClientIdentityInput): Client
 
 function clientExpired(client: ClientConfig): boolean {
   return isExpired(client.expiresAt);
+}
+
+export function clientCredentialVersion(client: Pick<ClientConfig, 'credentialVersion'>): number {
+  return client.credentialVersion ?? 1;
+}
+
+function accessTokenCredentialVersion(token: AccessToken): number {
+  return token.mvmtClientCredentialVersion ?? 1;
 }
 
 export function clientBindingMatches(binding: string | undefined, hint: string | undefined): boolean {

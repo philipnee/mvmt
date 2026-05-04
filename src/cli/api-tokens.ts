@@ -250,6 +250,7 @@ export function addApiTokenToConfig(config: MvmtConfig, inputValue: ApiTokenInpu
     name,
     description,
     createdAt,
+    credentialVersion: 1,
     ...(expiresAt ? { expiresAt } : {}),
     ...(clientBinding ? { clientBinding } : {}),
     auth: {
@@ -322,6 +323,7 @@ export function rotateApiTokenInConfig(
   const nextClient: ClientConfig = {
     ...existingWithoutExpiry,
     ...(expiresAt ? { expiresAt } : {}),
+    credentialVersion: (existing.credentialVersion ?? 1) + 1,
     auth: {
       type: 'token',
       tokenHash: hashApiToken(plaintextToken),

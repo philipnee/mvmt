@@ -37,6 +37,7 @@ describe('API token config helpers', () => {
       name: 'Codex CLI',
       description: 'Used by Codex for the mvmt repo',
       createdAt: '2026-04-29T12:00:00.000Z',
+      credentialVersion: 1,
       expiresAt: '2026-05-06T12:00:00.000Z',
       clientBinding: 'codex',
       auth: { type: 'token' },
@@ -171,6 +172,7 @@ describe('API token config helpers', () => {
           id: 'codex',
           name: 'Codex CLI',
           description: 'keep this',
+          credentialVersion: 4,
           expiresAt: '2026-05-06T12:00:00.000Z',
           auth: { type: 'token', tokenHash: EXISTING_TOKEN_VERIFIER },
           permissions: [{ path: '/notes/**', actions: ['search', 'read'] }],
@@ -186,6 +188,7 @@ describe('API token config helpers', () => {
       id: 'codex',
       name: 'Codex CLI',
       description: 'keep this',
+      credentialVersion: 5,
       expiresAt: '2026-05-06T12:00:00.000Z',
       permissions: [{ path: '/notes/**', actions: ['search', 'read'] }],
     });
@@ -218,6 +221,7 @@ describe('API token config helpers', () => {
     });
 
     expect(result.client.expiresAt).toBe('2026-04-30T06:24:31.469Z');
+    expect(result.client.credentialVersion).toBe(2);
     expect(result.client.auth.type).toBe('token');
     if (result.client.auth.type === 'token') {
       expect(verifyApiToken('new-plaintext-token', result.client.auth.tokenHash)).toBe(true);

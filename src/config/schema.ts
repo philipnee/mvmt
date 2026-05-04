@@ -198,6 +198,7 @@ export const ClientSchema = z.object({
   createdAt: z.string().datetime().optional(),
   lastUsedAt: z.string().datetime().optional(),
   expiresAt: z.string().datetime().optional(),
+  credentialVersion: z.number().int().min(1).optional(),
   clientBinding: z.string().min(1).optional(),
   auth: ClientAuthSchema,
   rawToolsEnabled: z.boolean().default(false),

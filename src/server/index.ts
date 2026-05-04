@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'crypto';
 import { Server as HttpServer } from 'node:http';
 import express, { Request, Response } from 'express';
+import type { AccessToken } from './oauth.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -22,7 +23,15 @@ import {
 } from './oauth.js';
 import { rateLimit } from './rate-limit.js';
 import { ClientConfig } from '../config/schema.js';
-import { attachClientIdentity, ClientIdentity, clientBindingMatches, isQuarantined, readClientIdentity, resolveClientIdentity } from './client-identity.js';
+import {
+  attachClientIdentity,
+  ClientIdentity,
+  clientBindingMatches,
+  clientCredentialVersion,
+  isQuarantined,
+  readClientIdentity,
+  resolveClientIdentity,
+} from './client-identity.js';
 
 // Rate limits are defense-in-depth against brute-force and DoS,
 // primarily meaningful when mvmt is exposed via a tunnel. Auth-gated
@@ -488,6 +497,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     const authCode = oauth.issueCode({
       clientId: params.clientId,
       mvmtClientId: approval.mvmtClientId,
+      mvmtClientCredentialVersion: approval.mvmtClientCredentialVersion,
       redirectUri: params.redirectUri,
       resource: params.resource,
       codeChallenge: params.codeChallenge,
@@ -536,6 +546,13 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
         }
 
         const tokens = oauth.exchangeCode({ code, clientId, redirectUri, resource, codeVerifier });
+        if (!oauthGrantMatchesCurrentClient(
+          tokens.accessToken,
+          resolveClients(options.clients),
+          requestClientHint(req, clientId),
+        )) {
+          throw new OAuthError('invalid_grant', 'Scoped API token was rotated or removed');
+        }
         const tokenDetail = `issued grant=authorization_code aud=${tokens.accessToken.audience ? safeHost(tokens.accessToken.audience) : '(none)'}`;
         logHttpRequest(requestLog, req, 200, 'oauth.token', tokenDetail, clientId);
         res.json({
@@ -558,6 +575,13 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       }
 
       const tokens = oauth.exchangeRefreshToken({ refreshToken, clientId, scope });
+      if (!oauthGrantMatchesCurrentClient(
+        tokens.accessToken,
+        resolveClients(options.clients),
+        requestClientHint(req, clientId),
+      )) {
+        throw new OAuthError('invalid_grant', 'Scoped API token was rotated or removed');
+      }
       const tokenDetail = `issued grant=refresh_token aud=${tokens.accessToken.audience ? safeHost(tokens.accessToken.audience) : '(none)'}`;
       logHttpRequest(requestLog, req, 200, 'oauth.token', tokenDetail, clientId);
       res.json({
@@ -921,7 +945,7 @@ function requestClientHint(req: Request, oauthClientId?: string): string | undef
 }
 
 type AuthorizeApproval =
-  | { ok: true; mvmtClientId?: string }
+  | { ok: true; mvmtClientId?: string; mvmtClientCredentialVersion?: number }
   | { ok: false; phase: string; message: string };
 
 function resolveAuthorizeApproval(
@@ -933,7 +957,13 @@ function resolveAuthorizeApproval(
   const apiTokenRaw = stringField(body.api_token);
   if (apiTokenRaw) {
     const client = findApiTokenClient(apiTokenRaw, clients, clientHint);
-    if (client) return { ok: true, mvmtClientId: client.id };
+    if (client) {
+      return {
+        ok: true,
+        mvmtClientId: client.id,
+        mvmtClientCredentialVersion: clientCredentialVersion(client),
+      };
+    }
     return {
       ok: false,
       phase: 'deny_invalid_api_token',
@@ -969,6 +999,17 @@ function findApiTokenClient(token: string, clients: readonly ClientConfig[], cli
     if (verifyApiToken(token, client.auth.tokenHash)) return client;
   }
   return undefined;
+}
+
+function oauthGrantMatchesCurrentClient(token: AccessToken, clients: readonly ClientConfig[], clientHint?: string): boolean {
+  if (!token.mvmtClientId) return true;
+  const client = clients.find((entry) => entry.id === token.mvmtClientId && entry.auth.type === 'token');
+  return Boolean(
+    client
+      && !isExpired(client.expiresAt)
+      && clientCredentialVersion(client) === (token.mvmtClientCredentialVersion ?? 1)
+      && clientBindingMatches(client.clientBinding, clientHint),
+  );
 }
 
 // Used in request logs for redirect/resource URIs. We log the host only

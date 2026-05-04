@@ -9,6 +9,7 @@ export interface AuthorizationCode {
   code: string;
   clientId: string;
   mvmtClientId?: string;
+  mvmtClientCredentialVersion?: number;
   redirectUri: string;
   resource?: string;
   codeChallenge: string;
@@ -22,6 +23,7 @@ export interface AccessToken {
   token: string;
   clientId: string;
   mvmtClientId?: string;
+  mvmtClientCredentialVersion?: number;
   scope?: string;
   // RFC 8707 audience — the resource this token was minted for. Set
   // to the `resource` parameter the client sent during the authorize
@@ -36,6 +38,7 @@ export interface RefreshToken {
   token: string;
   clientId: string;
   mvmtClientId?: string;
+  mvmtClientCredentialVersion?: number;
   scope?: string;
   audience?: string;
   expiresAt: number;
@@ -49,6 +52,7 @@ export interface TokenGrant {
 export interface IssueCodeInput {
   clientId: string;
   mvmtClientId?: string;
+  mvmtClientCredentialVersion?: number;
   redirectUri: string;
   resource?: string;
   codeChallenge: string;
@@ -240,6 +244,7 @@ export class OAuthStore {
       code,
       clientId: input.clientId,
       mvmtClientId: input.mvmtClientId,
+      mvmtClientCredentialVersion: input.mvmtClientCredentialVersion,
       redirectUri: input.redirectUri,
       resource: input.resource,
       codeChallenge: input.codeChallenge,
@@ -292,6 +297,7 @@ export class OAuthStore {
     return this.issueTokenGrant({
       clientId: entry.clientId,
       mvmtClientId: entry.mvmtClientId,
+      mvmtClientCredentialVersion: entry.mvmtClientCredentialVersion,
       scope: entry.scope,
       audience: entry.resource,
     });
@@ -309,23 +315,25 @@ export class OAuthStore {
     return this.issueTokenGrant({
       clientId: refreshToken.clientId,
       mvmtClientId: refreshToken.mvmtClientId,
+      mvmtClientCredentialVersion: refreshToken.mvmtClientCredentialVersion,
       scope: resolveRefreshScope(refreshToken.scope, input.scope),
       audience: refreshToken.audience,
     });
   }
 
-  issueTokenGrant(input: { clientId: string; mvmtClientId?: string; scope?: string; audience?: string }): TokenGrant {
+  issueTokenGrant(input: { clientId: string; mvmtClientId?: string; mvmtClientCredentialVersion?: number; scope?: string; audience?: string }): TokenGrant {
     return {
       accessToken: this.issueAccessToken(input),
       refreshToken: this.issueRefreshToken(input),
     };
   }
 
-  issueAccessToken(input: { clientId: string; mvmtClientId?: string; scope?: string; audience?: string }): AccessToken {
+  issueAccessToken(input: { clientId: string; mvmtClientId?: string; mvmtClientCredentialVersion?: number; scope?: string; audience?: string }): AccessToken {
     const expiresAt = this.now() + this.tokenTtlMs;
     const token = this.issueSignedToken(ACCESS_TOKEN_PREFIX, {
       clientId: input.clientId,
       mvmtClientId: input.mvmtClientId,
+      mvmtClientCredentialVersion: input.mvmtClientCredentialVersion,
       scope: input.scope,
       aud: input.audience,
       expiresAt,
@@ -335,17 +343,19 @@ export class OAuthStore {
       token,
       clientId: input.clientId,
       mvmtClientId: input.mvmtClientId,
+      mvmtClientCredentialVersion: input.mvmtClientCredentialVersion,
       scope: input.scope,
       audience: input.audience,
       expiresAt,
     };
   }
 
-  issueRefreshToken(input: { clientId: string; mvmtClientId?: string; scope?: string; audience?: string }): RefreshToken {
+  issueRefreshToken(input: { clientId: string; mvmtClientId?: string; mvmtClientCredentialVersion?: number; scope?: string; audience?: string }): RefreshToken {
     const expiresAt = this.now() + this.refreshTokenTtlMs;
     const token = this.issueSignedToken(REFRESH_TOKEN_PREFIX, {
       clientId: input.clientId,
       mvmtClientId: input.mvmtClientId,
+      mvmtClientCredentialVersion: input.mvmtClientCredentialVersion,
       scope: input.scope,
       aud: input.audience,
       expiresAt,
@@ -355,6 +365,7 @@ export class OAuthStore {
       token,
       clientId: input.clientId,
       mvmtClientId: input.mvmtClientId,
+      mvmtClientCredentialVersion: input.mvmtClientCredentialVersion,
       scope: input.scope,
       audience: input.audience,
       expiresAt,
@@ -404,6 +415,7 @@ export class OAuthStore {
       token,
       clientId: parsed.clientId,
       mvmtClientId: parsed.mvmtClientId,
+      mvmtClientCredentialVersion: parsed.mvmtClientCredentialVersion,
       scope: parsed.scope,
       audience: parsed.aud,
       expiresAt: parsed.expiresAt,
@@ -417,6 +429,7 @@ export class OAuthStore {
       token,
       clientId: parsed.clientId,
       mvmtClientId: parsed.mvmtClientId,
+      mvmtClientCredentialVersion: parsed.mvmtClientCredentialVersion,
       scope: parsed.scope,
       audience: parsed.aud,
       expiresAt: parsed.expiresAt,
@@ -425,7 +438,7 @@ export class OAuthStore {
 
   private issueSignedToken(
     prefix: string,
-    payloadObject: { clientId: string; mvmtClientId?: string; scope?: string; aud?: string; expiresAt: number },
+    payloadObject: { clientId: string; mvmtClientId?: string; mvmtClientCredentialVersion?: number; scope?: string; aud?: string; expiresAt: number },
   ): string {
     const payload = Buffer.from(
       JSON.stringify({
@@ -443,7 +456,7 @@ export class OAuthStore {
   private parseSignedToken(
     token: string,
     expectedPrefix: string,
-  ): { clientId: string; mvmtClientId?: string; scope?: string; aud?: string; expiresAt: number } | undefined {
+  ): { clientId: string; mvmtClientId?: string; mvmtClientCredentialVersion?: number; scope?: string; aud?: string; expiresAt: number } | undefined {
     const parts = token.split('.');
     if (parts.length !== 3 || parts[0] !== expectedPrefix) return undefined;
 
@@ -456,12 +469,22 @@ export class OAuthStore {
       const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8')) as {
         clientId?: unknown;
         mvmtClientId?: unknown;
+        mvmtClientCredentialVersion?: unknown;
         scope?: unknown;
         aud?: unknown;
         expiresAt?: unknown;
       };
       if (typeof decoded.clientId !== 'string') return undefined;
       if (decoded.mvmtClientId !== undefined && typeof decoded.mvmtClientId !== 'string') return undefined;
+      const mvmtClientCredentialVersion = decoded.mvmtClientCredentialVersion;
+      if (
+        mvmtClientCredentialVersion !== undefined
+        && (typeof mvmtClientCredentialVersion !== 'number'
+          || !Number.isInteger(mvmtClientCredentialVersion)
+          || mvmtClientCredentialVersion < 1)
+      ) {
+        return undefined;
+      }
       if (decoded.scope !== undefined && typeof decoded.scope !== 'string') return undefined;
       if (decoded.aud !== undefined && typeof decoded.aud !== 'string') return undefined;
       if (typeof decoded.expiresAt !== 'number' || !Number.isFinite(decoded.expiresAt)) return undefined;
@@ -469,6 +492,7 @@ export class OAuthStore {
       return {
         clientId: decoded.clientId,
         mvmtClientId: decoded.mvmtClientId,
+        mvmtClientCredentialVersion,
         scope: decoded.scope,
         aud: decoded.aud,
         expiresAt: decoded.expiresAt,
