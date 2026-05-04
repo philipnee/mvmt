@@ -514,6 +514,9 @@ async function promptForPermissionInputs(
   if (sources.length === 0) {
     throw new Error('No enabled connectors or mounts. Add a mount with `mvmt mounts add <name> <folder>` first.');
   }
+  if (mode === 'write' && sources.every((source) => !source.writeAccess)) {
+    throw new Error('No writable connectors or mounts. Enable write access first with `mvmt mounts edit <name> --write`.');
+  }
   const inputs: ApiTokenPermissionInput[] = [];
   let addMore = true;
   while (addMore) {
@@ -522,9 +525,12 @@ async function promptForPermissionInputs(
       choices: sources.map((candidate) => ({
         name: `${candidate.id} (${candidate.path}, ${candidate.writeAccess ? 'read/write' : 'read-only'})`,
         value: candidate,
+        ...(mode === 'write' && !candidate.writeAccess
+          ? { disabled: 'read-only; enable write access on the mount first' }
+          : {}),
       })),
     });
-    inputs.push({ source: source.id, mode: source.writeAccess ? mode : 'read' });
+    inputs.push({ source: source.id, mode });
     addMore = await confirm({ message: 'Add another connector permission?', default: false });
   }
   if (inputs.length === 0) throw new Error('API token needs at least one scope.');
