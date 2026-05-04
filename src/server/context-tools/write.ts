@@ -10,7 +10,7 @@ export const writeTool: ContextToolModule = {
     sourceId: 'mvmt',
     requiredAction: 'write',
     toolKind: 'semantic',
-    description: 'Create or overwrite one permitted text file. Optionally pass expected_hash to avoid stale writes.',
+    description: 'Use only when the user explicitly asks to create or overwrite a specific permitted text file. Optionally pass expected_hash to avoid stale writes.',
     inputSchema: {
       type: 'object',
       properties: {

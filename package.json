@@ -38,6 +38,7 @@
     "verify": "node scripts/verify.mjs",
     "verify:quick": "node scripts/verify.mjs --no-smoke",
     "verify:release": "node scripts/verify.mjs --audit",
+    "bench:text-index": "npm run build && node scripts/bench-text-index.mjs",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage"
   },

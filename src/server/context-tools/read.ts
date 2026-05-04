@@ -10,7 +10,7 @@ export const readTool: ContextToolModule = {
     sourceId: 'mvmt',
     requiredAction: 'read',
     toolKind: 'semantic',
-    description: 'Read one permitted text file by path.',
+    description: 'Use after search or list when you have a specific permitted file path and need the full file contents.',
     inputSchema: {
       type: 'object',
       properties: {

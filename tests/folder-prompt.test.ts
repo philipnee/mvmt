@@ -3,6 +3,7 @@ import os from 'os';
 import path from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  applyPathCompletion,
   completeDirectoryPath,
   completeFilePath,
   shouldFinishFolderPrompt,
@@ -36,6 +37,13 @@ describe('folder prompt helpers', () => {
     expect(matches).toContain(`${root}${path.sep}Documents${path.sep}`);
     expect(matches).toContain(`${root}${path.sep}Downloads${path.sep}`);
     expect(matches).not.toContain(`${root}${path.sep}Dockerfile${path.sep}`);
+  });
+
+  it('applies unambiguous tab completions and common prefixes', () => {
+    expect(applyPathCompletion('~/co', () => [['~/code/'], '~/co'])).toBe('~/code/');
+    expect(applyPathCompletion('/tmp/pro', () => [['/tmp/project-a/', '/tmp/project-b/'], '/tmp/pro'])).toBe('/tmp/project-');
+    expect(applyPathCompletion('/tmp/project-', () => [['/tmp/project-a/', '/tmp/project-b/'], '/tmp/project-'])).toBeUndefined();
+    expect(applyPathCompletion('/tmp/none', () => [[], '/tmp/none'])).toBeUndefined();
   });
 
   it('completes files when the caller asks for a file path', async () => {

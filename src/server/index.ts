@@ -87,10 +87,23 @@ export interface HttpRequestLogEntry {
   clientId?: string;
 }
 
+export const MVMT_SERVER_INSTRUCTIONS = [
+  'mvmt exposes selected local files through permissioned tools.',
+  '',
+  'Use mvmt when the user asks about their own notes, files, projects, workspace, local docs, or previously mounted content. For content questions, call search first. If a result looks relevant, call read with the returned path before answering.',
+  '',
+  'Use list only to discover available mounts or browse directories. Prefer search over list+read for topic questions.',
+  '',
+  'Do not use mvmt for general web or current-events questions unless the user asks about local files. Never write or remove unless the user explicitly asks to create, overwrite, or delete a specific file. If search returns no useful results, say that instead of inventing local file contents.',
+].join('\n');
+
 export function createMcpServer(router: ToolRouter, clientIdentity?: ClientIdentity): Server {
   const server = new Server(
     { name: 'mvmt', version: '0.1.0' },
-    { capabilities: { tools: {} } },
+    {
+      capabilities: { tools: {} },
+      instructions: MVMT_SERVER_INSTRUCTIONS,
+    },
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({

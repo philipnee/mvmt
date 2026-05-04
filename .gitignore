@@ -17,6 +17,7 @@ coverage/
 
 # Local mvmt runtime/config copies, if someone creates them in the repo
 .mvmt/
+.mvmt-bench/
 config.local.yaml
 audit.log
 

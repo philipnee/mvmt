@@ -20,8 +20,11 @@ export const GLOBAL_SECRET_PATH_PATTERNS = [
 
 export const DEFAULT_MOUNT_EXCLUDE_PATTERNS = [
   '.git/**',
+  '**/.git/**',
   'node_modules/**',
+  '**/node_modules/**',
   '.claude/**',
+  '**/.claude/**',
   ...GLOBAL_SECRET_PATH_PATTERNS,
 ] as const;
 

@@ -131,10 +131,20 @@ Clients use virtual paths such as `/notes/today.md`. They do not see the host pa
 | `root` | none | Local folder on disk. `~` is expanded at runtime. |
 | `description` | `""` | Short text returned by `list("/")`. |
 | `guidance` | `""` | Optional client-facing guidance returned by `list("/")`. |
-| `exclude` | `.git/**`, `node_modules/**`, `.claude/**` | Paths hidden from listing, reads, writes, removal, and indexing. |
+| `exclude` | `.git/**`, `**/.git/**`, `node_modules/**`, `**/node_modules/**`, `.claude/**`, `**/.claude/**` | Paths hidden from listing, reads, writes, removal, and indexing. |
 | `protect` | `.env`, `.env.*`, `.claude/**` | Paths that cannot be written or removed. |
 | `writeAccess` | `false` | Mount-level write gate. |
 | `enabled` | `true` | Disabled mounts are ignored at runtime. |
+
+The text indexer also skips common generated/cache directories such as
+`node_modules`, `.git`, `dist`, `build`, `.next`, `.turbo`, `coverage`, and
+virtualenv/cache folders even if an older config file does not list them in
+`exclude`. Direct `read` and `list` access still follows the mount's configured
+`exclude` rules.
+
+The JSON text-index prototype also caps indexing at 5,000 files, 20,000 chunks
+total, and 24 chunks per file. If startup says the index was truncated, prefer a
+narrower mount or add `exclude` rules for low-value folders.
 
 An Obsidian vault is just a local folder mount. There is no special Obsidian runtime connector in the current mount-only shape.
 

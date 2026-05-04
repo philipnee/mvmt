@@ -5,6 +5,7 @@ import path from 'path';
 import { LocalFolderMountConfig } from '../config/schema.js';
 import {
   MountRegistry,
+  normalizePathSeparators,
   ResolvedMountPath,
 } from './mount-registry.js';
 import {
@@ -53,15 +54,58 @@ const TEXT_EXTENSIONS = new Set([
 const MAX_TEXT_BYTES = 2 * 1024 * 1024;
 const CHUNK_SIZE = 1600;
 const CHUNK_OVERLAP = 200;
+const DEFAULT_MAX_INDEXED_FILES = 5_000;
+const DEFAULT_MAX_INDEXED_CHUNKS = 20_000;
+const DEFAULT_MAX_CHUNKS_PER_FILE = 24;
+const DEFAULT_INDEX_IGNORED_SEGMENTS = new Set([
+  '.cache',
+  '.expo',
+  '.git',
+  '.gradle',
+  '.mypy_cache',
+  '.next',
+  '.nuxt',
+  '.pnpm-store',
+  '.pytest_cache',
+  '.ruff_cache',
+  '.svelte-kit',
+  '.tox',
+  '.turbo',
+  '.venv',
+  '.yarn',
+  '__pycache__',
+  'build',
+  'coverage',
+  'dist',
+  'node_modules',
+  'out',
+  'target',
+  'venv',
+]);
+const DEFAULT_INDEX_IGNORED_FILENAMES = new Set([
+  'bun.lock',
+  'bun.lockb',
+  'cargo.lock',
+  'gemfile.lock',
+  'go.sum',
+  'package-lock.json',
+  'pnpm-lock.yaml',
+  'poetry.lock',
+  'yarn.lock',
+]);
 
 export interface TextContextIndexOptions {
   mounts: LocalFolderMountConfig[];
   indexPath: string;
+  maxIndexedFiles?: number;
+  maxIndexedChunks?: number;
+  maxChunksPerFile?: number;
 }
 
 export interface TextIndexStats {
   files: number;
   chunks: number;
+  truncated?: boolean;
 }
 
 export interface TextSearchResult {
@@ -134,6 +178,7 @@ export class TextContextIndex {
         mount.config.name,
         new LocalFolderStorageProvider(mount, {
           isTextPath,
+          isIndexIgnoredPath,
           maxTextBytes: MAX_TEXT_BYTES,
         }),
       ]),
@@ -159,16 +204,34 @@ export class TextContextIndex {
   async rebuild(): Promise<TextIndexStats> {
     const files: IndexedFile[] = [];
     const chunks: IndexedChunk[] = [];
+    let truncated = false;
+    const maxFiles = this.options.maxIndexedFiles ?? DEFAULT_MAX_INDEXED_FILES;
+    const maxChunks = this.options.maxIndexedChunks ?? DEFAULT_MAX_INDEXED_CHUNKS;
+    const maxChunksPerFile = this.options.maxChunksPerFile ?? DEFAULT_MAX_CHUNKS_PER_FILE;
 
+    mountLoop:
     for (const mount of this.registry.mounts()) {
       const provider = this.providerForMount(mount.config.name);
       for await (const file of provider.walkTextFiles()) {
-        this.indexFile(file, files, chunks);
+        if (files.length >= maxFiles || chunks.length >= maxChunks) {
+          truncated = true;
+          break mountLoop;
+        }
+
+        const indexed = this.indexFile(file, maxChunksPerFile);
+        if (indexed.truncated) truncated = true;
+        if (files.length + 1 > maxFiles || chunks.length + indexed.chunks.length > maxChunks) {
+          truncated = true;
+          break mountLoop;
+        }
+
+        files.push(indexed.file);
+        chunks.push(...indexed.chunks);
       }
     }
 
     await this.writeSnapshot({ version: 1, indexed_at: new Date().toISOString(), files, chunks });
-    return { files: files.length, chunks: chunks.length };
+    return { files: files.length, chunks: chunks.length, ...(truncated ? { truncated } : {}) };
   }
 
   async search(query: string, mountNames?: string[], limit = 8): Promise<TextSearchResult[]> {
@@ -255,18 +318,21 @@ export class TextContextIndex {
 
   private indexFile(
     file: StorageProviderFile,
-    files: IndexedFile[],
-    chunks: IndexedChunk[],
-  ): void {
+    maxChunksPerFile: number,
+  ): { file: IndexedFile; chunks: IndexedChunk[]; truncated: boolean } {
     const hash = sha256(file.content);
-    files.push({
-      mount: file.mount,
-      path: file.path,
-      hash,
-      size: file.size,
-      mtime_ms: file.mtimeMs,
-    });
-    chunks.push(...chunkText(file.mount, file.path, file.content, hash, file.mtimeMs));
+    const { chunks, truncated } = chunkText(file.mount, file.path, file.content, hash, file.mtimeMs, maxChunksPerFile);
+    return {
+      file: {
+        mount: file.mount,
+        path: file.path,
+        hash,
+        size: file.size,
+        mtime_ms: file.mtimeMs,
+      },
+      chunks,
+      truncated,
+    };
   }
 
   private resolvePath(inputPath: string): ResolvedMountPath {
@@ -329,11 +395,23 @@ export class TextContextIndex {
   }
 }
 
-function chunkText(mountName: string, virtualPath: string, text: string, hash: string, mtimeMs: number): IndexedChunk[] {
+function chunkText(
+  mountName: string,
+  virtualPath: string,
+  text: string,
+  hash: string,
+  mtimeMs: number,
+  maxChunks: number,
+): { chunks: IndexedChunk[]; truncated: boolean } {
   const chunks: IndexedChunk[] = [];
+  let truncated = false;
   for (let offset = 0; offset < text.length; offset += CHUNK_SIZE - CHUNK_OVERLAP) {
     const chunk = text.slice(offset, offset + CHUNK_SIZE);
     if (chunk.trim().length === 0) continue;
+    if (chunks.length >= maxChunks) {
+      truncated = true;
+      break;
+    }
     chunks.push({
       mount: mountName,
       path: virtualPath,
@@ -343,11 +421,20 @@ function chunkText(mountName: string, virtualPath: string, text: string, hash: s
       mtime_ms: mtimeMs,
     });
   }
-  return chunks;
+  return { chunks, truncated };
 }
 
 function isTextPath(inputPath: string): boolean {
   return TEXT_EXTENSIONS.has(path.extname(inputPath).toLowerCase());
+}
+
+function isIndexIgnoredPath(inputPath: string): boolean {
+  const segments = normalizePathSeparators(inputPath)
+    .split('/')
+    .filter(Boolean);
+  const leaf = segments.at(-1)?.toLowerCase();
+  return segments.some((segment) => DEFAULT_INDEX_IGNORED_SEGMENTS.has(segment))
+    || Boolean(leaf && DEFAULT_INDEX_IGNORED_FILENAMES.has(leaf));
 }
 
 function tokenize(query: string): string[] {
