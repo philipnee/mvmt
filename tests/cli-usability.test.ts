@@ -317,6 +317,82 @@ describe('CLI usability', () => {
     }
   });
 
+  it('can explicitly edit a scoped API token down to no permissions', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    const configPath = path.join(tmp, 'config.yaml');
+    const mountRoot = path.join(tmp, 'notes');
+    try {
+      await fs.mkdir(mountRoot);
+      await saveConfig(configPath, parseConfig({
+        version: 1,
+        mounts: [{ name: 'notes', type: 'local_folder', path: '/notes', root: mountRoot }],
+      }));
+
+      await runCli([
+        'token',
+        'add',
+        'codex',
+        '--config',
+        configPath,
+        '--read',
+        '/notes',
+      ]);
+      const { stdout } = await runCli([
+        'token',
+        'edit',
+        'codex',
+        '--config',
+        configPath,
+        '--no-permissions',
+      ]);
+      expect(stdout).toContain('Token updated.');
+      expect(stdout).toContain('Scope:   (none)');
+
+      const { stdout: list } = await runCli(['token', '--config', configPath]);
+      expect(list).toContain('(none)');
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects --no-permissions when a replacement scope is also provided', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    const configPath = path.join(tmp, 'config.yaml');
+    const mountRoot = path.join(tmp, 'notes');
+    try {
+      await fs.mkdir(mountRoot);
+      await saveConfig(configPath, parseConfig({
+        version: 1,
+        mounts: [{ name: 'notes', type: 'local_folder', path: '/notes', root: mountRoot }],
+      }));
+
+      await runCli([
+        'token',
+        'add',
+        'codex',
+        '--config',
+        configPath,
+        '--read',
+        '/notes',
+      ]);
+      const result = await runCliAllowFailure([
+        'token',
+        'edit',
+        'codex',
+        '--config',
+        configPath,
+        '--no-permissions',
+        '--scope',
+        'notes:read',
+      ]);
+
+      expect(result.code).toBe(1);
+      expect(result.output).toContain('Use either --no-permissions or --scope/--read/--write, not both.');
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('rotates a scoped API token non-interactively and prints the replacement once', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
     const configPath = path.join(tmp, 'config.yaml');

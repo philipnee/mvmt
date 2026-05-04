@@ -312,6 +312,69 @@ describe('OAuthStore', () => {
     expect(tokens.accessToken.mvmtClientId).toBe('codex');
     expect(tokens.refreshToken.scope).toBe('mcp offline_access');
     expect(tokens.refreshToken.mvmtClientId).toBe('codex');
+    expect(tokens.refreshToken.token).not.toBe(refreshToken.token);
+  });
+
+  it('rejects replayed refresh tokens and revokes the replacement family', () => {
+    const store = new OAuthStore({ signingKey: 'test-secret' });
+    const refreshToken = store.issueRefreshToken({
+      clientId: 'chatgpt',
+      scope: 'mcp offline_access',
+      audience: 'https://mcp.example.com/mcp',
+    });
+
+    const replacement = store.exchangeRefreshToken({
+      refreshToken: refreshToken.token,
+      clientId: 'chatgpt',
+    });
+
+    expect(() =>
+      store.exchangeRefreshToken({
+        refreshToken: refreshToken.token,
+        clientId: 'chatgpt',
+      }),
+    ).toThrow(/already used/i);
+    expect(() =>
+      store.exchangeRefreshToken({
+        refreshToken: replacement.refreshToken.token,
+        clientId: 'chatgpt',
+      }),
+    ).toThrow(/revoked/i);
+  });
+
+  it('persists refresh-token rotation state across OAuthStore instances', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-oauth-refresh-'));
+    const refreshTokensPath = path.join(tmp, 'refresh-tokens.json');
+    try {
+      const issuer = new OAuthStore({ signingKey: 'test-secret', refreshTokensPath });
+      const refreshToken = issuer.issueRefreshToken({
+        clientId: 'chatgpt',
+        scope: 'mcp offline_access',
+        audience: 'https://mcp.example.com/mcp',
+      });
+
+      const firstConsumer = new OAuthStore({ signingKey: 'test-secret', refreshTokensPath });
+      const replacement = firstConsumer.exchangeRefreshToken({
+        refreshToken: refreshToken.token,
+        clientId: 'chatgpt',
+      });
+
+      const secondConsumer = new OAuthStore({ signingKey: 'test-secret', refreshTokensPath });
+      expect(() =>
+        secondConsumer.exchangeRefreshToken({
+          refreshToken: refreshToken.token,
+          clientId: 'chatgpt',
+        }),
+      ).toThrow(/already used/i);
+      expect(() =>
+        secondConsumer.exchangeRefreshToken({
+          refreshToken: replacement.refreshToken.token,
+          clientId: 'chatgpt',
+        }),
+      ).toThrow(/revoked/i);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   });
 
   it('rejects refresh token scope widening', () => {

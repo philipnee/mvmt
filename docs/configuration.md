@@ -173,8 +173,14 @@ If present, `/mcp` becomes strict:
 | `auth.type` | `token` or `oauth`. |
 | `auth.tokenHash` | Verifier for the client bearer token. New tokens use scrypt. Plaintext tokens are not stored. |
 | `auth.oauthClientIds` | OAuth `client_id` values mapped to this client. |
+| `clientBinding` | Optional intended-client hint checked against request client labels or User-Agent. This is not a cryptographic binding. |
 | `rawToolsEnabled` | Legacy field. The mount-only runtime ignores raw proxy tools. Keep `false`. |
 | `permissions` | Virtual path/action grants. |
+
+Editing permissions or `clientBinding` bumps the token credential version so
+existing OAuth grants selected through the previous policy are rejected. To keep
+a token configured while disabling data access, run `mvmt token edit <id>
+--no-permissions`.
 
 Permission actions are:
 

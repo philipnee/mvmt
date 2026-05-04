@@ -241,12 +241,13 @@ tokenCommand
   .option('--name <text>', 'Display name')
   .option('--description <text>', 'Optional description')
   .option('--scope <scope>', 'Replace scopes, such as all:read or notes:write (repeatable, comma-separated)', collectValues)
+  .option('--no-permissions', 'Replace scopes with no access')
   .option('--client <identity>', 'Replace client identity binding, or "any" to clear')
   .option('--expires <duration>', 'Token lifetime, such as 30m, 7d, 30d, or never')
   .option('--ttl <duration>', 'Alias for --expires')
   .option('--read <mount>', 'Grant search/read on a mount name or path (repeatable)', collectValues)
   .option('--write <mount>', 'Grant search/read/write/remove on a writable mount (repeatable)', collectValues)
-  .action(async (id: string | undefined, options: { config?: string; name?: string; description?: string; scope?: string[]; client?: string; expires?: string; ttl?: string; read?: string[]; write?: string[] }, command: Command) => {
+  .action(async (id: string | undefined, options: { config?: string; name?: string; description?: string; scope?: string[]; permissions?: boolean; client?: string; expires?: string; ttl?: string; read?: string[]; write?: string[] }, command: Command) => {
     await editApiToken(id, withInheritedConfig(options, command));
   });
 
@@ -338,12 +339,13 @@ apiTokensCommand
   .option('--name <text>', 'Display name')
   .option('--description <text>', 'Optional description')
   .option('--scope <scope>', 'Replace scopes, such as all:read or notes:write (repeatable, comma-separated)', collectValues)
+  .option('--no-permissions', 'Replace scopes with no access')
   .option('--client <identity>', 'Replace client identity binding, or "any" to clear')
   .option('--expires <duration>', 'Token lifetime, such as 30m, 7d, 30d, or never')
   .option('--ttl <duration>', 'Alias for --expires')
   .option('--read <mount>', 'Grant search/read on a mount name or path (repeatable)', collectValues)
   .option('--write <mount>', 'Grant search/read/write/remove on a writable mount (repeatable)', collectValues)
-  .action(async (id: string | undefined, options: { config?: string; name?: string; description?: string; scope?: string[]; client?: string; expires?: string; ttl?: string; read?: string[]; write?: string[] }, command: Command) => {
+  .action(async (id: string | undefined, options: { config?: string; name?: string; description?: string; scope?: string[]; permissions?: boolean; client?: string; expires?: string; ttl?: string; read?: string[]; write?: string[] }, command: Command) => {
     await editApiToken(id, withInheritedConfig(options, command));
   });
 

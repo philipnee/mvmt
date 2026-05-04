@@ -6,6 +6,7 @@ import path from 'path';
 export const TOKEN_PATH = path.join(os.homedir(), '.mvmt', '.session-token');
 export const SIGNING_KEY_PATH = path.join(os.homedir(), '.mvmt', '.signing-key');
 export const CLIENTS_PATH = path.join(os.homedir(), '.mvmt', '.clients.json');
+export const REFRESH_TOKENS_PATH = path.join(os.homedir(), '.mvmt', '.refresh-tokens.json');
 
 // Per-process random key; HMACing both sides produces fixed-length
 // digests so the subsequent timing-safe compare never short-circuits
@@ -70,6 +71,11 @@ export function defaultSigningKeyPath(tokenPath: string): string {
 export function defaultClientsPath(tokenPath: string): string {
   if (tokenPath === TOKEN_PATH) return CLIENTS_PATH;
   return path.join(path.dirname(tokenPath), '.clients.json');
+}
+
+export function defaultRefreshTokensPath(tokenPath: string): string {
+  if (tokenPath === TOKEN_PATH) return REFRESH_TOKENS_PATH;
+  return path.join(path.dirname(tokenPath), '.refresh-tokens.json');
 }
 
 export function validateSessionToken(authHeader: string | undefined, tokenPath = TOKEN_PATH): boolean {

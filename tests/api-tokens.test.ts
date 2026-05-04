@@ -75,6 +75,7 @@ describe('API token config helpers', () => {
     expect(result.created).toBe(false);
     expect(result.plaintextToken).toBeUndefined();
     expect(result.client.auth).toEqual({ type: 'token', tokenHash: EXISTING_TOKEN_VERIFIER });
+    expect(result.client.credentialVersion).toBe(2);
     expect(result.client.permissions).toEqual([
       { path: '/workspace/**', actions: ['search', 'read', 'write'] },
     ]);
@@ -133,6 +134,7 @@ describe('API token config helpers', () => {
           id: 'codex',
           name: 'Codex CLI',
           description: 'old description',
+          credentialVersion: 4,
           expiresAt: '2026-04-30T12:00:00.000Z',
           auth: { type: 'token', tokenHash: EXISTING_TOKEN_VERIFIER },
           permissions: [{ path: '/notes/**', actions: ['search', 'read'] }],
@@ -153,12 +155,102 @@ describe('API token config helpers', () => {
       id: 'codex',
       name: 'Codex',
       description: 'updated description',
+      credentialVersion: 5,
       auth: { type: 'token', tokenHash: EXISTING_TOKEN_VERIFIER },
       permissions: [
         { path: '/workspace/**', actions: ['search', 'read', 'write'] },
       ],
     });
     expect(result.client.expiresAt).toBeUndefined();
+  });
+
+  it('edits token metadata and ttl without invalidating existing OAuth grants', () => {
+    const config = parseConfig({
+      version: 1,
+      mounts: [
+        { name: 'notes', type: 'local_folder', path: '/notes', root: '/tmp/notes' },
+      ],
+      clients: [
+        {
+          id: 'codex',
+          name: 'Codex CLI',
+          description: 'old description',
+          credentialVersion: 4,
+          expiresAt: '2026-04-30T12:00:00.000Z',
+          auth: { type: 'token', tokenHash: EXISTING_TOKEN_VERIFIER },
+          permissions: [{ path: '/notes/**', actions: ['search', 'read'] }],
+        },
+      ],
+    });
+
+    const result = editApiTokenInConfig(config, 'codex', {
+      id: 'codex',
+      name: 'Codex',
+      description: 'updated description',
+      expires: '7d',
+      now: Date.parse('2026-04-30T16:00:00.000Z'),
+      permissions: [],
+    });
+
+    expect(result.client.credentialVersion).toBe(4);
+    expect(result.client.expiresAt).toBe('2026-05-07T16:00:00.000Z');
+    expect(result.client.permissions).toEqual([{ path: '/notes/**', actions: ['search', 'read'] }]);
+  });
+
+  it('clears token permissions explicitly and bumps the credential version', () => {
+    const config = parseConfig({
+      version: 1,
+      mounts: [
+        { name: 'notes', type: 'local_folder', path: '/notes', root: '/tmp/notes' },
+      ],
+      clients: [
+        {
+          id: 'codex',
+          name: 'Codex CLI',
+          credentialVersion: 4,
+          auth: { type: 'token', tokenHash: EXISTING_TOKEN_VERIFIER },
+          permissions: [{ path: '/notes/**', actions: ['search', 'read'] }],
+        },
+      ],
+    });
+
+    const result = editApiTokenInConfig(config, 'codex', {
+      id: 'codex',
+      permissions: [],
+      replacePermissions: true,
+    });
+
+    expect(result.client.credentialVersion).toBe(5);
+    expect(result.client.permissions).toEqual([]);
+  });
+
+  it('clears client binding and bumps the credential version', () => {
+    const config = parseConfig({
+      version: 1,
+      mounts: [
+        { name: 'notes', type: 'local_folder', path: '/notes', root: '/tmp/notes' },
+      ],
+      clients: [
+        {
+          id: 'codex',
+          name: 'Codex CLI',
+          credentialVersion: 2,
+          clientBinding: 'claude-desktop',
+          auth: { type: 'token', tokenHash: EXISTING_TOKEN_VERIFIER },
+          permissions: [{ path: '/notes/**', actions: ['search', 'read'] }],
+        },
+      ],
+    });
+
+    const result = editApiTokenInConfig(config, 'codex', {
+      id: 'codex',
+      clientBinding: null,
+      permissions: [],
+    });
+
+    expect(result.client.credentialVersion).toBe(3);
+    expect(result.client.clientBinding).toBeUndefined();
+    expect(result.client.permissions).toEqual([{ path: '/notes/**', actions: ['search', 'read'] }]);
   });
 
   it('rotates a token secret while preserving metadata and permissions', () => {

@@ -36,7 +36,10 @@ export interface AddApiTokenOptions extends ApiTokensCommandOptions {
   write?: string[];
 }
 
-export interface EditApiTokenOptions extends AddApiTokenOptions {}
+export interface EditApiTokenOptions extends AddApiTokenOptions {
+  noPermissions?: boolean;
+  permissions?: boolean;
+}
 
 export interface RemoveApiTokenOptions extends ApiTokensCommandOptions {
   yes?: boolean;
@@ -63,6 +66,7 @@ export interface ApiTokenInput {
   now?: number;
   clientBinding?: string | null;
   permissions: ApiTokenPermissionInput[];
+  replacePermissions?: boolean;
   plaintextToken?: string;
 }
 
@@ -175,7 +179,6 @@ export async function removeApiToken(id: string | undefined, options: RemoveApiT
     const configPath = resolveApiTokensConfigPath(options.config);
     const config = loadConfig(configPath);
     const tokenId = id ?? await promptForApiTokenId(config, 'Remove which API token?');
-    const existing = findTokenClient(config, tokenId);
     const ok = options.yes ? true : await confirmDestructive(
       `This will permanently delete '${tokenId}' and disconnect clients using it.`,
     );
@@ -298,12 +301,17 @@ export function editApiTokenInConfig(
   const expiresAt = inputValue.expires !== undefined
     ? resolveExpiresAt(inputValue)
     : existing.expiresAt;
-  const permissions = inputValue.permissions.length > 0
-    ? applyPermissionInputs(config, [], inputValue.permissions)
+  const replacePermissions = inputValue.replacePermissions ?? inputValue.permissions.length > 0;
+  const permissions = replacePermissions
+    ? applyPermissionInputs(config, [], inputValue.permissions, { allowEmpty: true })
     : existing.permissions;
   const clientBinding = inputValue.clientBinding !== undefined
     ? normalizeClientBinding(inputValue.clientBinding)
     : existing.clientBinding;
+  const shouldBumpCredentialVersion = (
+    (replacePermissions && !permissionsEqual(existing.permissions, permissions))
+    || (inputValue.clientBinding !== undefined && clientBinding !== existing.clientBinding)
+  );
   const { expiresAt: _oldExpiresAt, clientBinding: _oldClientBinding, ...existingWithoutOptionalPolicy } = existing;
   const nextClient: ClientConfig = {
     ...existingWithoutOptionalPolicy,
@@ -311,6 +319,7 @@ export function editApiTokenInConfig(
     name,
     description,
     ...(expiresAt ? { expiresAt } : {}),
+    ...(shouldBumpCredentialVersion ? { credentialVersion: (existing.credentialVersion ?? 1) + 1 } : {}),
     ...(clientBinding ? { clientBinding } : {}),
     auth: existing.auth,
     rawToolsEnabled: existing.rawToolsEnabled,
@@ -367,11 +376,18 @@ export function removeApiTokenFromConfig(config: MvmtConfig, id: string): MvmtCo
 function apiTokenInputFromOptions(
   config: MvmtConfig,
   id: string | undefined,
-  options: AddApiTokenOptions,
+  options: AddApiTokenOptions | EditApiTokenOptions,
   parseOptions: { requirePermissions?: boolean } = {},
 ): ApiTokenInput {
   if (!id) throw new Error('Token name is required when using non-interactive token options.');
   const permissions = parsePermissionInputsFromOptions(config, options);
+  const noPermissions = (
+    ('noPermissions' in options && Boolean(options.noPermissions))
+    || ('permissions' in options && options.permissions === false)
+  );
+  if (noPermissions && permissions.length > 0) {
+    throw new Error('Use either --no-permissions or --scope/--read/--write, not both.');
+  }
   if (permissions.length === 0 && parseOptions.requirePermissions !== false) {
     throw new Error('Add at least one scope with --scope <scope> (for example all:read).');
   }
@@ -384,6 +400,7 @@ function apiTokenInputFromOptions(
     expires,
     clientBinding: options.client !== undefined ? normalizeClientBindingOption(options.client) : undefined,
     permissions,
+    replacePermissions: permissions.length > 0 || noPermissions,
   };
 }
 
@@ -557,8 +574,12 @@ function applyPermissionInputs(
   config: MvmtConfig,
   currentPermissions: readonly PermissionConfig[],
   inputs: readonly ApiTokenPermissionInput[],
+  options: { allowEmpty?: boolean } = {},
 ): PermissionConfig[] {
-  if (inputs.length === 0) throw new Error('API token needs at least one scope.');
+  if (inputs.length === 0) {
+    if (options.allowEmpty) return [];
+    throw new Error('API token needs at least one scope.');
+  }
   const next = [...currentPermissions];
   for (const inputValue of inputs) {
     const permission = permissionForInput(config, inputValue);
@@ -570,6 +591,16 @@ function applyPermissionInputs(
     }
   }
   return next;
+}
+
+function permissionsEqual(left: readonly PermissionConfig[], right: readonly PermissionConfig[]): boolean {
+  return JSON.stringify(normalizePermissionsForCompare(left)) === JSON.stringify(normalizePermissionsForCompare(right));
+}
+
+function normalizePermissionsForCompare(permissions: readonly PermissionConfig[]): Array<{ path: string; actions: string[] }> {
+  return permissions
+    .map((permission) => ({ path: permission.path, actions: [...permission.actions].sort() }))
+    .sort((a, b) => a.path.localeCompare(b.path));
 }
 
 function permissionForInput(config: MvmtConfig, inputValue: ApiTokenPermissionInput): PermissionConfig {
@@ -728,7 +759,7 @@ function hasAddOptions(options: AddApiTokenOptions): boolean {
 }
 
 function hasEditOptions(options: EditApiTokenOptions): boolean {
-  return hasAddOptions(options);
+  return hasAddOptions(options) || options.noPermissions === true || options.permissions === false;
 }
 
 function resolveExpiresAt(inputValue: ApiTokenInput): string | undefined {

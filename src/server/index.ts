@@ -8,7 +8,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { ToolRouter } from './router.js';
 import { log } from '../utils/logger.js';
-import { defaultClientsPath, defaultSigningKeyPath, ensureSessionToken, ensureSigningKey, readSigningKey, TOKEN_PATH, validateSessionToken } from '../utils/token.js';
+import { defaultClientsPath, defaultRefreshTokensPath, defaultSigningKeyPath, ensureSessionToken, ensureSigningKey, readSigningKey, TOKEN_PATH, validateSessionToken } from '../utils/token.js';
 import { verifyApiToken } from '../utils/api-token-hash.js';
 import { isExpired } from '../utils/token-ttl.js';
 import {
@@ -186,9 +186,11 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   // requiring a server restart.
   ensureSigningKey(signingKeyPath);
   const clientsPath = defaultClientsPath(tokenPath ?? TOKEN_PATH);
+  const refreshTokensPath = defaultRefreshTokensPath(tokenPath ?? TOKEN_PATH);
   const oauth = new OAuthStore({
     signingKey: () => readSigningKey(signingKeyPath) ?? ensureSigningKey(signingKeyPath),
     clientsPath,
+    refreshTokensPath,
   });
   const oauthCleanup = setInterval(() => oauth.cleanup(), 60 * 1000);
   oauthCleanup.unref();
@@ -605,8 +607,9 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       });
     } catch (err) {
       if (err instanceof OAuthError) {
-        logHttpRequest(requestLog, req, 400, 'oauth.token', err.code, requestClientId);
-        res.status(400).json({ error: err.code, error_description: err.message });
+        const status = err.code === 'server_error' ? 500 : 400;
+        logHttpRequest(requestLog, req, status, 'oauth.token', err.code, requestClientId);
+        res.status(status).json({ error: err.code, error_description: err.message });
         return;
       }
       log.warn(`Token exchange failed: ${err instanceof Error ? err.message : 'unknown'}`);
