@@ -26,8 +26,11 @@ mounts:
       Do not edit generated files under /dist.
     exclude:
       - .git/**
+      - "**/.git/**"
       - node_modules/**
+      - "**/node_modules/**"
       - .claude/**
+      - "**/.claude/**"
     protect:
       - .claude/**
       - .env
@@ -117,9 +120,26 @@ The current prototype stores the index as JSON beside the config file. The
 module boundary is isolated so this can be replaced with SQLite after choosing
 a dependency.
 
+The indexer skips common generated/cache directories such as `node_modules`,
+`.git`, `dist`, `build`, `.next`, `.turbo`, `coverage`, and virtualenv/cache
+folders. It also caps index size so overly broad mounts truncate instead of
+exhausting the Node heap.
+
+Default caps are intentionally conservative for the JSON prototype: 5,000 files,
+20,000 chunks total, and 24 chunks per file. Use narrower mounts or explicit
+`exclude` rules when a broad mount truncates before the files you care about.
+
+Run a synthetic benchmark without crawling real projects:
+
+```bash
+npm run bench:text-index -- --docs 10000
+```
+
 ## Current Limits
 
 - No SQLite dependency yet.
 - No file watcher yet.
 - Text-like extensions only.
+- Very broad mounts may produce a truncated index; narrow the mount or add
+  `exclude` rules if important files are missing.
 - Removes are permanent file deletes in this prototype.

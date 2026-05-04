@@ -9,6 +9,7 @@ import {
   buildOriginCheck,
   isBenignDuplicateSseConflict,
   isStandaloneSseRequest,
+  MVMT_SERVER_INSTRUCTIONS,
   startHttpServer,
 } from '../src/server/index.js';
 import { parseConfig } from '../src/config/loader.js';
@@ -79,6 +80,44 @@ describe('SSE request helpers', () => {
 });
 
 describe('startHttpServer lifecycle', () => {
+  it('sends agent instructions during MCP initialization', async () => {
+    const router = new ToolRouter();
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const server = await startHttpServer(router, { port: 0, tokenPath });
+
+    try {
+      const sessionToken = fs.readFileSync(tokenPath, 'utf-8').trim();
+      const response = await fetch(`http://127.0.0.1:${server.port}/mcp`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${sessionToken}`,
+          Accept: 'application/json, text/event-stream',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: {
+            protocolVersion: '2025-03-26',
+            capabilities: {},
+            clientInfo: { name: 'mvmt-instructions-test', version: '0.0.0' },
+          },
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      const body = parseMcpResponse(await response.text());
+      expect(body.result.instructions).toBe(MVMT_SERVER_INSTRUCTIONS);
+      expect(body.result.instructions).toContain('For content questions, call search first');
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('serves OAuth authorization metadata for the root and MCP resource path', async () => {
     const router = new ToolRouter();
     await router.initialize();

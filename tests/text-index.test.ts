@@ -1,6 +1,7 @@
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
+import { performance } from 'perf_hooks';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { parseConfig } from '../src/config/loader.js';
 import { TextContextIndex } from '../src/context/text-index.js';
@@ -37,6 +38,71 @@ describe('TextContextIndex', () => {
     await expect(index.list('/workspace')).resolves.not.toEqual(
       expect.arrayContaining([expect.objectContaining({ path: '/workspace/.git' })]),
     );
+  });
+
+  it('skips generated dependency directories during indexing even under broad mounts', async () => {
+    await fs.mkdir(path.join(tmp, 'project', 'src'), { recursive: true });
+    await fs.mkdir(path.join(tmp, 'project', 'node_modules', 'package'), { recursive: true });
+    await fs.mkdir(path.join(tmp, 'project', 'dist'), { recursive: true });
+    await fs.writeFile(path.join(tmp, 'project', 'src', 'app.js'), 'alpha local source', 'utf-8');
+    await fs.writeFile(path.join(tmp, 'project', 'node_modules', 'package', 'index.js'), 'alpha vendored dependency', 'utf-8');
+    await fs.writeFile(path.join(tmp, 'project', 'dist', 'bundle.js'), 'alpha generated bundle', 'utf-8');
+
+    const index = createIndex(tmp);
+    const stats = await index.rebuild();
+
+    expect(stats).toMatchObject({ files: 1, chunks: 1 });
+    await expect(index.search('alpha', ['workspace'], 10)).resolves.toEqual([
+      expect.objectContaining({ path: '/workspace/project/src/app.js' }),
+    ]);
+  });
+
+  it('truncates oversized indexes instead of growing without bound', async () => {
+    await fs.writeFile(path.join(tmp, 'first.md'), 'alpha first', 'utf-8');
+    await fs.writeFile(path.join(tmp, 'second.md'), 'alpha second', 'utf-8');
+    const index = createIndex(tmp, { maxIndexedFiles: 1 });
+
+    const stats = await index.rebuild();
+
+    expect(stats).toEqual({ files: 1, chunks: 1, truncated: true });
+    await expect(index.search('alpha', ['workspace'], 10)).resolves.toHaveLength(1);
+  });
+
+  it('truncates very large files instead of letting one file dominate the index', async () => {
+    await fs.writeFile(path.join(tmp, 'large.md'), `${'alpha '.repeat(20_000)}omega`, 'utf-8');
+    const index = createIndex(tmp, { maxChunksPerFile: 2 });
+
+    const stats = await index.rebuild();
+
+    expect(stats).toEqual({ files: 1, chunks: 2, truncated: true });
+    await expect(index.search('omega', ['workspace'], 10)).resolves.toEqual([]);
+  });
+
+  it('indexes and searches a generated corpus at integration-test scale', async () => {
+    await writeGeneratedCorpus(tmp, 1_200);
+    const index = createIndex(tmp);
+
+    const start = performance.now();
+    const stats = await index.rebuild();
+    const rebuildMs = performance.now() - start;
+    const searchStart = performance.now();
+    const results = await index.search('needle-latency shard-7', ['workspace'], 10);
+    const searchMs = performance.now() - searchStart;
+
+    expect(stats).toEqual({ files: 1_200, chunks: 1_200 });
+    expect(results.length).toBeGreaterThan(0);
+    expect(results[0].snippet).toContain('needle-latency');
+    expect(rebuildMs).toBeLessThan(5_000);
+    expect(searchMs).toBeLessThan(1_000);
+  });
+
+  it('uses the default index ceilings for broad generated corpora', async () => {
+    await writeGeneratedCorpus(tmp, 5_100);
+    const index = createIndex(tmp);
+
+    const stats = await index.rebuild();
+
+    expect(stats).toEqual({ files: 5_000, chunks: 5_000, truncated: true });
   });
 
   it('lists and reads virtual paths without exposing host paths', async () => {
@@ -148,7 +214,10 @@ describe('TextContextIndex', () => {
   });
 });
 
-function createIndex(root: string): TextContextIndex {
+function createIndex(
+  root: string,
+  options: { maxIndexedFiles?: number; maxIndexedChunks?: number; maxChunksPerFile?: number } = {},
+): TextContextIndex {
   const config = parseConfig({
     version: 1,
     mounts: [
@@ -168,5 +237,28 @@ function createIndex(root: string): TextContextIndex {
   return new TextContextIndex({
     mounts: config.mounts,
     indexPath: path.join(root, 'index.json'),
+    ...options,
   });
+}
+
+async function writeGeneratedCorpus(root: string, count: number): Promise<void> {
+  const topics = ['latency', 'oauth', 'connector', 'index', 'search', 'policy', 'mount', 'tunnel'];
+  for (let i = 0; i < count; i += 1) {
+    const topic = topics[i % topics.length];
+    const shard = i % 17;
+    const dir = path.join(root, `project-${String(i % 25).padStart(2, '0')}`, `shard-${shard}`);
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(
+      path.join(dir, `doc-${String(i).padStart(5, '0')}.md`),
+      [
+        `# Generated document ${i}`,
+        '',
+        `This fixture covers needle-${topic} shard-${shard}.`,
+        `The deterministic body mentions mvmt search indexing benchmark corpus ${i}.`,
+        `Related terms: local-files mounted-context agent-routing ${topic}.`,
+        'Filler text keeps each file below one chunk while still resembling a real note.',
+      ].join('\n'),
+      'utf-8',
+    );
+  }
 }

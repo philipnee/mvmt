@@ -112,7 +112,8 @@ export async function start(options: StartOptions = {}): Promise<void> {
   await router.initialize();
   if (textIndex) {
     void textIndex.rebuild().then((stats) => {
-      emit(`Text index ready: ${stats.files} files, ${stats.chunks} chunks`, stdioMode, logger);
+      const truncated = stats.truncated ? ' (truncated; narrow mounts or add exclude rules)' : '';
+      emit(`Text index ready: ${stats.files} files, ${stats.chunks} chunks${truncated}`, stdioMode, logger);
     }).catch((err) => {
       emit(`Text index failed: ${err instanceof Error ? err.message : 'unknown error'}`, stdioMode, logger, 'warn');
     });

@@ -10,7 +10,7 @@ export const listTool: ContextToolModule = {
     sourceId: 'mvmt',
     requiredAction: 'read',
     toolKind: 'semantic',
-    description: 'List permitted mounts or a directory within one mount.',
+    description: 'Use to discover available mounts or browse a known directory. For topic/content questions, use search first instead.',
     inputSchema: {
       type: 'object',
       properties: {

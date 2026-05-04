@@ -10,7 +10,7 @@ export const removeTool: ContextToolModule = {
     sourceId: 'mvmt',
     requiredAction: 'write',
     toolKind: 'semantic',
-    description: 'Remove one permitted text file. Protected paths are always blocked.',
+    description: 'Use only when the user explicitly asks to delete a specific permitted text file. Protected paths are always blocked.',
     inputSchema: {
       type: 'object',
       properties: {

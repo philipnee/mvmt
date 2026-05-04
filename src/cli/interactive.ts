@@ -63,13 +63,14 @@ export interface InteractivePromptState {
 export function startInteractivePrompt(state: InteractivePromptState): void {
   let handlingCommand = false;
   let lastSigintAt = 0;
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    prompt: chalk.cyan('> '),
-  });
+  let promptSuspended = false;
+  let rl: readline.Interface | undefined;
 
   const writeAbovePrompt = (message: string) => {
+    if (promptSuspended || !rl) {
+      console.log(message);
+      return;
+    }
     readline.clearLine(process.stdout, 0);
     readline.cursorTo(process.stdout, 0);
     console.log(message);
@@ -77,46 +78,74 @@ export function startInteractivePrompt(state: InteractivePromptState): void {
   };
 
   state.audit.setWriter(writeAbovePrompt);
-  rl.prompt();
 
-  rl.on('line', async (line) => {
-    if (handlingCommand) return;
-    handlingCommand = true;
-    lastSigintAt = 0;
-    const command = line.trim().toLowerCase();
-    const shouldContinue = command !== 'quit' && command !== 'exit';
-    rl.pause();
-    try {
-      await handleInteractiveCommand(command, state, rl);
-    } catch (err) {
-      if (isPromptCancelError(err)) {
-        console.log(chalk.yellow('Canceled.'));
-      } else {
-        console.log(chalk.red(err instanceof Error ? err.message : 'Command failed'));
-      }
-    } finally {
-      handlingCommand = false;
-      if (shouldContinue) rl.resume();
-    }
-    if (shouldContinue) {
-      rl.prompt();
-    }
-  });
+  const suspendPrompt = () => {
+    promptSuspended = true;
+    rl?.close();
+    rl = undefined;
+  };
 
-  rl.on('SIGINT', async () => {
-    if (handlingCommand) return;
-    const now = Date.now();
-    if (shouldShutdownOnSigint(lastSigintAt, now)) {
-      await state.shutdown();
-      return;
-    }
-    lastSigintAt = now;
-    console.log(chalk.yellow('Press Ctrl-C again to stop mvmt, or type "quit".'));
+  const resumePrompt = () => {
+    promptSuspended = false;
+    rl = createInteractiveReadline();
+    attachReadlineHandlers(rl);
     rl.prompt();
-  });
+  };
 
-  rl.on('close', async () => {
-    await state.shutdown();
+  const attachReadlineHandlers = (activeRl: readline.Interface) => {
+    activeRl.on('line', async (line) => {
+      if (handlingCommand) return;
+      handlingCommand = true;
+      lastSigintAt = 0;
+      const command = line.trim().toLowerCase();
+      const shouldContinue = command !== 'quit' && command !== 'exit';
+      if (!shouldContinue) {
+        activeRl.close();
+        return;
+      }
+      suspendPrompt();
+      try {
+        await handleInteractiveCommand(command, state, activeRl);
+      } catch (err) {
+        if (isPromptCancelError(err)) {
+          console.log(chalk.yellow('Canceled.'));
+        } else {
+          console.log(chalk.red(err instanceof Error ? err.message : 'Command failed'));
+        }
+      } finally {
+        handlingCommand = false;
+      }
+      if (shouldContinue) {
+        resumePrompt();
+      }
+    });
+
+    activeRl.on('SIGINT', async () => {
+      if (handlingCommand) return;
+      const now = Date.now();
+      if (shouldShutdownOnSigint(lastSigintAt, now)) {
+        await state.shutdown();
+        return;
+      }
+      lastSigintAt = now;
+      console.log(chalk.yellow('Press Ctrl-C again to stop mvmt, or type "quit".'));
+      activeRl.prompt();
+    });
+
+    activeRl.on('close', async () => {
+      if (promptSuspended) return;
+      await state.shutdown();
+    });
+  };
+
+  resumePrompt();
+}
+
+function createInteractiveReadline(): readline.Interface {
+  return readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    prompt: chalk.cyan('> '),
   });
 }
 

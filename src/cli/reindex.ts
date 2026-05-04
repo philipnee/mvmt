@@ -28,6 +28,7 @@ export async function reindex(options: ReindexOptions = {}): Promise<void> {
     indexPath: defaultTextIndexPath(configPath),
   });
   const stats = await index.rebuild();
-  console.log(chalk.green(`Indexed ${stats.files} text files into ${stats.chunks} chunks.`));
+  const truncated = stats.truncated ? ' Index was truncated; narrow mounts or add exclude rules.' : '';
+  console.log(chalk.green(`Indexed ${stats.files} text files into ${stats.chunks} chunks.${truncated}`));
   console.log(chalk.dim(`Index: ${defaultTextIndexPath(configPath)}`));
 }

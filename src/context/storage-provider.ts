@@ -34,6 +34,7 @@ export interface StorageProvider {
 export interface LocalFolderStorageProviderOptions {
   isTextPath(path: string): boolean;
   maxTextBytes: number;
+  isIndexIgnoredPath?(path: string): boolean;
 }
 
 export class LocalFolderStorageProvider implements StorageProvider {
@@ -141,6 +142,7 @@ export class LocalFolderStorageProvider implements StorageProvider {
 
     for (const entry of entries) {
       const childRelative = joinRelative(relativePath, entry.name);
+      if (this.options.isIndexIgnoredPath?.(childRelative)) continue;
       if (this.isExcluded(childRelative)) continue;
       if (entry.isDirectory()) {
         yield* this.walkDirectory(childRelative);

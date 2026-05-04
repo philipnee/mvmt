@@ -10,7 +10,7 @@ export const searchTool: ContextToolModule = {
     sourceId: 'mvmt',
     requiredAction: 'search',
     toolKind: 'semantic',
-    description: 'Search permitted text-file mounts and return ranked chunks from the local index.',
+    description: 'Use first when the user asks about their own notes, files, projects, workspace, local docs, or mounted content. Searches permitted text-file mounts and returns ranked chunks.',
     inputSchema: {
       type: 'object',
       properties: {

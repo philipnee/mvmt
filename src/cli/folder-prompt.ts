@@ -14,7 +14,7 @@ export async function promptForExistingFolder(
   options: FolderPromptOptions = {},
 ): Promise<string> {
   while (true) {
-    const answer = (await questionWithPathCompletion(`${message} `, completeDirectoryPath, options.defaultValue)).trim();
+    const answer = (await askWithPathCompletion(`${message} `, completeDirectoryPath, options.defaultValue)).trim();
     if (shouldFinishFolderPrompt(answer, options)) return '';
     const valid = await validateExistingFolderPath(answer);
     if (valid === true) return answer;
@@ -27,7 +27,7 @@ export async function promptForExistingFile(
   options: FolderPromptOptions = {},
 ): Promise<string> {
   while (true) {
-    const answer = (await questionWithPathCompletion(`${message} `, completeFilePath, options.defaultValue)).trim();
+    const answer = (await askWithPathCompletion(`${message} `, completeFilePath, options.defaultValue)).trim();
     if (shouldFinishFolderPrompt(answer, options)) return '';
     const valid = await validateExistingFilePath(answer);
     if (valid === true) return answer;
@@ -71,6 +71,18 @@ export function completeFilePath(line: string): [string[], string] {
   return completeLocalPath(line, { includeFiles: true });
 }
 
+export function applyPathCompletion(
+  line: string,
+  completer: (line: string) => [string[], string],
+): string | undefined {
+  const current = stripTabCharacters(line);
+  const [matches] = completer(current);
+  if (matches.length === 0) return undefined;
+  if (matches.length === 1) return matches[0];
+  const shared = commonPrefix(matches);
+  return shared.length > current.length ? shared : undefined;
+}
+
 function completeLocalPath(line: string, options: { includeFiles: boolean }): [string[], string] {
   const { baseDir, prefix } = directorySearch(line);
   let entries: fs.Dirent[];
@@ -90,34 +102,107 @@ function completeLocalPath(line: string, options: { includeFiles: boolean }): [s
   return [matches, line];
 }
 
-function questionWithPathCompletion(
+function askWithPathCompletion(
   message: string,
   completer: (line: string) => [string[], string],
   defaultValue?: string,
 ): Promise<string> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    return questionWithoutCompletion(message, defaultValue);
+  }
+  return questionWithRawPathCompletion(message.trimEnd(), completer, defaultValue);
+}
+
+function completeCurrentReadlineValue(
+  line: string,
+  completer: (line: string) => [string[], string],
+): string {
+  const current = stripTabCharacters(line);
+  return applyPathCompletion(current, completer) ?? current;
+}
+
+function questionWithRawPathCompletion(
+  message: string,
+  completer: (line: string) => [string[], string],
+  defaultValue = '',
+): Promise<string> {
   return new Promise((resolve, reject) => {
+    const input = process.stdin;
+    const output = process.stdout;
+    const previousRawMode = input.isRaw;
+    let value = '';
     let settled = false;
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-      completer,
-      terminal: true,
-    });
+
+    const render = () => {
+      readline.clearLine(output, 0);
+      readline.cursorTo(output, 0);
+      const defaultHint = defaultValue && !value ? ` (${defaultValue})` : '';
+      output.write(`? ${message}${defaultHint} ${value}`);
+    };
+
+    const cleanup = () => {
+      input.off('data', onData);
+      if (input.isTTY) input.setRawMode(previousRawMode);
+    };
 
     const finish = (callback: () => void) => {
       if (settled) return;
       settled = true;
-      rl.close();
+      cleanup();
+      output.write('\n');
       callback();
     };
 
+    const onData = (chunk: Buffer) => {
+      for (const char of chunk.toString('utf-8')) {
+        if (char === '\u0003') {
+          finish(() => reject(new Error('User force closed the prompt with SIGINT')));
+          return;
+        }
+        if (char === '\r' || char === '\n') {
+          finish(() => resolve(value || defaultValue || ''));
+          return;
+        }
+        if (char === '\t') {
+          value = completeCurrentReadlineValue(value, completer);
+          render();
+          continue;
+        }
+        if (char === '\u007f' || char === '\b') {
+          value = value.slice(0, -1);
+          render();
+          continue;
+        }
+        if (char === '\u0015') {
+          value = '';
+          render();
+          continue;
+        }
+        if (char >= ' ') {
+          value += char;
+          render();
+        }
+      }
+    };
+
+    input.setRawMode(true);
+    input.resume();
+    input.on('data', onData);
+    render();
+  });
+}
+
+function questionWithoutCompletion(message: string, defaultValue?: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
     rl.once('SIGINT', () => {
-      finish(() => reject(new Error('User force closed the prompt with SIGINT')));
+      rl.close();
+      reject(new Error('User force closed the prompt with SIGINT'));
     });
     rl.question(message, (answer) => {
-      finish(() => resolve(answer || defaultValue || ''));
+      rl.close();
+      resolve(answer || defaultValue || '');
     });
-    if (defaultValue) rl.write(defaultValue);
   });
 }
 
@@ -175,4 +260,20 @@ function isDirectorySync(candidate: string): boolean {
   } catch {
     return false;
   }
+}
+
+function commonPrefix(values: string[]): string {
+  if (values.length === 0) return '';
+  let prefix = values[0];
+  for (const value of values.slice(1)) {
+    while (!value.startsWith(prefix)) {
+      prefix = prefix.slice(0, -1);
+      if (!prefix) return '';
+    }
+  }
+  return prefix;
+}
+
+function stripTabCharacters(value: string): string {
+  return value.replaceAll('\t', '');
 }
