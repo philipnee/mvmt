@@ -368,14 +368,14 @@ token is stored at `~/.mvmt/.session-token` with file mode `600`. HTTP
 For repeatable client access, create scoped API tokens:
 
 ```bash
-mvmt token add codex --read /notes --ttl 7d
-mvmt token add codex --write /workspace --ttl 30d
+mvmt token add codex --scope notes:read --expires 7d
+mvmt token add laptop-claude --scope all:read --client claude-desktop --expires never
 ```
 
 `mvmt token add` prints the plaintext token once. mvmt stores only a scrypt
-verifier in config. Tokens expire after 30 days by default; use values like
-`--ttl 30m`, `--ttl 7d`, or `--ttl never` when creating or editing a token.
-If a client asks for an authorization token, paste the printed `mvmt_...`
+verifier in config. Tokens do not expire by default; use values like
+`--expires 30m`, `--expires 7d`, or `--expires never` when creating or editing a token.
+If a client asks for an authorization token, paste the printed `mvmt_t_...`
 value. If a web client sends you through OAuth, paste the same token into the
 mvmt approval page.
 
@@ -447,9 +447,9 @@ must not match `protect`.
 | `mvmt config setup` | Rerun guided setup |
 | `mvmt doctor` | Validate config and startup prerequisites |
 | `mvmt token` | List scoped API tokens |
-| `mvmt token add [id]` | Create or update a scoped API token |
+| `mvmt token add [name]` | Create a scoped API token and print it once |
 | `mvmt token edit [id]` | Edit a scoped API token |
-| `mvmt token rotate [id]` | Replace a scoped API token secret |
+| `mvmt token rotate [id] --yes` | Replace a scoped API token secret |
 | `mvmt token remove [id]` | Remove a scoped API token |
 | `mvmt token session` | Hidden compatibility command for the internal session token |
 | `mvmt tunnel` | Show tunnel status |

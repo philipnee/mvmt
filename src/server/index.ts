@@ -22,7 +22,7 @@ import {
 } from './oauth.js';
 import { rateLimit } from './rate-limit.js';
 import { ClientConfig } from '../config/schema.js';
-import { attachClientIdentity, ClientIdentity, isQuarantined, readClientIdentity, resolveClientIdentity } from './client-identity.js';
+import { attachClientIdentity, ClientIdentity, clientBindingMatches, isQuarantined, readClientIdentity, resolveClientIdentity } from './client-identity.js';
 
 // Rate limits are defense-in-depth against brute-force and DoS,
 // primarily meaningful when mvmt is exposed via a tunnel. Auth-gated
@@ -244,6 +244,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       oauthAccessToken,
       validateSession: (header) => validateSessionToken(header, tokenPath),
       allowLegacyDefault: resolveAllowLegacyDefaultClient(options.allowLegacyDefaultClient),
+      clientHint: requestClientHint(req, oauthAccessToken?.clientId),
     });
     if (identity && isQuarantined(identity)) {
       // Quarantined identities are authenticated (the OAuth access token
@@ -461,7 +462,12 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     }
 
     const requestId = params.requestId ?? randomUUID();
-    const approval = resolveAuthorizeApproval(req.body ?? {}, resolveClients(options.clients), tokenPath);
+    const approval = resolveAuthorizeApproval(
+      req.body ?? {},
+      resolveClients(options.clients),
+      tokenPath,
+      requestClientHint(req, params.clientId),
+    );
     if (!approval.ok) {
       const denyDetail = formatAuthorizeLogDetail({
         phase: approval.phase,
@@ -906,6 +912,14 @@ function firstHeaderValue(value: string | string[] | undefined): string | undefi
   return value;
 }
 
+function requestClientHint(req: Request, oauthClientId?: string): string | undefined {
+  const values = [
+    oauthClientId,
+    firstHeaderValue(req.headers['user-agent']),
+  ].filter((value): value is string => Boolean(value));
+  return values.length > 0 ? values.join(' ') : undefined;
+}
+
 type AuthorizeApproval =
   | { ok: true; mvmtClientId?: string }
   | { ok: false; phase: string; message: string };
@@ -914,10 +928,11 @@ function resolveAuthorizeApproval(
   body: Record<string, unknown>,
   clients: readonly ClientConfig[],
   tokenPath: string | undefined,
+  clientHint?: string,
 ): AuthorizeApproval {
   const apiTokenRaw = stringField(body.api_token);
   if (apiTokenRaw) {
-    const client = findApiTokenClient(apiTokenRaw, clients);
+    const client = findApiTokenClient(apiTokenRaw, clients, clientHint);
     if (client) return { ok: true, mvmtClientId: client.id };
     return {
       ok: false,
@@ -946,10 +961,11 @@ function resolveAuthorizeApproval(
   };
 }
 
-function findApiTokenClient(token: string, clients: readonly ClientConfig[]): ClientConfig | undefined {
+function findApiTokenClient(token: string, clients: readonly ClientConfig[], clientHint?: string): ClientConfig | undefined {
   for (const client of clients) {
     if (client.auth.type !== 'token') continue;
     if (isExpired(client.expiresAt)) continue;
+    if (!clientBindingMatches(client.clientBinding, clientHint)) continue;
     if (verifyApiToken(token, client.auth.tokenHash)) return client;
   }
   return undefined;

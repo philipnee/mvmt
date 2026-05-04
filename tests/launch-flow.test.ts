@@ -130,7 +130,7 @@ async function runCli(args: string[]): Promise<{ stdout: string; stderr: string 
 }
 
 function extractApiToken(output: string): string {
-  const match = output.match(/token: (mvmt_[^\s]+)/);
+  const match = output.match(/Token:\s+(mvmt_t_[^\s]+)/);
   if (!match) throw new Error(`Could not find API token in output:\n${output}`);
   return match[1];
 }

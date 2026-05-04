@@ -132,6 +132,21 @@ describe('resolveClientIdentity', () => {
       expect(identity).toBeUndefined();
     });
 
+    it('rejects an OAuth access token when the selected scoped token binding does not match', () => {
+      const codex = tokenClient('codex', 'codex-token', {
+        clientBinding: 'chatgpt',
+      });
+      const identity = resolveClientIdentity({
+        authHeader: 'Bearer mvmtv1.something',
+        clients: [codex],
+        oauthAccessToken: fakeOauthAccessToken('claude', 'codex'),
+        validateSession: ALWAYS_FALSE,
+        clientHint: 'claude',
+      });
+
+      expect(identity).toBeUndefined();
+    });
+
     it('falls back to the legacy default identity for OAuth tokens when clients[] is empty', () => {
       // Pre-PR OAuth flows keep working in legacy mode (no clients[]
       // configured). The operator opts into the strict quarantine model
@@ -189,6 +204,30 @@ describe('resolveClientIdentity', () => {
       expect(identity?.source).toBe('token');
       expect(identity?.id).toBe('codex');
       expect(identity?.rawToolsEnabled).toBe(true);
+    });
+
+    it('requires configured token client bindings to match the request hint', () => {
+      const codex = tokenClient('codex', 'codex-plaintext-token', {
+        clientBinding: 'claude-desktop',
+      });
+
+      const rejected = resolveClientIdentity({
+        authHeader: 'Bearer codex-plaintext-token',
+        clients: [codex],
+        oauthAccessToken: undefined,
+        validateSession: ALWAYS_FALSE,
+        clientHint: 'curl/8.0',
+      });
+      const accepted = resolveClientIdentity({
+        authHeader: 'Bearer codex-plaintext-token',
+        clients: [codex],
+        oauthAccessToken: undefined,
+        validateSession: ALWAYS_FALSE,
+        clientHint: 'Claude-Desktop/1.0',
+      });
+
+      expect(rejected).toBeUndefined();
+      expect(accepted?.id).toBe('codex');
     });
 
     it('rejects an expired configured token client even when the bearer matches', () => {

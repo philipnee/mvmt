@@ -1492,6 +1492,42 @@ describe('startHttpServer lifecycle', () => {
     }
   });
 
+  it('enforces client binding for direct bearer-token requests', async () => {
+    const router = new ToolRouter();
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const server = await startHttpServer(router, {
+      port: 0,
+      tokenPath,
+      clients: [
+        {
+          id: 'codex',
+          name: 'Codex CLI',
+          clientBinding: 'codex-cli',
+          auth: { type: 'token', tokenHash: hashApiToken('codex-local-token') },
+          rawToolsEnabled: true,
+          permissions: [],
+        },
+      ],
+    });
+
+    try {
+      const rejected = await fetch(`http://127.0.0.1:${server.port}/health`, {
+        headers: { Authorization: 'Bearer codex-local-token', 'User-Agent': 'curl/8.0' },
+      });
+      expect(rejected.status).toBe(401);
+
+      const accepted = await fetch(`http://127.0.0.1:${server.port}/health`, {
+        headers: { Authorization: 'Bearer codex-local-token', 'User-Agent': 'Codex-CLI/1.0' },
+      });
+      expect(accepted.status).toBe(200);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('filters MCP tools/list and denies tool calls by resolved client permissions', async () => {
     const { index, tmp: indexTmp } = await createTextIndexServerFixture();
     const router = new ToolRouter(undefined, [], { contextIndex: index });

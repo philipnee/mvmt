@@ -59,8 +59,8 @@ mount table plus scoped API-token permissions, not the client or model.
 Normal clients should use scoped API tokens:
 
 ```bash
-mvmt token add codex --read /notes --ttl 7d
-mvmt token rotate codex --ttl 30d
+mvmt token add codex --scope notes:read --expires 7d
+mvmt token rotate codex --expires 30d --yes
 mvmt token remove codex
 ```
 

@@ -1,5 +1,5 @@
 import readline from 'node:readline';
-import { select } from '@inquirer/prompts';
+import { confirm, select } from '@inquirer/prompts';
 import chalk from 'chalk';
 import { MvmtConfig } from '../config/schema.js';
 import { AuditEntry, AuditLogger, AUDIT_LOG_PATH } from '../utils/audit.js';
@@ -500,6 +500,14 @@ async function handleTokensEdit(state: InteractivePromptState): Promise<void> {
 
 async function handleTokensRotate(state: InteractivePromptState): Promise<void> {
   const tokenId = await promptForInteractiveTokenId(state.config, 'Rotate which API token?');
+  const ok = await confirm({
+    message: `Rotate token ${tokenId}? Connected clients using it will lose access until reconfigured.`,
+    default: false,
+  });
+  if (!ok) {
+    console.log(chalk.yellow('Token config unchanged.'));
+    return;
+  }
   const result = rotateApiTokenInConfig(state.config, tokenId);
   state.config.clients = result.config.clients;
   await state.persistConfig();
