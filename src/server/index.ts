@@ -46,8 +46,13 @@ const DEFAULT_HEALTH_RATE_LIMIT = { windowMs: 60_000, max: 120 };
 type McpSession = {
   transport: StreamableHTTPServerTransport;
   server: Server;
+  clientIdentityRef: ClientIdentityRef;
   clientIdentity?: ClientIdentity;
   lastActivity: number;
+};
+
+type ClientIdentityRef = {
+  current?: ClientIdentity;
 };
 
 export interface RateLimitOverrides {
@@ -106,7 +111,10 @@ export const MVMT_SERVER_INSTRUCTIONS = [
   'Do not use mvmt for general web or current-events questions unless the user asks about local files. Never write or remove unless the user explicitly asks to create, overwrite, or delete a specific file. If search returns no useful results, say that instead of inventing local file contents.',
 ].join('\n');
 
-export function createMcpServer(router: ToolRouter, clientIdentity?: ClientIdentity): Server {
+export function createMcpServer(router: ToolRouter, clientIdentity?: ClientIdentity | (() => ClientIdentity | undefined)): Server {
+  const resolveClientIdentityForRequest = typeof clientIdentity === 'function'
+    ? clientIdentity
+    : () => clientIdentity;
   const server = new Server(
     { name: 'mvmt', version: '0.1.0' },
     {
@@ -116,7 +124,7 @@ export function createMcpServer(router: ToolRouter, clientIdentity?: ClientIdent
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: router.getAllTools(clientIdentity).map((tool) => ({
+    tools: router.getAllTools(resolveClientIdentityForRequest()).map((tool) => ({
       name: tool.namespacedName,
       description: tool.description,
       inputSchema: tool.inputSchema as { type: 'object'; properties?: Record<string, object>; required?: string[] },
@@ -125,7 +133,11 @@ export function createMcpServer(router: ToolRouter, clientIdentity?: ClientIdent
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     try {
-      const result = await router.callTool(request.params.name, request.params.arguments ?? {}, clientIdentity);
+      const result = await router.callTool(
+        request.params.name,
+        request.params.arguments ?? {},
+        resolveClientIdentityForRequest(),
+      );
       return result as any;
     } catch (err) {
       return {
@@ -683,10 +695,13 @@ async function handleMcpRequest(
 
   if (sessionId && sessions.has(sessionId)) {
     const session = sessions.get(sessionId)!;
-    if (!sameClientIdentity(session.clientIdentity, readClientIdentity(req))) {
+    const requestIdentity = readClientIdentity(req);
+    if (!sameClientIdentity(session.clientIdentity, requestIdentity)) {
       res.status(403).json({ error: 'mcp_session_client_mismatch' });
       return;
     }
+    session.clientIdentity = requestIdentity;
+    session.clientIdentityRef.current = requestIdentity;
     session.lastActivity = Date.now();
     if (isStandaloneSseRequest(req)) {
       session.transport.closeStandaloneSSEStream();
@@ -703,8 +718,8 @@ async function handleMcpRequest(
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: () => randomUUID(),
   });
-  const clientIdentity = readClientIdentity(req);
-  const server = createMcpServer(router, clientIdentity);
+  const clientIdentityRef: ClientIdentityRef = { current: readClientIdentity(req) };
+  const server = createMcpServer(router, () => clientIdentityRef.current);
 
   transport.onerror = (error) => {
     if (isBenignDuplicateSseConflict(error)) {
@@ -723,7 +738,13 @@ async function handleMcpRequest(
   await transport.handleRequest(req, res, req.body);
 
   if (transport.sessionId) {
-    sessions.set(transport.sessionId, { transport, server, clientIdentity, lastActivity: Date.now() });
+    sessions.set(transport.sessionId, {
+      transport,
+      server,
+      clientIdentityRef,
+      clientIdentity: clientIdentityRef.current,
+      lastActivity: Date.now(),
+    });
   }
 }
 
