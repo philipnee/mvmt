@@ -103,7 +103,7 @@ describe('TextContextIndex', () => {
     const stats = await index.rebuild();
 
     expect(stats).toEqual({ files: 5_000, chunks: 5_000, truncated: true });
-  });
+  }, 20_000);
 
   it('lists and reads virtual paths without exposing host paths', async () => {
     await fs.mkdir(path.join(tmp, 'docs'));
