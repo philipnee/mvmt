@@ -29,6 +29,36 @@ through explicit mounts, narrow tools, and per-client permissions.
 
 ![mvmt running in interactive mode](docs/assets/mvmt-start-interactive.png)
 
+## Quick start
+
+Install mvmt:
+
+```bash
+npm install -g mvmt
+mvmt serve -i
+```
+
+On first run, mvmt creates:
+
+```txt
+~/.mvmt/config.yaml
+```
+
+It then walks through:
+
+- adding local folder mounts;
+- optionally enabling the pattern redactor;
+- starting the MCP server.
+
+For a one-off read-only folder without changing saved config:
+
+```bash
+mvmt serve --path ~/Documents -i
+```
+
+At least one enabled mount is required. If no mounts are configured, mvmt has no
+data to serve.
+
 ## Why mvmt exists
 
 Many tools need controlled access to local files.
@@ -100,41 +130,6 @@ cannot be written or removed. mvmt also has a global secret-path deny list
 for paths such as `.mvmt/**`, `.ssh/**`, `.aws/**`, `.kube/**`, and common
 cloud/dev credential files. Those paths are blocked even if an older config
 does not list them.
-
-## Quick start
-
-Run mvmt from this source checkout:
-
-```bash
-npm install
-npm run build
-npm link
-mvmt serve -i
-```
-
-The current npm package named `mvmt` is not this CLI release yet. Until this
-package is published with the `mvmt` executable, use the source install above.
-
-On first run, mvmt creates:
-
-```txt
-~/.mvmt/config.yaml
-```
-
-It then walks through:
-
-- adding local folder mounts;
-- optionally enabling the pattern redactor;
-- starting the MCP server.
-
-For a one-off read-only folder without changing saved config:
-
-```bash
-mvmt serve --path ~/Documents -i
-```
-
-At least one enabled mount is required. If no mounts are configured, mvmt has no
-data to serve.
 
 ## Example setup
 
