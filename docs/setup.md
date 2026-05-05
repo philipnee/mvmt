@@ -10,7 +10,14 @@ This guide covers install, mount setup, server startup, and client connection.
 
 ## Install
 
-From this source checkout:
+Install the CLI:
+
+```bash
+npm install -g mvmt
+mvmt --version
+```
+
+For local development from a source checkout:
 
 ```bash
 npm install
@@ -18,10 +25,6 @@ npm run build
 npm link
 mvmt --version
 ```
-
-The current npm package named `mvmt` is not this CLI release yet. If
-`npm install -g mvmt` leaves you with `zsh: command not found: mvmt`, use the
-source install above.
 
 ## First 10 Minutes
 
@@ -34,6 +37,8 @@ mvmt reindex
 mvmt serve -i
 codex mcp add mvmt --url http://127.0.0.1:4141/mcp
 ```
+
+`-i` starts mvmt in interactive mode.
 
 When the client asks for authentication, paste the `mvmt_t_...` API token printed
 by `mvmt token add`.
