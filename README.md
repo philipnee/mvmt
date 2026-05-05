@@ -31,12 +31,19 @@ through explicit mounts, narrow tools, and per-client permissions.
 
 ## Quick start
 
-Install mvmt:
+Install mvmt from source:
 
 ```bash
-npm install -g mvmt
+git clone https://github.com/philipnee/mvmt.git
+cd mvmt
+npm install
+npm run build
+npm link
 mvmt serve -i
 ```
+
+The `mvmt` package name is already taken on npm, so the first public beta uses
+the source checkout path above.
 
 `-i` starts mvmt in interactive mode.
 

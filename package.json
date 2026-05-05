@@ -1,6 +1,6 @@
 {
   "name": "mvmt",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Mount selected local folders and serve them over MCP",
   "license": "MIT",
   "type": "module",

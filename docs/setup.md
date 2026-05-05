@@ -10,21 +10,19 @@ This guide covers install, mount setup, server startup, and client connection.
 
 ## Install
 
-Install the CLI:
+Install the CLI from source:
 
 ```bash
-npm install -g mvmt
-mvmt --version
-```
-
-For local development from a source checkout:
-
-```bash
+git clone https://github.com/philipnee/mvmt.git
+cd mvmt
 npm install
 npm run build
 npm link
 mvmt --version
 ```
+
+The `mvmt` package name is already taken on npm, so the first public beta uses
+the source checkout path above.
 
 ## First 10 Minutes
 
