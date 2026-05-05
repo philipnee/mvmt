@@ -38,6 +38,8 @@ npm install -g mvmt
 mvmt serve -i
 ```
 
+`-i` starts mvmt in interactive mode.
+
 On first run, mvmt creates:
 
 ```txt

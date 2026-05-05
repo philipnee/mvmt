@@ -38,6 +38,8 @@ mvmt serve -i
 codex mcp add mvmt --url http://127.0.0.1:4141/mcp
 ```
 
+`-i` starts mvmt in interactive mode.
+
 When the client asks for authentication, paste the `mvmt_t_...` API token printed
 by `mvmt token add`.
 
