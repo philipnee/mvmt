@@ -6,6 +6,8 @@ This project follows the spirit of Keep a Changelog and uses semantic versioning
 
 ## Unreleased
 
+## 0.1.1 - 2026-05-05
+
 ### Added
 
 - Repository governance files for open-source release preparation.
@@ -24,6 +26,9 @@ This project follows the spirit of Keep a Changelog and uses semantic versioning
 
 ### Changed
 
+- Updated the public install path to use `git clone`, `npm run build`, and
+  `npm link` because the unscoped `mvmt` package name is already taken on npm.
+- Replaced the README interactive-mode screenshot with a scrubbed version.
 - Internal refactor: `src/cli/start.ts` split into focused modules (`connector-loader`, `interactive`, `tunnel-controller`). Per-connector setup extracted into `src/connectors/{filesystem,obsidian,mempalace}-setup.ts`. Shared `saveConfig()` consolidated on `src/config/loader.ts`.
 - `PluginSchema` is now a single-variant `z.discriminatedUnion('name', ...)` so adding a second plugin is a schema addition rather than a structural refactor.
 - OAuth `/authorize` now defaults a missing `resource` parameter to the instance's canonical `/mcp` resource for client compatibility, while preserving token audience binding and still rejecting explicit wrong resources.
