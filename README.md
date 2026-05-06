@@ -596,6 +596,21 @@ Later:
 - `resolve(path) -> AccessPlan` for routing virtual paths to local or remote
   backends.
 
+## Testing
+
+`npm test` runs the unit and integration suite (no external dependencies).
+`npm run verify` is the PR gate — build, full tests, whitespace, package
+dry-run, and a runtime smoke test. See [CONTRIBUTING.md](CONTRIBUTING.md) for
+the full matrix.
+
+`npm run e2e` runs a Docker-based end-to-end suite that builds the package,
+installs it fresh into a `node:20-alpine` container, and exercises real CLI
+flows against the running server. Requires Docker. The first run pays the
+image-build cost (~30s); subsequent runs reuse the cached image. The current
+suite covers the token + auth surface — scope enforcement, path validity,
+and bearer-token failure modes — and is excluded from `npm test` so the
+default loop stays fast.
+
 ## Project docs
 
 - [Setup guide](docs/setup.md)
