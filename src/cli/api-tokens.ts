@@ -758,11 +758,11 @@ export function printApiTokenSaved(configPath: string, result: ApiTokenUpdateRes
     console.log('');
     console.log(chalk.yellow('This is the only time the token will be shown. Store it now.'));
     console.log('');
-    console.log(`  Connect${result.client.clientBinding ? ` from ${result.client.clientBinding}` : ''}:`);
-    console.log('    claude mcp add --transport http \\');
-    console.log(`      --header "Authorization: Bearer ${result.plaintextToken}" \\`);
-    console.log('      mvmt http://127.0.0.1:4141/mcp');
+    console.log(`  HTTP MCP endpoint${result.client.clientBinding ? ` for ${result.client.clientBinding}` : ''}:`);
+    console.log('    URL:    http://127.0.0.1:4141/mcp');
+    console.log(`    Header: Authorization: Bearer ${result.plaintextToken}`);
     console.log('');
+    console.log(chalk.dim('Use these values in any HTTP MCP client. See docs/client-setup.md for client-specific setup.'));
     console.log(chalk.dim('For OAuth clients, paste this token into the mvmt approval page when asked.'));
   } else {
     console.log('');

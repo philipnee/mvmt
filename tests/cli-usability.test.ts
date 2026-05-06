@@ -186,7 +186,12 @@ describe('CLI usability', () => {
       expect(stdout).toContain('Scope:   notes:read');
       expect(stdout).toContain('Token:   mvmt_t_');
       expect(stdout).toContain('Expires:');
+      expect(stdout).toContain('HTTP MCP endpoint');
+      expect(stdout).toContain('URL:    http://127.0.0.1:4141/mcp');
+      expect(stdout).toContain('Header: Authorization: Bearer mvmt_t_');
+      expect(stdout).toContain('Use these values in any HTTP MCP client');
       expect(stdout).toContain('For OAuth clients, paste this token into the mvmt approval page');
+      expect(stdout).not.toContain('claude mcp add');
 
       const { stdout: list } = await runCli(['token', '--config', configPath]);
       expect(list).toContain('NAME');
