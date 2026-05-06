@@ -313,7 +313,7 @@ describe('CLI usability', () => {
       ]);
       expect(stdout).toContain('Token updated.');
       expect(stdout).toContain('Existing token value was not changed.');
-      expect(stdout).toContain('Existing OAuth grants must reauthorize because this edit added access or changed client binding.');
+      expect(stdout).toContain('Permission edit applies to existing API tokens and OAuth grants on the next request.');
 
       const { stdout: list } = await runCli(['token', '--config', configPath]);
       expect(list).toContain('workspace:write');
@@ -355,7 +355,7 @@ describe('CLI usability', () => {
 
       expect(stdout).toContain('Token updated.');
       expect(stdout).toContain('Existing token value was not changed.');
-      expect(stdout).toContain('Permission edit did not add access; existing OAuth grants keep working and current limits apply on the next request.');
+      expect(stdout).toContain('Permission edit applies to existing API tokens and OAuth grants on the next request.');
 
       const { stdout: list } = await runCli(['token', '--config', configPath]);
       expect(list).toContain('workspace:read');

@@ -1494,6 +1494,67 @@ describe('startHttpServer lifecycle', () => {
     }
   });
 
+  it('keeps existing OAuth grants after scoped API token permissions are edited', async () => {
+    const { index, tmp: indexTmp } = await createTextIndexServerFixture();
+    const router = new ToolRouter(undefined, [], { contextIndex: index });
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    let clients: ClientConfig[] = [
+      {
+        id: 'codex',
+        name: 'Codex CLI',
+        credentialVersion: 1,
+        auth: { type: 'token', tokenHash: hashApiToken('codex-api-token') },
+        rawToolsEnabled: false,
+        permissions: [{ path: '/workspace/**', actions: ['search', 'read'] }],
+      },
+    ];
+    const server = await startHttpServer(router, {
+      port: 0,
+      tokenPath,
+      clients: () => clients,
+    });
+
+    try {
+      const accessToken = await exchangeAccessTokenWithApiToken(server.port, 'codex-api-token');
+      const sessionId = await initializeMcpSession(server.port, accessToken);
+      const beforeEdit = await mcpJsonRequest(server.port, accessToken, sessionId, 2, 'tools/list', {});
+      expect(beforeEdit.result.tools.map((tool: { name: string }) => tool.name)).toEqual([
+        'search',
+        'list',
+        'read',
+      ]);
+
+      const current = clients[0]!;
+      clients = [
+        {
+          ...current,
+          permissions: [{ path: '/workspace/**', actions: ['search', 'read', 'write'] }],
+        },
+      ];
+
+      const afterEdit = await mcpJsonRequest(server.port, accessToken, sessionId, 3, 'tools/list', {});
+      expect(afterEdit.result.tools.map((tool: { name: string }) => tool.name)).toEqual([
+        'search',
+        'list',
+        'read',
+        'write',
+        'remove',
+      ]);
+
+      const write = await mcpJsonRequest(server.port, accessToken, sessionId, 4, 'tools/call', {
+        name: 'write',
+        arguments: { path: '/workspace/after-oauth-edit.md', content: 'after edit' },
+      });
+      expect(write.result.isError).not.toBe(true);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+      fs.rmSync(indexTmp, { recursive: true, force: true });
+    }
+  });
+
   it('rejects OAuth approval with an invalid scoped API token', async () => {
     const router = new ToolRouter();
     await router.initialize();
@@ -2048,6 +2109,53 @@ async function exchangeAccessToken(port: number, sessionToken: string, resourceB
       grant_type: 'authorization_code',
       code: code!,
       client_id: 'codex',
+      redirect_uri: redirectUri,
+      resource,
+      code_verifier: verifier,
+    }),
+  });
+  const body = await token.json();
+  expect(token.status).toBe(200);
+  expect(body.access_token).toBeTypeOf('string');
+  return body.access_token as string;
+}
+
+async function exchangeAccessTokenWithApiToken(port: number, apiToken: string): Promise<string> {
+  const redirectUri = 'https://codex.example/callback';
+  const { verifier, challenge } = s256Pair();
+  const resource = `http://127.0.0.1:${port}/mcp`;
+  const registration = await fetch(`http://127.0.0.1:${port}/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ redirect_uris: [redirectUri] }),
+  });
+  expect(registration.status).toBe(201);
+  const { client_id: clientId } = await registration.json() as { client_id: string };
+  const authorize = await fetch(`http://127.0.0.1:${port}/authorize`, {
+    method: 'POST',
+    redirect: 'manual',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      response_type: 'code',
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      resource,
+      code_challenge: challenge,
+      code_challenge_method: 'S256',
+      api_token: apiToken,
+    }),
+  });
+  expect(authorize.status).toBe(302);
+  const code = new URL(authorize.headers.get('location')!).searchParams.get('code');
+  expect(code).toBeTruthy();
+
+  const token = await fetch(`http://127.0.0.1:${port}/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'authorization_code',
+      code: code!,
+      client_id: clientId,
       redirect_uri: redirectUri,
       resource,
       code_verifier: verifier,
