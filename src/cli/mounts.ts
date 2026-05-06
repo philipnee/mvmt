@@ -57,6 +57,9 @@ export interface MountInput {
   enabled?: boolean;
 }
 
+export const MOUNT_LOAD_NOTICE = 'Running mvmt loads mount changes on the next request. Run `mvmt reindex` for search.';
+export const MOUNT_UNLOAD_NOTICE = 'Running mvmt unloads mount changes on the next request. Run `mvmt reindex` for search.';
+
 export async function listMounts(options: MountCommandOptions = {}): Promise<void> {
   const config = loadConfig(resolveMountsConfigPath(options.config));
   printMounts(config, { json: Boolean(options.json) });
@@ -74,7 +77,8 @@ export async function addMount(name: string | undefined, root: string | undefine
   const nextConfig = addMountToConfig(config, inputValue);
   await saveConfig(configPath, nextConfig);
   console.log(chalk.green(`Mount ${inputValue.name} saved to ${configPath}`));
-  console.log(chalk.dim('Restart mvmt for the running server to load mount changes. Run `mvmt reindex` to rebuild the index.'));
+  printMountBasePermission(inputValue.writeAccess);
+  console.log(chalk.dim(MOUNT_LOAD_NOTICE));
 }
 
 export async function editMount(name: string | undefined, options: EditMountOptions = {}): Promise<void> {
@@ -89,9 +93,11 @@ export async function editMount(name: string | undefined, options: EditMountOpti
   if (patch.root && !await validateMountRootForCommand(patch.root)) return;
 
   const nextConfig = editMountInConfig(config, mountName, patch);
+  const updatedMount = findMount(nextConfig, mountName);
   await saveConfig(configPath, nextConfig);
   console.log(chalk.green(`Mount ${mountName} updated in ${configPath}`));
-  console.log(chalk.dim('Restart mvmt for the running server to load mount changes. Run `mvmt reindex` to rebuild the index.'));
+  printMountBasePermission(updatedMount.writeAccess);
+  console.log(chalk.dim(MOUNT_LOAD_NOTICE));
 }
 
 export async function removeMount(name: string | undefined, options: RemoveMountOptions = {}): Promise<void> {
@@ -110,7 +116,7 @@ export async function removeMount(name: string | undefined, options: RemoveMount
   const nextConfig = removeMountFromConfig(config, mountName);
   await saveConfig(configPath, nextConfig);
   console.log(chalk.green(`Mount ${mountName} removed from ${configPath}`));
-  console.log(chalk.dim('Restart mvmt for the running server to unload mount changes. Run `mvmt reindex` to rebuild the index.'));
+  console.log(chalk.dim(MOUNT_UNLOAD_NOTICE));
 }
 
 export function printMounts(config: MvmtConfig, options: { json?: boolean } = {}): void {
@@ -148,6 +154,12 @@ function toMountSummary(mount: LocalFolderMountConfig): Record<string, unknown> 
     exclude: mount.exclude,
     protect: mount.protect,
   };
+}
+
+export function printMountBasePermission(writeAccess: boolean): void {
+  const access = writeAccess ? 'read/write' : 'read-only';
+  const message = `Base permission: ${access}. Tokens cannot exceed it.`;
+  console.log(writeAccess ? chalk.yellow(message) : chalk.dim(message));
 }
 
 export function addMountToConfig(config: MvmtConfig, mountInput: MountInput): MvmtConfig {
@@ -189,6 +201,12 @@ export function editMountInConfig(config: MvmtConfig, name: string, patch: Parti
   };
 }
 
+export function findMount(config: MvmtConfig, name: string): LocalFolderMountConfig {
+  const mount = config.mounts.find((candidate) => candidate.name === name);
+  if (!mount) throw new Error(`Unknown mount: ${name}`);
+  return mount;
+}
+
 export function removeMountFromConfig(config: MvmtConfig, name: string): MvmtConfig {
   if (!config.mounts.some((mount) => mount.name === name)) {
     throw new Error(`Unknown mount: ${name}`);
@@ -197,19 +215,24 @@ export function removeMountFromConfig(config: MvmtConfig, name: string): MvmtCon
   return { ...config, mounts: config.mounts.filter((mount) => mount.name !== name) };
 }
 
-export async function promptAndAddMount(config: MvmtConfig): Promise<MvmtConfig | undefined> {
-  const mount = await promptForMountInput(config);
-  return addMountToConfig(config, mount);
+export interface MountPromptResult {
+  config: MvmtConfig;
+  name: string;
 }
 
-export async function promptAndEditMount(config: MvmtConfig): Promise<MvmtConfig | undefined> {
+export async function promptAndAddMount(config: MvmtConfig): Promise<MountPromptResult | undefined> {
+  const mount = await promptForMountInput(config);
+  return { config: addMountToConfig(config, mount), name: mount.name };
+}
+
+export async function promptAndEditMount(config: MvmtConfig): Promise<MountPromptResult | undefined> {
   if (config.mounts.length === 0) {
     console.log(chalk.yellow('No mounts configured.'));
     return undefined;
   }
   const name = await promptForMountName(config, 'Edit which mount?');
   const patch = await promptForMountPatch(config, name);
-  return editMountInConfig(config, name, patch);
+  return { config: editMountInConfig(config, name, patch), name };
 }
 
 export async function promptAndRemoveMount(config: MvmtConfig): Promise<MvmtConfig | undefined> {
@@ -289,7 +312,7 @@ async function promptForMountInput(config: MvmtConfig): Promise<MountInput> {
     validate: (value) => validateMountPathInput(value, config),
   });
   const writeAccess = await confirm({
-    message: 'Allow write/remove under this mount?',
+    message: 'Allow write/remove? This is the base permission.',
     default: false,
   });
   const description = await input({
@@ -341,7 +364,7 @@ async function promptForMountPatch(config: MvmtConfig, name: string): Promise<Pa
     validate: (value) => validateMountPathInput(value, config, name),
   });
   const writeAccess = await confirm({
-    message: 'Allow write/remove under this mount?',
+    message: 'Allow write/remove? This is the base permission.',
     default: current.writeAccess,
   });
   const enabled = await confirm({

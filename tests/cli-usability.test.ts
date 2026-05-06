@@ -65,6 +65,7 @@ describe('CLI usability', () => {
 
       const { stdout } = await runCli(['mounts', 'remove', 'notes', '--config', configPath, '--yes']);
       expect(stdout).toContain('Mount notes removed');
+      expect(stdout).toContain('Running mvmt unloads mount changes on the next request.');
 
       const { stdout: json } = await runCli(['mounts', '--config', configPath, '--json']);
       expect(JSON.parse(json)).toEqual({ mounts: [] });
@@ -128,6 +129,44 @@ describe('CLI usability', () => {
     }
   });
 
+  it('explains mount base permission after add and edit', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    const configPath = path.join(tmp, 'config.yaml');
+    const mountRoot = path.join(tmp, 'docs');
+    try {
+      await fs.mkdir(mountRoot);
+
+      const add = await runCli([
+        'mounts',
+        'add',
+        'docs',
+        mountRoot,
+        '--config',
+        configPath,
+        '--mount-path',
+        '/docs',
+        '--read-only',
+      ]);
+      expect(add.stdout).toContain('Base permission: read-only. Tokens cannot exceed it.');
+      expect(add.stdout).toContain('Running mvmt loads mount changes on the next request.');
+
+      const edit = await runCli([
+        'mounts',
+        'edit',
+        'docs',
+        '--config',
+        configPath,
+        '--write',
+      ]);
+      expect(edit.stdout).toContain('Base permission: read/write. Tokens cannot exceed it.');
+
+      const updated = readConfig(configPath);
+      expect(updated.mounts[0].writeAccess).toBe(true);
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('can disable tunnel access without removing saved tunnel details', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
     const configPath = path.join(tmp, 'config.yaml');
@@ -186,7 +225,12 @@ describe('CLI usability', () => {
       expect(stdout).toContain('Scope:   notes:read');
       expect(stdout).toContain('Token:   mvmt_t_');
       expect(stdout).toContain('Expires:');
+      expect(stdout).toContain('HTTP MCP endpoint');
+      expect(stdout).toContain('URL:    http://127.0.0.1:4141/mcp');
+      expect(stdout).toContain('Header: Authorization: Bearer mvmt_t_');
+      expect(stdout).toContain('Use these values in any HTTP MCP client');
       expect(stdout).toContain('For OAuth clients, paste this token into the mvmt approval page');
+      expect(stdout).not.toContain('claude mcp add');
 
       const { stdout: list } = await runCli(['token', '--config', configPath]);
       expect(list).toContain('NAME');
@@ -222,6 +266,35 @@ describe('CLI usability', () => {
       })}\n`, 'utf-8');
       const { stdout: listWithUse } = await runCli(['token', '--config', configPath]);
       expect(listWithUse).toContain('12 minutes ago');
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('labels client-bound API-token endpoints clearly', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    const configPath = path.join(tmp, 'config.yaml');
+    const mountRoot = path.join(tmp, 'notes');
+    try {
+      await fs.mkdir(mountRoot);
+      await saveConfig(configPath, parseConfig({
+        version: 1,
+        mounts: [{ name: 'notes', type: 'local_folder', path: '/notes', root: mountRoot }],
+      }));
+
+      const { stdout } = await runCli([
+        'token',
+        'add',
+        'codex',
+        '--config',
+        configPath,
+        '--read',
+        '/notes',
+        '--client',
+        'codex',
+      ]);
+
+      expect(stdout).toContain('HTTP MCP endpoint (client: codex):');
     } finally {
       await fs.rm(tmp, { recursive: true, force: true });
     }
@@ -308,11 +381,50 @@ describe('CLI usability', () => {
       ]);
       expect(stdout).toContain('Token updated.');
       expect(stdout).toContain('Existing token value was not changed.');
-      expect(stdout).toContain('Existing OAuth grants must reauthorize because this edit added access or changed client binding.');
+      expect(stdout).toContain('Permission edit applies to existing API tokens and OAuth grants on the next request.');
 
       const { stdout: list } = await runCli(['token', '--config', configPath]);
       expect(list).toContain('workspace:write');
       expect(list).toContain('never');
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('explains client-binding edits require OAuth reauthorization', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    const configPath = path.join(tmp, 'config.yaml');
+    const mountRoot = path.join(tmp, 'workspace');
+    try {
+      await fs.mkdir(mountRoot);
+      await saveConfig(configPath, parseConfig({
+        version: 1,
+        mounts: [{ name: 'workspace', type: 'local_folder', path: '/workspace', root: mountRoot, writeAccess: true }],
+      }));
+
+      await runCli([
+        'token',
+        'add',
+        'codex',
+        '--config',
+        configPath,
+        '--read',
+        '/workspace',
+      ]);
+      const { stdout } = await runCli([
+        'token',
+        'edit',
+        'codex',
+        '--config',
+        configPath,
+        '--client',
+        'claude',
+        '--scope',
+        'workspace:write',
+      ]);
+
+      expect(stdout).toContain('Existing OAuth grants must reauthorize because this edit changed client binding.');
+      expect(stdout).toContain('Permission edit applies immediately to API tokens, and to OAuth grants after reauthorization.');
     } finally {
       await fs.rm(tmp, { recursive: true, force: true });
     }
@@ -350,7 +462,7 @@ describe('CLI usability', () => {
 
       expect(stdout).toContain('Token updated.');
       expect(stdout).toContain('Existing token value was not changed.');
-      expect(stdout).toContain('Permission edit did not add access; existing OAuth grants keep working and current limits apply on the next request.');
+      expect(stdout).toContain('Permission edit applies to existing API tokens and OAuth grants on the next request.');
 
       const { stdout: list } = await runCli(['token', '--config', configPath]);
       expect(list).toContain('workspace:read');

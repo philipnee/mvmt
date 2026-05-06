@@ -395,11 +395,11 @@ Once API tokens are present, `/mcp` becomes strict:
 - the session token no longer grants data-plane access;
 - unknown OAuth clients are quarantined with zero permissions.
 
-Policy changes take effect on the next auth request. Narrowing token scope
-(for example write to read, removing a path, or `--no-permissions`) applies to
-existing OAuth grants without reauthorization. Adding access, moving access to a
-different path, or editing `clientBinding` bumps that token's credential version,
-so OAuth access and refresh tokens selected through the old policy stop working.
+Policy changes take effect on the next auth request. Scope edits, including
+adding access, removing paths, or `--no-permissions`, apply to existing API
+tokens and OAuth grants without reauthorization. Editing `clientBinding` bumps
+that token's credential version, so OAuth access and refresh tokens selected
+through the old binding must reauthorize.
 `mvmt token rotate <id>` replaces only that API token's secret; `mvmt token
 session-rotate` rotates the internal session token and OAuth signing key,
 revoking OAuth access tokens across clients.

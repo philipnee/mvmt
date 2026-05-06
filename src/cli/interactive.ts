@@ -7,7 +7,16 @@ import { HttpRequestLogEntry } from '../server/index.js';
 import { formatMcpPublicUrl } from '../utils/tunnel.js';
 import { printApiTokenSaved, printApiTokens, promptAndAddApiToken, promptAndEditApiToken, promptAndRemoveApiToken, rotateApiTokenInConfig } from './api-tokens.js';
 import { printConfigSummary } from './config.js';
-import { printMounts, promptAndAddMount, promptAndEditMount, promptAndRemoveMount } from './mounts.js';
+import {
+  findMount,
+  MOUNT_LOAD_NOTICE,
+  MOUNT_UNLOAD_NOTICE,
+  printMountBasePermission,
+  printMounts,
+  promptAndAddMount,
+  promptAndEditMount,
+  promptAndRemoveMount,
+} from './mounts.js';
 import { applyTunnelConfig, printTunnelEnabledWithNoTokens, promptForTunnelConfig } from './tunnel.js';
 import { LoadedConnector } from './connector-loader.js';
 import { TunnelController } from './tunnel-controller.js';
@@ -453,21 +462,23 @@ function printConnectorSummary(loaded: LoadedConnector[], totalTools: number): v
 }
 
 async function handleMountsAdd(state: InteractivePromptState): Promise<void> {
-  const nextConfig = await promptAndAddMount(state.config);
-  if (!nextConfig) return;
-  state.config.mounts = nextConfig.mounts;
+  const result = await promptAndAddMount(state.config);
+  if (!result) return;
+  state.config.mounts = result.config.mounts;
   await state.persistConfig();
   console.log(chalk.green(`Mounts saved to ${state.configPath}`));
-  console.log(chalk.dim('Restart mvmt for the running server to load mount changes. Run `mvmt reindex` to rebuild the index.'));
+  printMountBasePermission(findMount(result.config, result.name).writeAccess);
+  console.log(chalk.dim(MOUNT_LOAD_NOTICE));
 }
 
 async function handleMountsEdit(state: InteractivePromptState): Promise<void> {
-  const nextConfig = await promptAndEditMount(state.config);
-  if (!nextConfig) return;
-  state.config.mounts = nextConfig.mounts;
+  const result = await promptAndEditMount(state.config);
+  if (!result) return;
+  state.config.mounts = result.config.mounts;
   await state.persistConfig();
   console.log(chalk.green(`Mounts saved to ${state.configPath}`));
-  console.log(chalk.dim('Restart mvmt for the running server to load mount changes. Run `mvmt reindex` to rebuild the index.'));
+  printMountBasePermission(findMount(result.config, result.name).writeAccess);
+  console.log(chalk.dim(MOUNT_LOAD_NOTICE));
 }
 
 async function handleMountsRemove(state: InteractivePromptState): Promise<void> {
@@ -479,7 +490,7 @@ async function handleMountsRemove(state: InteractivePromptState): Promise<void> 
   state.config.mounts = nextConfig.mounts;
   await state.persistConfig();
   console.log(chalk.green(`Mounts saved to ${state.configPath}`));
-  console.log(chalk.dim('Restart mvmt for the running server to load mount changes. Run `mvmt reindex` to rebuild the index.'));
+  console.log(chalk.dim(MOUNT_UNLOAD_NOTICE));
 }
 
 async function handleTokensAdd(state: InteractivePromptState): Promise<void> {

@@ -75,8 +75,8 @@ describe('API token config helpers', () => {
     expect(result.created).toBe(false);
     expect(result.plaintextToken).toBeUndefined();
     expect(result.client.auth).toEqual({ type: 'token', tokenHash: EXISTING_TOKEN_VERIFIER });
-    expect(result.client.credentialVersion).toBe(2);
-    expect(result.credentialVersionChanged).toBe(true);
+    expect(result.client.credentialVersion).toBeUndefined();
+    expect(result.credentialVersionChanged).toBe(false);
     expect(result.client.permissions).toEqual([
       { path: '/workspace/**', actions: ['search', 'read', 'write'] },
     ]);
@@ -145,7 +145,7 @@ describe('API token config helpers', () => {
     ]);
   });
 
-  it('invalidates existing OAuth grants when a read permission moves to a different path', () => {
+  it('moves read permission to a different path without invalidating existing OAuth grants', () => {
     const config = parseConfig({
       version: 1,
       mounts: [
@@ -168,8 +168,8 @@ describe('API token config helpers', () => {
       permissions: [{ source: 'archive', mode: 'read' }],
     });
 
-    expect(result.client.credentialVersion).toBe(5);
-    expect(result.credentialVersionChanged).toBe(true);
+    expect(result.client.credentialVersion).toBe(4);
+    expect(result.credentialVersionChanged).toBe(false);
     expect(result.client.permissions).toEqual([
       { path: '/archive/**', actions: ['search', 'read'] },
     ]);
@@ -249,12 +249,13 @@ describe('API token config helpers', () => {
       id: 'codex',
       name: 'Codex',
       description: 'updated description',
-      credentialVersion: 5,
+      credentialVersion: 4,
       auth: { type: 'token', tokenHash: EXISTING_TOKEN_VERIFIER },
       permissions: [
         { path: '/workspace/**', actions: ['search', 'read', 'write'] },
       ],
     });
+    expect(result.credentialVersionChanged).toBe(false);
     expect(result.client.expiresAt).toBeUndefined();
   });
 

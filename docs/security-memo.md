@@ -78,11 +78,10 @@ config.
 checked against the request client label or User-Agent to catch accidental use by
 the wrong client, but a leaked plaintext token is still the secret to revoke.
 
-Scope edits that add access bump the token credential version, which invalidates
-OAuth grants selected through the old policy on the next request. Narrowing a
-scope, including removing paths or clearing permissions, applies to existing
-grants without reauthorization. Client-binding edits also bump the credential
-version. `mvmt token rotate <id>` rotates one API-token secret. `mvmt token
+Scope edits, including adding access, removing paths, or clearing permissions,
+apply to existing API tokens and OAuth grants on the next request. Client-binding
+edits bump the credential version and require OAuth reauthorization.
+`mvmt token rotate <id>` rotates one API-token secret. `mvmt token
 session-rotate` rotates the internal session token and OAuth signing key, which
 revokes OAuth access tokens across clients.
 

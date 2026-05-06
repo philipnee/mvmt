@@ -309,10 +309,7 @@ export function editApiTokenInConfig(
   const clientBinding = inputValue.clientBinding !== undefined
     ? normalizeClientBinding(inputValue.clientBinding)
     : existing.clientBinding;
-  const shouldBumpCredentialVersion = (
-    (replacePermissions && !permissionsSubsetOf(permissions, existing.permissions))
-    || (inputValue.clientBinding !== undefined && clientBinding !== existing.clientBinding)
-  );
+  const shouldBumpCredentialVersion = inputValue.clientBinding !== undefined && clientBinding !== existing.clientBinding;
   const { expiresAt: _oldExpiresAt, clientBinding: _oldClientBinding, ...existingWithoutOptionalPolicy } = existing;
   const nextClient: ClientConfig = {
     ...existingWithoutOptionalPolicy,
@@ -603,32 +600,6 @@ function applyPermissionInputs(
   return next;
 }
 
-function permissionsSubsetOf(
-  candidate: readonly PermissionConfig[],
-  existing: readonly PermissionConfig[],
-): boolean {
-  return candidate.every((candidatePermission) => (
-    existing.some((existingPermission) => permissionCovers(existingPermission, candidatePermission))
-  ));
-}
-
-function permissionCovers(existing: PermissionConfig, candidate: PermissionConfig): boolean {
-  if (!pathPatternCovers(existing.path, candidate.path)) return false;
-  const existingActions = new Set(existing.actions);
-  return candidate.actions.every((action) => existingActions.has(action));
-}
-
-function pathPatternCovers(existingPath: string, candidatePath: string): boolean {
-  if (existingPath === '/**') return true;
-  if (existingPath === candidatePath) return true;
-  if (!existingPath.endsWith('/**')) return false;
-
-  const existingBase = existingPath.slice(0, -3);
-  if (!existingBase) return true;
-  if (candidatePath === existingBase) return true;
-  return candidatePath.startsWith(`${existingBase}/`);
-}
-
 function permissionForInput(config: MvmtConfig, inputValue: ApiTokenPermissionInput): PermissionConfig {
   const source = inputValue.source.trim();
   if (source === 'all' || source === '*') {
@@ -758,19 +729,22 @@ export function printApiTokenSaved(configPath: string, result: ApiTokenUpdateRes
     console.log('');
     console.log(chalk.yellow('This is the only time the token will be shown. Store it now.'));
     console.log('');
-    console.log(`  Connect${result.client.clientBinding ? ` from ${result.client.clientBinding}` : ''}:`);
-    console.log('    claude mcp add --transport http \\');
-    console.log(`      --header "Authorization: Bearer ${result.plaintextToken}" \\`);
-    console.log('      mvmt http://127.0.0.1:4141/mcp');
+    console.log(`  HTTP MCP endpoint${result.client.clientBinding ? ` (client: ${result.client.clientBinding})` : ''}:`);
+    console.log('    URL:    http://127.0.0.1:4141/mcp');
+    console.log(`    Header: Authorization: Bearer ${result.plaintextToken}`);
     console.log('');
+    console.log(chalk.dim('Use these values in any HTTP MCP client. See docs/client-setup.md for client-specific setup.'));
     console.log(chalk.dim('For OAuth clients, paste this token into the mvmt approval page when asked.'));
   } else {
     console.log('');
     console.log(chalk.dim('Existing token value was not changed.'));
     if (result.credentialVersionChanged) {
-      console.log(chalk.dim('Existing OAuth grants must reauthorize because this edit added access or changed client binding.'));
+      console.log(chalk.dim('Existing OAuth grants must reauthorize because this edit changed client binding.'));
+      if (result.permissionsReplaced) {
+        console.log(chalk.dim('Permission edit applies immediately to API tokens, and to OAuth grants after reauthorization.'));
+      }
     } else if (result.permissionsReplaced) {
-      console.log(chalk.dim('Permission edit did not add access; existing OAuth grants keep working and current limits apply on the next request.'));
+      console.log(chalk.dim('Permission edit applies to existing API tokens and OAuth grants on the next request.'));
     } else {
       console.log(chalk.dim('Existing OAuth grants keep working.'));
     }
