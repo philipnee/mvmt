@@ -8,6 +8,7 @@ import { formatMcpPublicUrl } from '../utils/tunnel.js';
 import { printApiTokenSaved, printApiTokens, promptAndAddApiToken, promptAndEditApiToken, promptAndRemoveApiToken, rotateApiTokenInConfig } from './api-tokens.js';
 import { printConfigSummary } from './config.js';
 import {
+  findMount,
   MOUNT_LOAD_NOTICE,
   MOUNT_UNLOAD_NOTICE,
   printMountBasePermission,
@@ -461,24 +462,22 @@ function printConnectorSummary(loaded: LoadedConnector[], totalTools: number): v
 }
 
 async function handleMountsAdd(state: InteractivePromptState): Promise<void> {
-  const nextConfig = await promptAndAddMount(state.config);
-  if (!nextConfig) return;
-  const addedMount = findAddedMount(state.config, nextConfig);
-  state.config.mounts = nextConfig.mounts;
+  const result = await promptAndAddMount(state.config);
+  if (!result) return;
+  state.config.mounts = result.config.mounts;
   await state.persistConfig();
   console.log(chalk.green(`Mounts saved to ${state.configPath}`));
-  if (addedMount) printMountBasePermission(addedMount.writeAccess);
+  printMountBasePermission(findMount(result.config, result.name).writeAccess);
   console.log(chalk.dim(MOUNT_LOAD_NOTICE));
 }
 
 async function handleMountsEdit(state: InteractivePromptState): Promise<void> {
-  const nextConfig = await promptAndEditMount(state.config);
-  if (!nextConfig) return;
-  const changedMount = findChangedMount(state.config, nextConfig);
-  state.config.mounts = nextConfig.mounts;
+  const result = await promptAndEditMount(state.config);
+  if (!result) return;
+  state.config.mounts = result.config.mounts;
   await state.persistConfig();
   console.log(chalk.green(`Mounts saved to ${state.configPath}`));
-  if (changedMount) printMountBasePermission(changedMount.writeAccess);
+  printMountBasePermission(findMount(result.config, result.name).writeAccess);
   console.log(chalk.dim(MOUNT_LOAD_NOTICE));
 }
 
@@ -492,17 +491,6 @@ async function handleMountsRemove(state: InteractivePromptState): Promise<void> 
   await state.persistConfig();
   console.log(chalk.green(`Mounts saved to ${state.configPath}`));
   console.log(chalk.dim(MOUNT_UNLOAD_NOTICE));
-}
-
-function findAddedMount(before: MvmtConfig, after: MvmtConfig): MvmtConfig['mounts'][number] | undefined {
-  return after.mounts.find((mount) => !before.mounts.some((existing) => existing.name === mount.name));
-}
-
-function findChangedMount(before: MvmtConfig, after: MvmtConfig): MvmtConfig['mounts'][number] | undefined {
-  return after.mounts.find((mount) => {
-    const existing = before.mounts.find((candidate) => candidate.name === mount.name);
-    return existing && JSON.stringify(existing) !== JSON.stringify(mount);
-  });
 }
 
 async function handleTokensAdd(state: InteractivePromptState): Promise<void> {

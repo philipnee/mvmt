@@ -424,7 +424,7 @@ describe('CLI usability', () => {
       ]);
 
       expect(stdout).toContain('Existing OAuth grants must reauthorize because this edit changed client binding.');
-      expect(stdout).toContain('Permission edit applies to API tokens now and OAuth grants after reauthorization.');
+      expect(stdout).toContain('Permission edit applies immediately to API tokens, and to OAuth grants after reauthorization.');
     } finally {
       await fs.rm(tmp, { recursive: true, force: true });
     }

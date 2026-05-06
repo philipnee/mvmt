@@ -18,7 +18,7 @@ import { initializeConnectors, LoadedConnector } from './connector-loader.js';
 import { TunnelController } from './tunnel-controller.js';
 import { InteractiveAuditLogger, startInteractivePrompt, formatHttpRequestEntry } from './interactive.js';
 import { LEGACY_TUNNEL_OVERRIDE_ENV, legacyTunnelOverrideEnabled, tunnelLegacyAccessWarning } from './tunnel-safety.js';
-import { promptAndAddMount } from './mounts.js';
+import { findMount, printMountBasePermission, promptAndAddMount } from './mounts.js';
 import { printApiTokenSaved, promptAndAddApiToken } from './api-tokens.js';
 
 export interface StartOptions {
@@ -293,15 +293,17 @@ async function ensureStartupMounts(
   if (!process.stdin.isTTY || !process.stdout.isTTY) return config;
 
   logger.warn('No mounts configured. Add a mount to continue startup.');
-  let nextConfig = await promptAndAddMount(config);
-  if (!nextConfig || !hasEnabledMounts(nextConfig)) {
+  const result = await promptAndAddMount(config);
+  if (!result || !hasEnabledMounts(result.config)) {
     logger.error('No mount added. Startup cannot continue without at least one enabled mount.');
     logger.error('Run `mvmt mounts add <name> <folder>` or `mvmt config setup` first.');
     process.exit(1);
   }
 
+  let nextConfig = result.config;
   await saveConfig(configPath, nextConfig);
   logger.info(`Saved mount config to ${configPath}`);
+  printMountBasePermission(findMount(nextConfig, result.name).writeAccess);
   nextConfig = await ensureStartupApiToken(nextConfig, configPath, logger);
   logger.info(formatPermissionMode(nextConfig));
   logger.info(`The internal HTTP session token is stored at ${TOKEN_PATH} and is created automatically when the server starts.`);

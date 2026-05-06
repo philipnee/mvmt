@@ -741,7 +741,7 @@ export function printApiTokenSaved(configPath: string, result: ApiTokenUpdateRes
     if (result.credentialVersionChanged) {
       console.log(chalk.dim('Existing OAuth grants must reauthorize because this edit changed client binding.'));
       if (result.permissionsReplaced) {
-        console.log(chalk.dim('Permission edit applies to API tokens now and OAuth grants after reauthorization.'));
+        console.log(chalk.dim('Permission edit applies immediately to API tokens, and to OAuth grants after reauthorization.'));
       }
     } else if (result.permissionsReplaced) {
       console.log(chalk.dim('Permission edit applies to existing API tokens and OAuth grants on the next request.'));

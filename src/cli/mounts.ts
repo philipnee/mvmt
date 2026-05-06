@@ -215,19 +215,24 @@ export function removeMountFromConfig(config: MvmtConfig, name: string): MvmtCon
   return { ...config, mounts: config.mounts.filter((mount) => mount.name !== name) };
 }
 
-export async function promptAndAddMount(config: MvmtConfig): Promise<MvmtConfig | undefined> {
-  const mount = await promptForMountInput(config);
-  return addMountToConfig(config, mount);
+export interface MountPromptResult {
+  config: MvmtConfig;
+  name: string;
 }
 
-export async function promptAndEditMount(config: MvmtConfig): Promise<MvmtConfig | undefined> {
+export async function promptAndAddMount(config: MvmtConfig): Promise<MountPromptResult | undefined> {
+  const mount = await promptForMountInput(config);
+  return { config: addMountToConfig(config, mount), name: mount.name };
+}
+
+export async function promptAndEditMount(config: MvmtConfig): Promise<MountPromptResult | undefined> {
   if (config.mounts.length === 0) {
     console.log(chalk.yellow('No mounts configured.'));
     return undefined;
   }
   const name = await promptForMountName(config, 'Edit which mount?');
   const patch = await promptForMountPatch(config, name);
-  return editMountInConfig(config, name, patch);
+  return { config: editMountInConfig(config, name, patch), name };
 }
 
 export async function promptAndRemoveMount(config: MvmtConfig): Promise<MvmtConfig | undefined> {
