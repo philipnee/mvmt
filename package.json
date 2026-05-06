@@ -40,7 +40,8 @@
     "verify:release": "node scripts/verify.mjs --audit",
     "bench:text-index": "npm run build && node scripts/bench-text-index.mjs",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "e2e": "vitest run --config tests/e2e/vitest.config.ts"
   },
   "engines": {
     "node": ">=20"

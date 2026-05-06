@@ -76,6 +76,7 @@ npm run verify:release  # includes npm audit --omit=dev
 | Package dry-run | packaging | `npm run verify` | Ensures npm package contents are sane |
 | Dependency audit | network/security | `npm run verify:release` | Release check; not run in PR CI because it depends on registry availability |
 | Coverage | coverage | `npm run test:coverage` | Optional before PR, useful for security-sensitive changes |
+| Token + auth e2e | docker integration | `npm run e2e` | Builds the package, installs it into a fresh `node:20-alpine` container, exercises CLI + HTTP flows. Requires Docker. Excluded from `npm test`. |
 
 ## Platform Matrix
 
