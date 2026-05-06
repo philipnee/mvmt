@@ -128,6 +128,44 @@ describe('CLI usability', () => {
     }
   });
 
+  it('explains mount base permission after add and edit', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    const configPath = path.join(tmp, 'config.yaml');
+    const mountRoot = path.join(tmp, 'docs');
+    try {
+      await fs.mkdir(mountRoot);
+
+      const add = await runCli([
+        'mounts',
+        'add',
+        'docs',
+        mountRoot,
+        '--config',
+        configPath,
+        '--mount-path',
+        '/docs',
+        '--read-only',
+      ]);
+      expect(add.stdout).toContain('Base permission: read-only. Tokens cannot exceed it.');
+      expect(add.stdout).toContain('Running mvmt loads mount changes on the next request.');
+
+      const edit = await runCli([
+        'mounts',
+        'edit',
+        'docs',
+        '--config',
+        configPath,
+        '--write',
+      ]);
+      expect(edit.stdout).toContain('Base permission: read/write. Tokens cannot exceed it.');
+
+      const updated = readConfig(configPath);
+      expect(updated.mounts[0].writeAccess).toBe(true);
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('can disable tunnel access without removing saved tunnel details', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
     const configPath = path.join(tmp, 'config.yaml');
