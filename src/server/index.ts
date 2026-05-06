@@ -326,6 +326,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     const baseUrl = baseUrlFor(req);
     logHttpRequest(requestLog, req, 200, 'oauth.resource');
     res.json({
+      issuer: baseUrl,
       resource: `${baseUrl}/mcp`,
       authorization_servers: [baseUrl],
       bearer_methods_supported: ['header'],

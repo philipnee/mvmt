@@ -172,6 +172,7 @@ describe('startHttpServer lifecycle', () => {
         const response = await fetch(`http://127.0.0.1:${server.port}${pathSuffix}`);
         expect(response.status).toBe(200);
         const metadata = await response.json();
+        expect(metadata.issuer).toBe(`http://127.0.0.1:${server.port}`);
         expect(metadata.resource).toBe(`http://127.0.0.1:${server.port}/mcp`);
         expect(metadata.authorization_servers).toEqual([`http://127.0.0.1:${server.port}`]);
         expect(metadata.scopes_supported).toEqual(['mcp', 'offline_access']);
