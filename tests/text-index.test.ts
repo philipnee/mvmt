@@ -168,6 +168,30 @@ describe('TextContextIndex', () => {
     await expect(index.write('/workspace/new.md', 'content')).rejects.toThrow('read-only');
   });
 
+  it('reloads mount write access in place', async () => {
+    const readOnlyConfig = parseConfig({
+      version: 1,
+      mounts: [{ name: 'workspace', type: 'local_folder', path: '/workspace', root: tmp, writeAccess: false }],
+    });
+    const index = new TextContextIndex({
+      mounts: readOnlyConfig.mounts,
+      indexPath: path.join(tmp, 'index.json'),
+    });
+
+    await expect(index.write('/workspace/new.md', 'content')).rejects.toThrow('read-only');
+
+    const writableConfig = parseConfig({
+      ...readOnlyConfig,
+      mounts: [{ ...readOnlyConfig.mounts[0], writeAccess: true }],
+    });
+    index.updateMounts(writableConfig.mounts);
+
+    await expect(index.write('/workspace/new.md', 'content')).resolves.toMatchObject({
+      path: '/workspace/new.md',
+      content: 'content',
+    });
+  });
+
   itUnlessWindows('does not index or read symlink escapes', async () => {
     const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-text-index-outside-'));
     try {

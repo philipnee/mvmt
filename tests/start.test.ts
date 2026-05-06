@@ -4,6 +4,7 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createLiveClientsResolver } from '../src/cli/start.js';
 import { parseConfig, saveConfig } from '../src/config/loader.js';
+import { TextContextIndex } from '../src/context/text-index.js';
 import { hashApiToken } from '../src/utils/api-token-hash.js';
 
 describe('start helpers', () => {
@@ -80,5 +81,45 @@ describe('start helpers', () => {
 
     expect(resolveClients()?.map((client) => client.id)).toEqual(['known-good']);
     expect(config.clients?.map((client) => client.id)).toEqual(['known-good']);
+  });
+
+  it('reloads mount write access into the running text index', async () => {
+    const root = path.join(tmp, 'notes');
+    await fs.mkdir(root);
+    const config = parseConfig({
+      version: 1,
+      mounts: [
+        { name: 'notes', type: 'local_folder', path: '/notes', root, writeAccess: false },
+      ],
+      clients: [
+        {
+          id: 'writer',
+          name: 'Writer',
+          auth: { type: 'token', tokenHash: hashApiToken('writer') },
+          permissions: [{ path: '/notes/**', actions: ['search', 'read', 'write'] }],
+        },
+      ],
+    });
+    await saveConfig(configPath, config);
+    const index = new TextContextIndex({
+      mounts: config.mounts,
+      indexPath: path.join(tmp, 'index.json'),
+    });
+    const resolveClients = createLiveClientsResolver(configPath, config, index);
+
+    await expect(index.write('/notes/new.md', 'content')).rejects.toThrow('read-only');
+
+    const nextConfig = parseConfig({
+      ...config,
+      mounts: [{ ...config.mounts[0], writeAccess: true }],
+    });
+    await saveConfig(configPath, nextConfig);
+    resolveClients();
+
+    await expect(index.write('/notes/new.md', 'content')).resolves.toMatchObject({
+      path: '/notes/new.md',
+      content: 'content',
+    });
+    expect(config.mounts[0].writeAccess).toBe(true);
   });
 });

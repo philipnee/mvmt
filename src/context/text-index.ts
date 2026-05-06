@@ -168,13 +168,23 @@ export function defaultTextIndexPath(configPath: string): string {
 }
 
 export class TextContextIndex {
-  private readonly registry: MountRegistry;
-  private readonly providers: Map<string, StorageProvider>;
+  private registry: MountRegistry;
+  private providers: Map<string, StorageProvider>;
 
   constructor(private readonly options: TextContextIndexOptions) {
     this.registry = new MountRegistry(options.mounts);
-    this.providers = new Map(
-      this.registry.mounts().map((mount) => [
+    this.providers = this.providersForRegistry(this.registry);
+  }
+
+  updateMounts(mounts: LocalFolderMountConfig[]): void {
+    this.options.mounts = mounts;
+    this.registry = new MountRegistry(mounts);
+    this.providers = this.providersForRegistry(this.registry);
+  }
+
+  private providersForRegistry(registry: MountRegistry): Map<string, StorageProvider> {
+    return new Map(
+      registry.mounts().map((mount) => [
         mount.config.name,
         new LocalFolderStorageProvider(mount, {
           isTextPath,

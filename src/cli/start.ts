@@ -138,7 +138,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
       port,
       allowedOrigins: config.server.allowedOrigins,
       resolvePublicBaseUrl: () => tunnelController.publicUrl,
-      clients: createLiveClientsResolver(configPath, config),
+      clients: createLiveClientsResolver(configPath, config, textIndex),
       allowLegacyDefaultClient: () => config.server.access !== 'tunnel' || legacyTunnelOverrideEnabled(),
       requestLog: interactiveMode
         ? (entry) => (audit as InteractiveAuditLogger).recordHttp(entry)
@@ -261,11 +261,22 @@ export function hasEnabledMounts(config: Pick<MvmtConfig, 'mounts'>): boolean {
   return config.mounts.some((mount) => mount.enabled !== false);
 }
 
-export function createLiveClientsResolver(configPath: string, config: MvmtConfig): () => MvmtConfig['clients'] {
+export function createLiveClientsResolver(
+  configPath: string,
+  config: MvmtConfig,
+  textIndex?: TextContextIndex,
+): () => MvmtConfig['clients'] {
+  let mountSignature = JSON.stringify(config.mounts);
   return () => {
     try {
       const latest = readConfig(configPath);
       config.clients = latest.clients;
+      const latestMountSignature = JSON.stringify(latest.mounts);
+      if (latestMountSignature !== mountSignature) {
+        config.mounts = latest.mounts;
+        textIndex?.updateMounts(latest.mounts);
+        mountSignature = latestMountSignature;
+      }
     } catch {
       // Keep the last known-good policy until the next successful reload.
     }
