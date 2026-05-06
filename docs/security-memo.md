@@ -80,7 +80,7 @@ the wrong client, but a leaked plaintext token is still the secret to revoke.
 
 Scope edits, including adding access, removing paths, or clearing permissions,
 apply to existing API tokens and OAuth grants on the next request. Client-binding
-edits bump the credential version and may require OAuth reauthorization.
+edits bump the credential version and require OAuth reauthorization.
 `mvmt token rotate <id>` rotates one API-token secret. `mvmt token
 session-rotate` rotates the internal session token and OAuth signing key, which
 revokes OAuth access tokens across clients.

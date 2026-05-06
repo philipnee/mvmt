@@ -729,7 +729,7 @@ export function printApiTokenSaved(configPath: string, result: ApiTokenUpdateRes
     console.log('');
     console.log(chalk.yellow('This is the only time the token will be shown. Store it now.'));
     console.log('');
-    console.log(`  HTTP MCP endpoint${result.client.clientBinding ? ` for ${result.client.clientBinding}` : ''}:`);
+    console.log(`  HTTP MCP endpoint${result.client.clientBinding ? ` (client: ${result.client.clientBinding})` : ''}:`);
     console.log('    URL:    http://127.0.0.1:4141/mcp');
     console.log(`    Header: Authorization: Bearer ${result.plaintextToken}`);
     console.log('');
@@ -739,7 +739,10 @@ export function printApiTokenSaved(configPath: string, result: ApiTokenUpdateRes
     console.log('');
     console.log(chalk.dim('Existing token value was not changed.'));
     if (result.credentialVersionChanged) {
-      console.log(chalk.dim('Existing OAuth grants may need reauthorization because this edit changed client binding.'));
+      console.log(chalk.dim('Existing OAuth grants must reauthorize because this edit changed client binding.'));
+      if (result.permissionsReplaced) {
+        console.log(chalk.dim('Permission edit applies to API tokens now and OAuth grants after reauthorization.'));
+      }
     } else if (result.permissionsReplaced) {
       console.log(chalk.dim('Permission edit applies to existing API tokens and OAuth grants on the next request.'));
     } else {

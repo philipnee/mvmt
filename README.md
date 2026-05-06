@@ -399,7 +399,7 @@ Policy changes take effect on the next auth request. Scope edits, including
 adding access, removing paths, or `--no-permissions`, apply to existing API
 tokens and OAuth grants without reauthorization. Editing `clientBinding` bumps
 that token's credential version, so OAuth access and refresh tokens selected
-through the old binding may stop working.
+through the old binding must reauthorize.
 `mvmt token rotate <id>` replaces only that API token's secret; `mvmt token
 session-rotate` rotates the internal session token and OAuth signing key,
 revoking OAuth access tokens across clients.

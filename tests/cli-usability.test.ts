@@ -65,6 +65,7 @@ describe('CLI usability', () => {
 
       const { stdout } = await runCli(['mounts', 'remove', 'notes', '--config', configPath, '--yes']);
       expect(stdout).toContain('Mount notes removed');
+      expect(stdout).toContain('Running mvmt unloads mount changes on the next request.');
 
       const { stdout: json } = await runCli(['mounts', '--config', configPath, '--json']);
       expect(JSON.parse(json)).toEqual({ mounts: [] });
@@ -270,6 +271,35 @@ describe('CLI usability', () => {
     }
   });
 
+  it('labels client-bound API-token endpoints clearly', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    const configPath = path.join(tmp, 'config.yaml');
+    const mountRoot = path.join(tmp, 'notes');
+    try {
+      await fs.mkdir(mountRoot);
+      await saveConfig(configPath, parseConfig({
+        version: 1,
+        mounts: [{ name: 'notes', type: 'local_folder', path: '/notes', root: mountRoot }],
+      }));
+
+      const { stdout } = await runCli([
+        'token',
+        'add',
+        'codex',
+        '--config',
+        configPath,
+        '--read',
+        '/notes',
+        '--client',
+        'codex',
+      ]);
+
+      expect(stdout).toContain('HTTP MCP endpoint (client: codex):');
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('shows a safe empty state for token listing', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
     const configPath = path.join(tmp, 'config.yaml');
@@ -356,6 +386,45 @@ describe('CLI usability', () => {
       const { stdout: list } = await runCli(['token', '--config', configPath]);
       expect(list).toContain('workspace:write');
       expect(list).toContain('never');
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('explains client-binding edits require OAuth reauthorization', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    const configPath = path.join(tmp, 'config.yaml');
+    const mountRoot = path.join(tmp, 'workspace');
+    try {
+      await fs.mkdir(mountRoot);
+      await saveConfig(configPath, parseConfig({
+        version: 1,
+        mounts: [{ name: 'workspace', type: 'local_folder', path: '/workspace', root: mountRoot, writeAccess: true }],
+      }));
+
+      await runCli([
+        'token',
+        'add',
+        'codex',
+        '--config',
+        configPath,
+        '--read',
+        '/workspace',
+      ]);
+      const { stdout } = await runCli([
+        'token',
+        'edit',
+        'codex',
+        '--config',
+        configPath,
+        '--client',
+        'claude',
+        '--scope',
+        'workspace:write',
+      ]);
+
+      expect(stdout).toContain('Existing OAuth grants must reauthorize because this edit changed client binding.');
+      expect(stdout).toContain('Permission edit applies to API tokens now and OAuth grants after reauthorization.');
     } finally {
       await fs.rm(tmp, { recursive: true, force: true });
     }
