@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'crypto';
+import { createReadStream } from 'fs';
 import { Server as HttpServer } from 'node:http';
 import express, { Request, Response } from 'express';
 import type { AccessToken } from './oauth.js';
@@ -22,7 +23,15 @@ import {
   renderAuthorizePage,
 } from './oauth.js';
 import { rateLimit } from './rate-limit.js';
-import { ClientConfig } from '../config/schema.js';
+import { ClientConfig, LocalFolderMountConfig } from '../config/schema.js';
+import { resolveShareFileTarget } from '../share/files.js';
+import {
+  defaultSharesPath,
+  findShare,
+  recordShareDownload,
+  shareUnavailableReason,
+  validateShareToken,
+} from '../share/store.js';
 import {
   attachClientIdentity,
   ClientIdentity,
@@ -80,6 +89,8 @@ export interface HttpServerOptions {
   // synthesized default identity that preserves pre-PR single-token
   // behavior. Pass an array to enable per-client identity resolution.
   clients?: readonly ClientConfig[] | (() => readonly ClientConfig[] | undefined);
+  shareMounts?: readonly LocalFolderMountConfig[] | (() => readonly LocalFolderMountConfig[] | undefined);
+  shareStorePath?: string;
   // Defaults to true for local backward compatibility. Tunnel mode passes
   // false unless MVMT_ALLOW_LEGACY_TUNNEL is set, so a public endpoint can
   // start with no API tokens while exposing no data.
@@ -180,6 +191,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
 
   ensureSessionToken(tokenPath);
   const signingKeyPath = options.signingKeyPath ?? defaultSigningKeyPath(tokenPath ?? TOKEN_PATH);
+  const shareStorePath = options.shareStorePath ?? defaultSharesPath(tokenPath ?? TOKEN_PATH);
   // Create the signing key file on first boot, then re-read it on every
   // HMAC op. This way internal session-token rotation (which rewrites the file)
   // invalidates outstanding OAuth access tokens immediately, without
@@ -618,6 +630,87 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     }
   });
 
+  const shareHandler: express.RequestHandler = async (req, res) => {
+    const id = firstStringQuery(req.params.id);
+    const share = id ? findShare(shareStorePath, id) : undefined;
+    if (!share) {
+      logHttpRequest(requestLog, req, 404, 'share.request', 'unknown_share');
+      res.status(404).json({ error: 'share_not_found' });
+      return;
+    }
+
+    const token = firstStringQuery(req.query.token) ?? firstStringQuery(req.query.t);
+    if (!validateShareToken(share, token)) {
+      logHttpRequest(requestLog, req, 401, 'share.request', 'invalid_token', share.id);
+      res.status(401).json({ error: 'invalid_share_token' });
+      return;
+    }
+
+    const unavailable = shareUnavailableReason(share);
+    if (unavailable) {
+      logHttpRequest(requestLog, req, 410, 'share.request', unavailable, share.id);
+      res.status(410).json({ error: `share_${unavailable}` });
+      return;
+    }
+
+    let target;
+    try {
+      target = await resolveShareFileTarget(resolveShareMounts(options.shareMounts), share.path);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'unavailable';
+      logHttpRequest(requestLog, req, 404, 'share.request', detail, share.id);
+      res.status(404).json({ error: 'share_target_unavailable' });
+      return;
+    }
+
+    const range = parseRangeHeader(firstHeaderValue(req.headers.range), target.size);
+    if (range === 'invalid') {
+      res.setHeader('Content-Range', `bytes */${target.size}`);
+      logHttpRequest(requestLog, req, 416, 'share.request', 'invalid_range', share.id);
+      res.status(416).end();
+      return;
+    }
+
+    const start = range?.start ?? 0;
+    const end = range?.end ?? Math.max(0, target.size - 1);
+    const status = range ? 206 : 200;
+    res.status(status);
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Disposition', `attachment; filename="${escapeHeaderValue(target.filename)}"`);
+    res.setHeader('Content-Length', String(target.size === 0 ? 0 : end - start + 1));
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Last-Modified', new Date(target.mtimeMs).toUTCString());
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    if (range) res.setHeader('Content-Range', `bytes ${start}-${end}/${target.size}`);
+
+    logHttpRequest(requestLog, req, status, 'share.request', target.virtualPath, share.id);
+    if (req.method === 'HEAD') {
+      res.end();
+      return;
+    }
+
+    res.on('finish', () => {
+      if (res.statusCode < 400) {
+        try {
+          recordShareDownload(shareStorePath, share.id);
+        } catch {
+          // Never let share accounting break a download.
+        }
+      }
+    });
+    createReadStream(target.realPath, target.size === 0 ? {} : { start, end })
+      .on('error', () => {
+        if (!res.headersSent) res.status(500).end();
+        else res.destroy();
+      })
+      .pipe(res);
+  };
+
+  app.get('/share/:id', mcpLimiter, shareHandler);
+  app.head('/share/:id', mcpLimiter, shareHandler);
+
   app.post('/mcp', mcpLimiter, authMiddleware, async (req, res) => {
     await handleMcpRequest(req, res, router, sessions);
     logHttpRequest(requestLog, req, res.statusCode, 'mcp.request');
@@ -784,6 +877,10 @@ function resolveAllowLegacyDefaultClient(value: HttpServerOptions['allowLegacyDe
 }
 
 function resolveClients(value: HttpServerOptions['clients']): readonly ClientConfig[] {
+  return (typeof value === 'function' ? value() : value) ?? [];
+}
+
+function resolveShareMounts(value: HttpServerOptions['shareMounts']): readonly LocalFolderMountConfig[] {
   return (typeof value === 'function' ? value() : value) ?? [];
 }
 
@@ -958,6 +1055,35 @@ function authorizeErrorRedirect(
 function firstHeaderValue(value: string | string[] | undefined): string | undefined {
   if (Array.isArray(value)) return value[0];
   return value;
+}
+
+function firstStringQuery(value: unknown): string | undefined {
+  if (Array.isArray(value)) return firstStringQuery(value[0]);
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+type ByteRange = { start: number; end: number };
+
+function parseRangeHeader(value: string | undefined, size: number): ByteRange | 'invalid' | undefined {
+  if (!value) return undefined;
+  const match = /^bytes=(\d*)-(\d*)$/.exec(value.trim());
+  if (!match) return 'invalid';
+  if (size <= 0) return 'invalid';
+  const [, startRaw, endRaw] = match;
+  if (!startRaw && !endRaw) return 'invalid';
+  if (!startRaw) {
+    const suffixLength = Number(endRaw);
+    if (!Number.isInteger(suffixLength) || suffixLength <= 0) return 'invalid';
+    return { start: Math.max(0, size - suffixLength), end: size - 1 };
+  }
+  const start = Number(startRaw);
+  const end = endRaw ? Number(endRaw) : size - 1;
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || start >= size) return 'invalid';
+  return { start, end: Math.min(end, size - 1) };
+}
+
+function escapeHeaderValue(value: string): string {
+  return value.replace(/["\\\r\n]/g, '_');
 }
 
 function requestClientHint(req: Request, oauthClientId?: string): string | undefined {

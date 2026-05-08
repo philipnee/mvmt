@@ -139,6 +139,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
       allowedOrigins: config.server.allowedOrigins,
       resolvePublicBaseUrl: () => tunnelController.publicUrl,
       clients: createLiveClientsResolver(configPath, config, textIndex),
+      shareMounts: createLiveMountsResolver(configPath, config, textIndex),
       allowLegacyDefaultClient: () => config.server.access !== 'tunnel' || legacyTunnelOverrideEnabled(),
       requestLog: interactiveMode
         ? (entry) => (audit as InteractiveAuditLogger).recordHttp(entry)
@@ -281,6 +282,29 @@ export function createLiveClientsResolver(
       // Keep the last known-good policy until the next successful reload.
     }
     return config.clients;
+  };
+}
+
+export function createLiveMountsResolver(
+  configPath: string,
+  config: MvmtConfig,
+  textIndex?: TextContextIndex,
+): () => MvmtConfig['mounts'] {
+  let mountSignature = JSON.stringify(config.mounts);
+  return () => {
+    try {
+      const latest = readConfig(configPath);
+      config.clients = latest.clients;
+      const latestMountSignature = JSON.stringify(latest.mounts);
+      if (latestMountSignature !== mountSignature) {
+        config.mounts = latest.mounts;
+        textIndex?.updateMounts(latest.mounts);
+        mountSignature = latestMountSignature;
+      }
+    } catch {
+      // Keep the last known-good mount policy until the next successful reload.
+    }
+    return config.mounts;
   };
 }
 

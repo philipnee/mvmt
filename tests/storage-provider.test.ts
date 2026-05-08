@@ -66,6 +66,24 @@ describe('LocalFolderStorageProvider', () => {
     expect(files).toEqual(['/workspace/note.md']);
   });
 
+  it('supports a single text file as the mount root', async () => {
+    const filePath = path.join(tmp, 'note.md');
+    await fs.writeFile(filePath, 'single file mount', 'utf-8');
+    const provider = createProvider(filePath, true, 2 * 1024 * 1024, '/note.md');
+
+    await expect(provider.list()).resolves.toEqual([
+      expect.objectContaining({ path: '/note.md', type: 'file' }),
+    ]);
+    await expect(provider.read('')).resolves.toMatchObject({
+      mount: 'workspace',
+      path: '/note.md',
+      content: 'single file mount',
+    });
+    const files: string[] = [];
+    for await (const file of provider.walkTextFiles()) files.push(file.path);
+    expect(files).toEqual(['/note.md']);
+  });
+
   it('rejects writes to read-only mounts', async () => {
     const provider = createProvider(tmp, false);
 
@@ -96,6 +114,16 @@ describe('LocalFolderStorageProvider', () => {
     await expect(provider.read('config.yaml')).rejects.toThrow('globally denied');
   });
 
+  it('blocks single-file mount roots inside globally sensitive directories', async () => {
+    const sensitiveDir = path.join(tmp, '.mvmt');
+    await fs.mkdir(sensitiveDir);
+    const sensitiveFile = path.join(sensitiveDir, 'config.txt');
+    await fs.writeFile(sensitiveFile, 'secret', 'utf-8');
+    const provider = createProvider(sensitiveFile, true, 2 * 1024 * 1024, '/config.txt');
+
+    await expect(provider.read('')).rejects.toThrow(/excluded|globally denied/);
+  });
+
   itUnlessWindows('blocks symlink escapes for direct and nested paths', async () => {
     const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-storage-provider-outside-'));
     try {
@@ -114,14 +142,19 @@ describe('LocalFolderStorageProvider', () => {
   });
 });
 
-function createProvider(root: string, writeAccess: boolean, maxTextBytes = 2 * 1024 * 1024): LocalFolderStorageProvider {
+function createProvider(
+  root: string,
+  writeAccess: boolean,
+  maxTextBytes = 2 * 1024 * 1024,
+  mountPath = '/workspace',
+): LocalFolderStorageProvider {
   const config = parseConfig({
     version: 1,
     mounts: [
       {
         name: 'workspace',
         type: 'local_folder',
-        path: '/workspace',
+        path: mountPath,
         root,
         exclude: ['.git/**'],
         protect: ['protected/**'],

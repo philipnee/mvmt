@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, copyFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, copyFileSync, readdirSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -65,6 +65,7 @@ export interface HttpResponse {
 export interface Container {
   id: string;
   exec(args: string[]): Promise<ExecResult>;
+  run(args: string[]): Promise<ExecResult>;
   http(req: HttpRequest): Promise<HttpResponse>;
   startServer(): Promise<void>;
   stop(): Promise<void>;
@@ -74,7 +75,7 @@ export async function runMvmtContainer(opts: RunContainerOptions = {}): Promise<
   const image = await buildMvmtImage();
   const bindArgs: string[] = [];
   for (const bind of opts.binds ?? []) {
-    mkdirSync(bind.host, { recursive: true });
+    if (!existsSync(bind.host)) mkdirSync(bind.host, { recursive: true });
     bindArgs.push('-v', `${bind.host}:${bind.container}${bind.readonly ? ':ro' : ''}`);
   }
   const { stdout } = await runHost('docker', ['run', '-d', '--rm', ...bindArgs, image]);
@@ -84,6 +85,7 @@ export async function runMvmtContainer(opts: RunContainerOptions = {}): Promise<
   const container: Container = {
     id,
     exec: (args) => execInContainer(id, ['mvmt', ...args]),
+    run: (args) => execInContainer(id, args),
     http: (req) => httpInContainer(id, req),
     startServer: () => startServerInContainer(id),
     stop: async () => {

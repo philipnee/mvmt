@@ -1,5 +1,6 @@
 import { confirm, input, select } from '@inquirer/prompts';
 import chalk from 'chalk';
+import fsp from 'fs/promises';
 import { configExists, getConfigPath, loadConfig, parseConfig, saveConfig } from '../config/loader.js';
 import {
   DEFAULT_MOUNT_EXCLUDE_PATTERNS,
@@ -10,7 +11,7 @@ import {
 } from '../config/schema.js';
 import { resolveSetupPath } from '../connectors/setup-paths.js';
 import { normalizePathSeparators, stripTrailingSlashes } from '../context/mount-registry.js';
-import { promptForExistingFolder, validateExistingFolderPath } from './folder-prompt.js';
+import { promptForExistingFolder } from './folder-prompt.js';
 
 export interface MountCommandOptions {
   config?: string;
@@ -406,11 +407,22 @@ function splitPatterns(value: string): string[] {
 }
 
 async function validateMountRootForCommand(root: string): Promise<boolean> {
-  const valid = await validateExistingFolderPath(root);
+  const valid = await validateExistingMountRootPath(root);
   if (valid === true) return true;
   console.error(valid);
   process.exitCode = 1;
   return false;
+}
+
+async function validateExistingMountRootPath(value: string): Promise<true | string> {
+  const resolved = resolveSetupPath(value);
+  try {
+    const stat = await fsp.stat(resolved);
+    if (stat.isDirectory() || stat.isFile()) return true;
+    return `Mount root is not a file or folder: ${resolved}`;
+  } catch {
+    return `File or folder not found: ${resolved}`;
+  }
 }
 
 function assertWriteFlags(options: { write?: boolean; readOnly?: boolean }): void {

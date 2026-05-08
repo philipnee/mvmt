@@ -270,15 +270,28 @@ export class TextContextIndex {
 
   async list(inputPath = '/'): Promise<TextListEntry[]> {
     if (inputPath === '/' || inputPath.trim() === '') {
-      return this.registry.mounts().map((mount) => ({
-        mount: mount.config.name,
-        path: mount.config.path,
-        type: 'directory',
-        size: 0,
-        mtime_ms: 0,
-        description: mount.config.description,
-        guidance: mount.config.guidance,
-        write_access: mount.config.writeAccess,
+      return Promise.all(this.registry.mounts().map(async (mount) => {
+        let type: 'file' | 'directory' = 'directory';
+        let size = 0;
+        let mtimeMs = 0;
+        try {
+          const stat = await fsp.stat(mount.root);
+          type = stat.isFile() ? 'file' : 'directory';
+          size = stat.isFile() ? stat.size : 0;
+          mtimeMs = stat.mtimeMs;
+        } catch {
+          // Keep root listing resilient; direct access will report the real error.
+        }
+        return {
+          mount: mount.config.name,
+          path: mount.config.path,
+          type,
+          size,
+          mtime_ms: mtimeMs,
+          description: mount.config.description,
+          guidance: mount.config.guidance,
+          write_access: mount.config.writeAccess,
+        };
       }));
     }
 

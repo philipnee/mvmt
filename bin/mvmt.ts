@@ -9,6 +9,7 @@ import { doctor } from '../src/cli/doctor.js';
 import { init } from '../src/cli/init.js';
 import { reindex } from '../src/cli/reindex.js';
 import { addMount, editMount, listMounts, removeMount } from '../src/cli/mounts.js';
+import { addShareLink, listShareLinks, removeShareLink } from '../src/cli/share.js';
 import { start } from '../src/cli/start.js';
 import {
   configureTunnel,
@@ -47,6 +48,7 @@ program.addHelpText('after', examples([
   ['mvmt serve -i', 'start locally with the interactive prompt'],
   ['mvmt serve --path ~/Documents', 'serve one read-only folder for this run'],
   ['mvmt mounts add notes ~/notes --mount-path /notes --read-only', 'add a read-only mount'],
+  ['mvmt share add /notes/report.pdf', 'create a 24h browser download link'],
   ['mvmt token add codex --scope notes:read', 'create a scoped API token'],
   ['mvmt doctor', 'validate config and mount roots'],
 ]));
@@ -120,7 +122,7 @@ mountsCommand
 
 mountsCommand
   .command('add [name] [root]')
-  .description('Add a local folder mount')
+  .description('Add a local file or folder mount')
   .option('-c, --config <path>', 'Config file path')
   .option('--mount-path <path>', 'Virtual mount path, such as /notes')
   .option('--write', 'Allow write/remove tools for this mount')
@@ -132,6 +134,7 @@ mountsCommand
   .option('--disabled', 'Add the mount disabled')
   .addHelpText('after', examples([
     ['mvmt mounts add notes ~/notes --mount-path /notes --read-only', 'add a read-only notes mount'],
+    ['mvmt mounts add report ~/report.pdf --mount-path /report.pdf --read-only', 'add a single-file mount'],
     ['mvmt mounts add workspace ~/code/mvmt --mount-path /workspace --write', 'add a writable project mount'],
   ]))
   .action(async (name: string | undefined, root: string | undefined, options: { config?: string; mountPath?: string; write?: boolean; readOnly?: boolean; description?: string; guidance?: string; exclude?: string[]; protect?: string[]; disabled?: boolean }, command: Command) => {
@@ -167,6 +170,48 @@ mountsCommand
   ]))
   .action(async (name: string | undefined, options: { config?: string; yes?: boolean }, command: Command) => {
     await removeMount(name, withInheritedConfig(options, command));
+  });
+
+const shareCommand = program
+  .command('share')
+  .description('Create browser download links for mounted files')
+  .option('-c, --config <path>', 'Config file path')
+  .option('--json', 'Output as JSON')
+  .action(async (options: { config?: string; json?: boolean }) => {
+    await listShareLinks(options);
+  });
+
+shareCommand
+  .command('list')
+  .description('List browser download links')
+  .option('-c, --config <path>', 'Config file path')
+  .option('--json', 'Output as JSON')
+  .action(async (options: { config?: string; json?: boolean }, command: Command) => {
+    await listShareLinks(withInheritedConfig(options, command));
+  });
+
+shareCommand
+  .command('add <path>')
+  .description('Create a browser download link for one mounted file')
+  .option('-c, --config <path>', 'Config file path')
+  .option('--expires <duration>', 'Share lifetime, such as 30m, 24h, 7d, or never')
+  .option('--ttl <duration>', 'Alias for --expires')
+  .option('--json', 'Output as JSON')
+  .addHelpText('after', examples([
+    ['mvmt share add /books/pg100.txt', 'create a 24h download link'],
+    ['mvmt share add /books/pg100.txt --expires 7d', 'create a download link that lasts 7 days'],
+  ]))
+  .action(async (inputPath: string, options: { config?: string; expires?: string; ttl?: string; json?: boolean }, command: Command) => {
+    await addShareLink(inputPath, withInheritedConfig(options, command));
+  });
+
+shareCommand
+  .command('remove <id>')
+  .alias('rm')
+  .description('Remove a browser download link')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (id: string, options: { config?: string }, command: Command) => {
+    await removeShareLink(id, withInheritedConfig(options, command));
   });
 
 const configCommand = program
