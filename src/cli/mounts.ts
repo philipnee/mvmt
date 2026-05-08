@@ -11,7 +11,6 @@ import {
 } from '../config/schema.js';
 import { resolveSetupPath } from '../connectors/setup-paths.js';
 import { normalizePathSeparators, stripTrailingSlashes } from '../context/mount-registry.js';
-import { promptForExistingFolder } from './folder-prompt.js';
 
 export interface MountCommandOptions {
   config?: string;
@@ -295,7 +294,7 @@ function mountPatchFromOptions(options: EditMountOptions): Partial<MountInput> {
 }
 
 async function promptForMountInput(config: MvmtConfig): Promise<MountInput> {
-  const root = await promptForExistingFolder();
+  const root = await promptForExistingMountRoot();
   const defaultName = uniqueMountName(config, mountNameFromRoot(root));
   const name = await input({
     message: 'Mount id (optional stable id):',
@@ -356,7 +355,7 @@ async function promptForMountInput(config: MvmtConfig): Promise<MountInput> {
 async function promptForMountPatch(config: MvmtConfig, name: string): Promise<Partial<MountInput>> {
   const current = config.mounts.find((mount) => mount.name === name);
   if (!current) throw new Error(`Unknown mount: ${name}`);
-  const root = await promptForExistingFolder('Folder on this computer:', {
+  const root = await promptForExistingMountRoot('File or folder on this computer:', {
     defaultValue: current.root,
   });
   const mountPath = await input({
@@ -412,6 +411,17 @@ async function validateMountRootForCommand(root: string): Promise<boolean> {
   console.error(valid);
   process.exitCode = 1;
   return false;
+}
+
+async function promptForExistingMountRoot(
+  message = 'File or folder on this computer:',
+  options: { defaultValue?: string } = {},
+): Promise<string> {
+  return input({
+    message,
+    ...(options.defaultValue ? { default: options.defaultValue } : {}),
+    validate: async (value) => validateExistingMountRootPath(value),
+  });
 }
 
 async function validateExistingMountRootPath(value: string): Promise<true | string> {
