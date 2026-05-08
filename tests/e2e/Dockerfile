@@ -5,6 +5,7 @@ FROM node:20-alpine
 
 WORKDIR /opt/mvmt
 COPY mvmt.tgz /tmp/mvmt.tgz
+RUN apk add --no-cache curl
 RUN npm install -g --silent /tmp/mvmt.tgz && rm /tmp/mvmt.tgz
 
 # Tests bind-mount their per-scenario data into /workdir and use HOME=/workdir

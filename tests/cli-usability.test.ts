@@ -121,7 +121,7 @@ describe('CLI usability', () => {
         configPath,
       ]);
       expect(result.code).toBe(1);
-      expect(result.output).toContain(`Folder not found: ${missingRoot}`);
+      expect(result.output).toContain(`File or folder not found: ${missingRoot}`);
       expect(result.output).not.toContain('Error:');
       expect(result.output).not.toContain('at async');
     } finally {
@@ -162,6 +162,37 @@ describe('CLI usability', () => {
 
       const updated = readConfig(configPath);
       expect(updated.mounts[0].writeAccess).toBe(true);
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('adds a single-file mount non-interactively', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    const configPath = path.join(tmp, 'config.yaml');
+    const filePath = path.join(tmp, 'report.txt');
+    try {
+      await fs.writeFile(filePath, 'report', 'utf-8');
+
+      const add = await runCli([
+        'mounts',
+        'add',
+        'report',
+        filePath,
+        '--config',
+        configPath,
+        '--mount-path',
+        '/report.txt',
+        '--read-only',
+      ]);
+      expect(add.stdout).toContain('Mount report saved');
+
+      const updated = readConfig(configPath);
+      expect(updated.mounts[0]).toMatchObject({
+        name: 'report',
+        root: filePath,
+        path: '/report.txt',
+      });
     } finally {
       await fs.rm(tmp, { recursive: true, force: true });
     }

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,20 +14,24 @@ describeIfDocker('mvmt e2e: token + auth', () => {
   let workdir: string;
   let notesHost: string;
   let workspaceHost: string;
+  let sharedFileHost: string;
 
   beforeAll(async () => {
     workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-e2e-'));
     notesHost = path.join(workdir, 'notes');
     workspaceHost = path.join(workdir, 'workspace');
+    sharedFileHost = path.join(workdir, 'shared.bin');
     fs.mkdirSync(notesHost, { recursive: true });
     fs.mkdirSync(workspaceHost, { recursive: true });
     fs.writeFileSync(path.join(notesHost, 'launch.md'), '# Launch\nNotes about the launch plan.\n');
     fs.writeFileSync(path.join(workspaceHost, 'plan.md'), '# Plan\nProject planning workspace.\n');
+    fs.writeFileSync(sharedFileHost, Buffer.from('shared file from docker e2e\n'));
 
     container = await runMvmtContainer({
       binds: [
         { host: notesHost, container: '/data/notes' },
         { host: workspaceHost, container: '/data/workspace' },
+        { host: sharedFileHost, container: '/data/shared.bin', readonly: true },
       ],
     });
 
@@ -154,5 +159,24 @@ describeIfDocker('mvmt e2e: token + auth', () => {
       body: { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} },
     });
     expect(res.status).toBe(401);
+  });
+
+  it('mounts one file, creates a share link, and downloads it by checksum', async () => {
+    const addFileMount = await container.exec([
+      'mounts', 'add', 'shared', '/data/shared.bin', '--mount-path', '/shared.bin', '--read-only',
+    ]);
+    expect(addFileMount.exitCode, addFileMount.stderr).toBe(0);
+
+    const share = await container.exec(['share', 'add', '/shared.bin']);
+    expect(share.exitCode, share.stderr).toBe(0);
+    expect(share.stdout).toContain('(24h default)');
+    const match = share.stdout.match(/URL:\s+(http:\/\/127\.0\.0\.1:4141\/share\/\S+)/);
+    if (!match) throw new Error(`could not parse share URL from output:\n${share.stdout}`);
+
+    const downloaded = await container.run(['curl', '-fsSL', match[1]]);
+    expect(downloaded.exitCode, downloaded.stderr).toBe(0);
+    const expectedHash = createHash('sha256').update(fs.readFileSync(sharedFileHost)).digest('hex');
+    const actualHash = createHash('sha256').update(downloaded.stdout).digest('hex');
+    expect(actualHash).toBe(expectedHash);
   });
 });

@@ -158,14 +158,14 @@ function checkMount(mount: LocalFolderMountConfig): DoctorConnectorReport {
   const root = expandHome(mount.root);
   try {
     const stat = fs.statSync(root);
-    if (!stat.isDirectory()) {
+    if (!stat.isDirectory() && !stat.isFile()) {
       return {
         name: mount.name,
         id: mount.path,
         kind: 'mount',
         enabled: true,
         status: 'fail',
-        message: `mount root is not a directory: ${root}`,
+        message: `mount root is not a file or folder: ${root}`,
       };
     }
     return {

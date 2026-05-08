@@ -17,6 +17,7 @@ import { parseConfig } from '../src/config/loader.js';
 import { TextContextIndex } from '../src/context/text-index.js';
 import { OAuthStore } from '../src/server/oauth.js';
 import { ToolRouter } from '../src/server/router.js';
+import { createShare, listShares } from '../src/share/store.js';
 import { hashApiToken } from '../src/utils/api-token-hash.js';
 import { ensureSigningKey, generateSessionToken, rotateSigningKey } from '../src/utils/token.js';
 
@@ -77,6 +78,111 @@ describe('SSE request helpers', () => {
   it('treats duplicate standalone SSE conflicts as benign reconnect noise', () => {
     expect(isBenignDuplicateSseConflict(new Error('Conflict: Only one SSE stream is allowed per session'))).toBe(true);
     expect(isBenignDuplicateSseConflict(new Error('Conflict: Stream already has an active connection'))).toBe(false);
+  });
+});
+
+describe('share downloads', () => {
+  it('streams a single-file mount through a query-token share URL', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-share-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const shareStorePath = path.join(tmp, '.shares.json');
+    const filePath = path.join(tmp, 'payload.bin');
+    const payload = Buffer.from([0, 1, 2, 3, 4, 255]);
+    fs.writeFileSync(filePath, payload);
+    const config = parseConfig({
+      version: 1,
+      mounts: [{ name: 'payload', type: 'local_folder', path: '/payload.bin', root: filePath }],
+    });
+    const share = createShare(shareStorePath, {
+      path: '/payload.bin',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      shareMounts: config.mounts,
+      shareStorePath,
+    });
+    try {
+      const response = await fetch(`http://127.0.0.1:${server.port}/share/${share.record.id}?token=${share.token}`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-disposition')).toContain('payload.bin');
+      expect(response.headers.get('accept-ranges')).toBe('bytes');
+      const downloaded = Buffer.from(await response.arrayBuffer());
+      expect(createHash('sha256').update(downloaded).digest('hex')).toBe(createHash('sha256').update(payload).digest('hex'));
+      expect(listShares(shareStorePath)[0].downloadCount).toBe(1);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('supports byte ranges for share downloads', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-share-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const shareStorePath = path.join(tmp, '.shares.json');
+    const filePath = path.join(tmp, 'payload.bin');
+    fs.writeFileSync(filePath, Buffer.from([10, 11, 12, 13, 14]));
+    const config = parseConfig({
+      version: 1,
+      mounts: [{ name: 'payload', type: 'local_folder', path: '/payload.bin', root: filePath }],
+    });
+    const share = createShare(shareStorePath, {
+      path: '/payload.bin',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      shareMounts: config.mounts,
+      shareStorePath,
+    });
+    try {
+      const response = await fetch(`http://127.0.0.1:${server.port}/share/${share.record.id}?token=${share.token}`, {
+        headers: { Range: 'bytes=1-3' },
+      });
+      expect(response.status).toBe(206);
+      expect(response.headers.get('content-range')).toBe('bytes 1-3/5');
+      expect([...Buffer.from(await response.arrayBuffer())]).toEqual([11, 12, 13]);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects invalid and expired share tokens', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-share-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const shareStorePath = path.join(tmp, '.shares.json');
+    const filePath = path.join(tmp, 'payload.bin');
+    fs.writeFileSync(filePath, 'payload', 'utf-8');
+    const config = parseConfig({
+      version: 1,
+      mounts: [{ name: 'payload', type: 'local_folder', path: '/payload.bin', root: filePath }],
+    });
+    const active = createShare(shareStorePath, {
+      path: '/payload.bin',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const expired = createShare(shareStorePath, {
+      path: '/payload.bin',
+      expiresAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      shareMounts: config.mounts,
+      shareStorePath,
+    });
+    try {
+      const invalid = await fetch(`http://127.0.0.1:${server.port}/share/${active.record.id}?token=wrong`);
+      expect(invalid.status).toBe(401);
+      const gone = await fetch(`http://127.0.0.1:${server.port}/share/${expired.record.id}?token=${expired.token}`);
+      expect(gone.status).toBe(410);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });
 

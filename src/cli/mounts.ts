@@ -1,5 +1,6 @@
 import { confirm, input, select } from '@inquirer/prompts';
 import chalk from 'chalk';
+import fsp from 'fs/promises';
 import { configExists, getConfigPath, loadConfig, parseConfig, saveConfig } from '../config/loader.js';
 import {
   DEFAULT_MOUNT_EXCLUDE_PATTERNS,
@@ -10,7 +11,6 @@ import {
 } from '../config/schema.js';
 import { resolveSetupPath } from '../connectors/setup-paths.js';
 import { normalizePathSeparators, stripTrailingSlashes } from '../context/mount-registry.js';
-import { promptForExistingFolder, validateExistingFolderPath } from './folder-prompt.js';
 
 export interface MountCommandOptions {
   config?: string;
@@ -294,7 +294,7 @@ function mountPatchFromOptions(options: EditMountOptions): Partial<MountInput> {
 }
 
 async function promptForMountInput(config: MvmtConfig): Promise<MountInput> {
-  const root = await promptForExistingFolder();
+  const root = await promptForExistingMountRoot();
   const defaultName = uniqueMountName(config, mountNameFromRoot(root));
   const name = await input({
     message: 'Mount id (optional stable id):',
@@ -355,7 +355,7 @@ async function promptForMountInput(config: MvmtConfig): Promise<MountInput> {
 async function promptForMountPatch(config: MvmtConfig, name: string): Promise<Partial<MountInput>> {
   const current = config.mounts.find((mount) => mount.name === name);
   if (!current) throw new Error(`Unknown mount: ${name}`);
-  const root = await promptForExistingFolder('Folder on this computer:', {
+  const root = await promptForExistingMountRoot('File or folder on this computer:', {
     defaultValue: current.root,
   });
   const mountPath = await input({
@@ -406,11 +406,33 @@ function splitPatterns(value: string): string[] {
 }
 
 async function validateMountRootForCommand(root: string): Promise<boolean> {
-  const valid = await validateExistingFolderPath(root);
+  const valid = await validateExistingMountRootPath(root);
   if (valid === true) return true;
   console.error(valid);
   process.exitCode = 1;
   return false;
+}
+
+async function promptForExistingMountRoot(
+  message = 'File or folder on this computer:',
+  options: { defaultValue?: string } = {},
+): Promise<string> {
+  return input({
+    message,
+    ...(options.defaultValue ? { default: options.defaultValue } : {}),
+    validate: async (value) => validateExistingMountRootPath(value),
+  });
+}
+
+async function validateExistingMountRootPath(value: string): Promise<true | string> {
+  const resolved = resolveSetupPath(value);
+  try {
+    const stat = await fsp.stat(resolved);
+    if (stat.isDirectory() || stat.isFile()) return true;
+    return `Mount root is not a file or folder: ${resolved}`;
+  } catch {
+    return `File or folder not found: ${resolved}`;
+  }
 }
 
 function assertWriteFlags(options: { write?: boolean; readOnly?: boolean }): void {

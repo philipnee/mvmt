@@ -21,6 +21,7 @@ import { applyTunnelConfig, printTunnelEnabledWithNoTokens, promptForTunnelConfi
 import { LoadedConnector } from './connector-loader.js';
 import { TunnelController } from './tunnel-controller.js';
 import { ToolResultPlugin } from '../plugins/types.js';
+import { listShareLinks, promptAndAddShareLink, promptAndRemoveShareLink } from './share.js';
 
 const SIGINT_EXIT_WINDOW_MS = 2_000;
 
@@ -219,6 +220,20 @@ async function handleInteractiveCommand(
     case 'token remove':
       await handleTokensRemove(state);
       return;
+    case 'share':
+    case 'share list':
+    case 'shares':
+    case 'shares list':
+      await listShareLinks();
+      return;
+    case 'share add':
+    case 'shares add':
+      await promptAndAddShareLink(state.configPath);
+      return;
+    case 'share remove':
+    case 'shares remove':
+      await promptAndRemoveShareLink();
+      return;
     case 'tokens':
     case 'tokens list':
       printApiTokens(state.config);
@@ -304,6 +319,8 @@ function printInteractiveHelp(): void {
   console.log('  token add/edit      manage scoped API tokens');
   console.log('  token rotate        rotate a scoped API token');
   console.log('  token remove        remove a scoped API token');
+  console.log('  share               list browser download links');
+  console.log('  share add/remove    create or remove file share links');
   console.log('  tunnel              show tunnel status');
   console.log('  tunnel config       choose a different tunnel');
   console.log('  tunnel start        start the configured tunnel');

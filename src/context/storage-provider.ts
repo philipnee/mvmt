@@ -129,6 +129,16 @@ export class LocalFolderStorageProvider implements StorageProvider {
   }
 
   async *walkTextFiles(): AsyncIterable<StorageProviderFile> {
+    const root = this.resolve('');
+    try {
+      const stat = await fsp.stat(root.realPath);
+      if (stat.isFile()) {
+        yield await this.read('');
+        return;
+      }
+    } catch {
+      return;
+    }
     yield* this.walkDirectory('');
   }
 
@@ -160,14 +170,15 @@ export class LocalFolderStorageProvider implements StorageProvider {
 
   private resolve(relativePath: string): ResolvedProviderPath {
     const normalized = toVirtualRelative(relativePath);
-    if (this.isExcluded(normalized)) {
+    const realPath = this.realPath(normalized);
+    const policyRelativePath = normalized || path.basename(realPath);
+    if (this.isExcluded(policyRelativePath)) {
       throw new Error(`${joinVirtualPath(this.mount.config.path, normalized)} is excluded`);
     }
-    const realPath = this.realPath(normalized);
     if (!isWithin(this.mount.root, realPath)) {
       throw new Error(`${joinVirtualPath(this.mount.config.path, normalized)} escapes mount root`);
     }
-    if (isGloballyDeniedPath(normalized, realPath)) {
+    if (isGloballyDeniedPath(policyRelativePath, realPath)) {
       throw new Error(`${joinVirtualPath(this.mount.config.path, normalized)} is globally denied`);
     }
     return {
