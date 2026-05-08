@@ -1,3 +1,4 @@
+import { confirm, input, select } from '@inquirer/prompts';
 import chalk from 'chalk';
 import { getConfigPath, loadConfig } from '../config/loader.js';
 import { resolveSetupPath } from '../connectors/setup-paths.js';
@@ -67,6 +68,45 @@ export async function removeShareLink(id: string | undefined, _options: RemoveSh
   if (!id) throw new Error('Share id is required.');
   if (!removeShare(resolveShareStorePath(_options), id)) throw new Error(`Unknown share: ${id}`);
   console.log(chalk.green(`Share ${id} removed`));
+}
+
+export async function promptAndAddShareLink(configPath: string): Promise<void> {
+  const inputPath = await input({
+    message: 'Mounted file path to share:',
+    validate: (value) => value.trim().startsWith('/') ? true : 'Enter a mounted path such as /books/pg100.txt',
+  });
+  const expires = await input({
+    message: 'Expires after:',
+    default: DEFAULT_SHARE_TTL,
+  });
+  await addShareLink(inputPath.trim(), {
+    config: configPath,
+    expires: expires.trim() || DEFAULT_SHARE_TTL,
+  });
+}
+
+export async function promptAndRemoveShareLink(options: ShareCommandOptions = {}): Promise<void> {
+  const shares = listShares(resolveShareStorePath(options));
+  if (shares.length === 0) {
+    console.log(chalk.yellow('No shares configured.'));
+    return;
+  }
+  const id = await select({
+    message: 'Remove which share?',
+    choices: shares.map((share) => ({
+      name: `${share.id} (${share.path})`,
+      value: share.id,
+    })),
+  });
+  const ok = await confirm({
+    message: `Remove share ${id}? Existing links will stop working.`,
+    default: false,
+  });
+  if (!ok) {
+    console.log(chalk.yellow('Share config unchanged.'));
+    return;
+  }
+  await removeShareLink(id, options);
 }
 
 function resolveShareStorePath(options: ShareCommandOptions): string {
