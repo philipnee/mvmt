@@ -258,12 +258,12 @@ usersCommand
   .command('add <username>')
   .description('Create a privileged dashboard user')
   .option('--password <password>', 'Password for non-interactive setup')
-  .option('--admin', 'Grant admin (can manage mounts and browse local files via dashboard)')
+  .option('--admin', 'Grant admin (can manage sources from dashboard)')
   .option('--json', 'Output as JSON')
   .addHelpText('after', examples([
     ['mvmt users add sarah', 'prompt for a password and create sarah'],
     ['mvmt users add sarah --password "change-me-now"', 'non-interactive setup'],
-    ['mvmt users add owner --admin', 'create an admin who can add/remove mounts from the dashboard'],
+    ['mvmt users add owner --admin', 'create an admin who can manage dashboard sources'],
   ]))
   .action(async (username: string | undefined, _options: { password?: string; json?: boolean; admin?: boolean }, command: Command) => {
     await addPrivilegedUserCommand(username, {

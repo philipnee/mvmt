@@ -63,7 +63,7 @@ export async function addPrivilegedUserCommand(
 
   console.log(chalk.green(user.admin ? 'Admin user created' : 'Privileged user created'));
   console.log(`  Username: ${user.username}`);
-  if (user.admin) console.log(chalk.yellow('  Role: admin (can manage mounts and browse local files via dashboard)'));
+  if (user.admin) console.log(chalk.yellow('  Role: admin (can manage sources from dashboard)'));
 }
 
 export async function setPrivilegedUserAdminCommand(

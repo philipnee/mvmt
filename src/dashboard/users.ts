@@ -14,8 +14,8 @@ export interface PrivilegedUser {
   createdAt: string;
   lastLoginAt?: string;
   disabled?: boolean;
-  // Admins can manage mounts and browse the local filesystem through the
-  // dashboard. Non-admins can only browse already-mounted folders and
+  // Admins can manage sources through the dashboard. Non-admins can
+  // only browse already-mounted folders and
   // create/revoke their own leases. Default false: existing users stay
   // non-admin after a code upgrade until explicitly granted.
   admin?: boolean;

@@ -119,6 +119,9 @@ describe('Interactive help', () => {
     expect(lines).toContain('  lease create        create a path lease');
     expect(lines).toContain('  lease add-path      add paths to a lease');
     expect(lines).toContain('  lease revoke        revoke a lease');
+    expect(lines).toContain('  users               list dashboard users');
+    expect(lines).toContain('  users add           create dashboard user');
+    expect(lines).toContain('  users grant/revoke  manage source-admin access');
     expect(lines).toContain('  url                 show dashboard and MCP URLs');
     expect(lines).toContain('  advanced            show mount/token/MCP commands');
     expect(lines).not.toContain('  token               list scoped API tokens');

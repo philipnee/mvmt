@@ -24,6 +24,7 @@ import { ToolResultPlugin } from '../plugins/types.js';
 import { addPathsToLease, createFolderLease, listFolderLeases, revokeFolderLease } from './lease.js';
 import { DEFAULT_LEASE_TTL, defaultLeasesPath, leaseUnavailableReason, listLeases } from '../lease/store.js';
 import { loadConfig } from '../config/loader.js';
+import { addPrivilegedUserCommand, listPrivilegedUsersCommand, setPrivilegedUserAdminCommand } from './users.js';
 
 const SIGINT_EXIT_WINDOW_MS = 2_000;
 
@@ -233,6 +234,19 @@ async function handleInteractiveCommand(
     case 'leases rm':
       await handleLeaseRevoke();
       return;
+    case 'users':
+    case 'users list':
+      await listPrivilegedUsersCommand();
+      return;
+    case 'users add':
+      await handleUsersAdd();
+      return;
+    case 'users grant':
+      await handleUsersAdmin(true);
+      return;
+    case 'users revoke':
+      await handleUsersAdmin(false);
+      return;
     case 'advanced':
       printAdvancedHelp();
       return;
@@ -368,6 +382,9 @@ export function printInteractiveHelp(): void {
   console.log('  lease create        create a path lease');
   console.log('  lease add-path      add paths to a lease');
   console.log('  lease revoke        revoke a lease');
+  console.log('  users               list dashboard users');
+  console.log('  users add           create dashboard user');
+  console.log('  users grant/revoke  manage source-admin access');
   console.log('  tunnel              show tunnel status');
   console.log('  tunnel config       choose a tunnel');
   console.log('  tunnel start        start the configured tunnel');
@@ -629,6 +646,26 @@ async function handleLeaseRevoke(): Promise<void> {
     return;
   }
   await revokeFolderLease(id);
+}
+
+async function handleUsersAdd(): Promise<void> {
+  const username = await input({
+    message: 'Username:',
+    validate: (value) => value.trim().length > 0 ? true : 'Enter a username',
+  });
+  const admin = await confirm({
+    message: 'Allow this user to manage sources?',
+    default: false,
+  });
+  await addPrivilegedUserCommand(username.trim(), { admin });
+}
+
+async function handleUsersAdmin(admin: boolean): Promise<void> {
+  const username = await input({
+    message: admin ? 'Grant source-admin access to:' : 'Revoke source-admin access from:',
+    validate: (value) => value.trim().length > 0 ? true : 'Enter a username',
+  });
+  await setPrivilegedUserAdminCommand(username.trim(), admin);
 }
 
 async function handleMountsAdd(state: InteractivePromptState): Promise<void> {
