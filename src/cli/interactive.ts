@@ -21,9 +21,8 @@ import { applyTunnelConfig, printTunnelEnabledWithNoTokens, promptForTunnelConfi
 import { LoadedConnector } from './connector-loader.js';
 import { TunnelController } from './tunnel-controller.js';
 import { ToolResultPlugin } from '../plugins/types.js';
-import { listShareLinks, promptAndAddShareLink, promptAndRemoveShareLink } from './share.js';
-import { createFolderLease, listFolderLeases, revokeFolderLease } from './lease.js';
-import { DEFAULT_LEASE_TTL, defaultLeasesPath, listLeases } from '../lease/store.js';
+import { addPathsToLease, createFolderLease, listFolderLeases, revokeFolderLease } from './lease.js';
+import { DEFAULT_LEASE_TTL, defaultLeasesPath, leaseUnavailableReason, listLeases } from '../lease/store.js';
 import { loadConfig } from '../config/loader.js';
 
 const SIGINT_EXIT_WINDOW_MS = 2_000;
@@ -210,6 +209,12 @@ async function handleInteractiveCommand(
     case 'leases add':
       await handleLeaseCreate(state);
       return;
+    case 'lease add-path':
+    case 'lease add-paths':
+    case 'leases add-path':
+    case 'leases add-paths':
+      await handleLeaseAddPath(state);
+      return;
     case 'lease revoke':
     case 'lease remove':
     case 'lease rm':
@@ -254,28 +259,6 @@ async function handleInteractiveCommand(
     case 'token remove':
     case 'advanced token remove':
       await handleTokensRemove(state);
-      return;
-    case 'share':
-    case 'share list':
-    case 'shares':
-    case 'shares list':
-    case 'advanced share':
-    case 'advanced share list':
-    case 'advanced shares':
-    case 'advanced shares list':
-      await listShareLinks();
-      return;
-    case 'share add':
-    case 'shares add':
-    case 'advanced share add':
-    case 'advanced shares add':
-      await promptAndAddShareLink(state.configPath);
-      return;
-    case 'share remove':
-    case 'shares remove':
-    case 'advanced share remove':
-    case 'advanced shares remove':
-      await promptAndRemoveShareLink();
       return;
     case 'tokens':
     case 'tokens list':
@@ -367,9 +350,10 @@ async function handleInteractiveCommand(
 export function printInteractiveHelp(): void {
   console.log('');
   console.log(chalk.bold('Commands'));
-  console.log('  lease               list folder leases');
-  console.log('  lease create        create a folder lease');
-  console.log('  lease revoke        revoke a folder lease');
+  console.log('  lease               list leases');
+  console.log('  lease create        create a path lease');
+  console.log('  lease add-path      add paths to a lease');
+  console.log('  lease revoke        revoke a lease');
   console.log('  tunnel              show tunnel status');
   console.log('  tunnel config       choose a tunnel');
   console.log('  tunnel start        start the configured tunnel');
@@ -395,8 +379,6 @@ export function printAdvancedHelp(): void {
   console.log('  advanced token               list scoped API tokens');
   console.log('  advanced token add/edit      manage scoped API tokens');
   console.log('  advanced token rotate/remove');
-  console.log('  advanced share               list legacy file share links');
-  console.log('  advanced share add/remove    manage legacy file share links');
   console.log('  advanced connectors          list loaded MCP connectors');
   console.log('  tunnel logs                  show recent tunnel output');
   console.log('  tunnel logs stream           stream tunnel output from another shell');
@@ -457,7 +439,7 @@ async function handleTunnelStart(state: InteractivePromptState): Promise<void> {
     console.log(`public URL  ${chalk.yellow(formatMcpPublicUrl(tunnel.url))}`);
   }
   if ((state.config.clients?.length ?? 0) === 0 && state.config.server.access === 'tunnel') {
-    console.log(chalk.dim('Folder lease links work with lease tokens. For MCP over this tunnel, use `advanced token add`.'));
+    console.log(chalk.dim('Lease links and MCP can use the same lease token.'));
   }
 }
 
@@ -541,8 +523,8 @@ function printConnectorSummary(loaded: LoadedConnector[], totalTools: number): v
 
 async function handleLeaseCreate(state: InteractivePromptState): Promise<void> {
   const folder = await input({
-    message: 'Folder to lease:',
-    validate: (value) => value.trim().length > 0 ? true : 'Enter a folder path',
+    message: 'Path to lease:',
+    validate: (value) => value.trim().length > 0 ? true : 'Enter a file or folder path',
   });
   const label = await input({
     message: 'Lease label:',
@@ -568,16 +550,39 @@ async function handleLeaseCreate(state: InteractivePromptState): Promise<void> {
   state.config = loadConfig(state.configPath);
 }
 
+async function handleLeaseAddPath(state: InteractivePromptState): Promise<void> {
+  const leases = listLeases(defaultLeasesPath())
+    .filter((lease) => !leaseUnavailableReason(lease) && !lease.permissions.includes('upload'));
+  if (leases.length === 0) {
+    console.log(chalk.yellow('No active read leases configured.'));
+    return;
+  }
+  const id = await select({
+    message: 'Add paths to which lease?',
+    choices: leases.map((lease) => ({
+      name: `${lease.label} (${lease.resources.map((resource) => resource.path).join(', ')})`,
+      value: lease.id,
+    })),
+  });
+  const rawPaths = await input({
+    message: 'Path(s) to add, comma-separated:',
+    validate: (value) => value.trim().length > 0 ? true : 'Enter at least one file or folder path',
+  });
+  const paths = rawPaths.split(',').map((value) => value.trim()).filter(Boolean);
+  await addPathsToLease(id, paths, { config: state.configPath });
+  state.config = loadConfig(state.configPath);
+}
+
 async function handleLeaseRevoke(): Promise<void> {
   const leases = listLeases(defaultLeasesPath());
   if (leases.length === 0) {
-    console.log(chalk.yellow('No folder leases configured.'));
+    console.log(chalk.yellow('No leases configured.'));
     return;
   }
   const id = await select({
     message: 'Revoke which lease?',
     choices: leases.map((lease) => ({
-      name: `${lease.label} (${lease.path})`,
+      name: `${lease.label} (${lease.resources.map((resource) => resource.path).join(', ')})`,
       value: lease.id,
     })),
   });

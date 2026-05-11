@@ -4,7 +4,7 @@ import path from 'path';
 import { LocalFolderMountConfig } from '../config/schema.js';
 import { MountRegistry, normalizePathSeparators, toVirtualRelative } from '../context/mount-registry.js';
 import { isGloballyDeniedPath, matchesConfiguredOrGlobalPattern, matchesPathPatterns } from '../context/path-policy.js';
-import { LeaseRecord } from './store.js';
+import { LeaseRecord, LeaseResource, leaseResources } from './store.js';
 
 export interface LeaseFileTarget {
   mountName: string;
@@ -53,7 +53,7 @@ export async function resolveLeaseFileTarget(
   if (!target.stat.isFile()) throw new Error(`${target.virtualPath} is not a file`);
   return {
     mountName: target.mountName,
-    leasePath: lease.path,
+    leasePath: target.leasePath,
     virtualPath: target.virtualPath,
     leaseRelativePath: target.leaseRelativePath,
     realPath: target.realPath,
@@ -68,6 +68,10 @@ export async function listLeaseDirectory(
   lease: LeaseRecord,
   requestPath = '',
 ): Promise<LeaseDirectoryListing> {
+  const leaseRelativePath = normalizeLeaseRelativePath(requestPath);
+  if (usesResourceNamespace(lease) && !leaseRelativePath) {
+    return listLeaseResourceRoot(mounts, lease);
+  }
   const target = await resolveLeaseTarget(mounts, lease, requestPath);
   if (!target.stat.isDirectory()) throw new Error(`${target.virtualPath} is not a directory`);
   const dirents = await fsp.readdir(target.realPath, { withFileTypes: true });
@@ -106,16 +110,20 @@ export async function resolveLeaseUploadTarget(
   lease: LeaseRecord,
   requestPath: string,
 ): Promise<LeaseUploadTarget> {
-  const registry = new MountRegistry([...mounts]);
-  const leaseRoot = registry.resolve(lease.path);
-  const leaseRootStat = await fsp.stat(leaseRoot.realPath);
-  if (!leaseRootStat.isDirectory()) throw new Error(`${lease.path} is not a directory`);
-  if (!leaseRoot.mount.config.writeAccess) throw new Error(`${lease.path} is read-only`);
-
-  const leaseRootRealPath = await fsp.realpath(leaseRoot.realPath);
   const leaseRelativePath = normalizeLeaseRelativePath(requestPath);
   if (!leaseRelativePath) throw new Error('upload path is required');
-  const virtualPath = `${stripTrailingSlash(lease.path)}/${leaseRelativePath}`;
+  const resource = uploadResourceForRequest(lease, leaseRelativePath);
+  const sourceRelativePath = sourceRelativePathForResource(resource, leaseRelativePath);
+  if (!sourceRelativePath) throw new Error('upload path is required');
+
+  const registry = new MountRegistry([...mounts]);
+  const leaseRoot = registry.resolve(resource.sourcePath);
+  const leaseRootStat = await fsp.stat(leaseRoot.realPath);
+  if (!leaseRootStat.isDirectory()) throw new Error(`${resource.path} is not a directory`);
+  if (!leaseRoot.mount.config.writeAccess) throw new Error(`${resource.path} is read-only`);
+
+  const leaseRootRealPath = await fsp.realpath(leaseRoot.realPath);
+  const virtualPath = `${stripTrailingSlash(resource.sourcePath)}/${sourceRelativePath}`;
   const resolved = registry.resolve(virtualPath);
   const filename = path.basename(resolved.realPath);
   if (!filename || filename === '.' || filename === '..') throw new Error('upload filename is required');
@@ -148,7 +156,7 @@ export async function resolveLeaseUploadTarget(
 
   return {
     mountName: resolved.mount.config.name,
-    leasePath: lease.path,
+    leasePath: resource.path,
     virtualPath: resolved.virtualPath,
     leaseRelativePath,
     realPath: targetRealPath,
@@ -163,19 +171,68 @@ async function resolveLeaseTarget(
   requestPath: string,
 ): Promise<{
   mountName: string;
+  leasePath: string;
+  virtualPath: string;
+  leaseRelativePath: string;
+  realPath: string;
+  stat: Stats;
+}> {
+  const resources = leaseResources(lease);
+  if (usesResourceNamespace(lease)) {
+    const leaseRelativePath = normalizeLeaseRelativePath(requestPath);
+    const { resource, resourceRelativePath } = resourceForRequest(resources, leaseRelativePath);
+    return resolveLeaseSourceTarget(mounts, resource.sourcePath, resourceRelativePath, {
+      leasePath: resource.path,
+      leaseRelativePath,
+    });
+  }
+
+  return resolveLeaseSourceTarget(mounts, resources[0]!.sourcePath, requestPath, {
+    leasePath: lease.path,
+    leaseRelativePath: normalizeLeaseRelativePath(requestPath),
+  });
+}
+
+async function resolveLeaseSourceTarget(
+  mounts: readonly LocalFolderMountConfig[],
+  sourcePath: string,
+  requestPath: string,
+  output: { leasePath: string; leaseRelativePath: string },
+): Promise<{
+  mountName: string;
+  leasePath: string;
   virtualPath: string;
   leaseRelativePath: string;
   realPath: string;
   stat: Stats;
 }> {
   const registry = new MountRegistry([...mounts]);
-  const leaseRoot = registry.resolve(lease.path);
+  const leaseRoot = registry.resolve(sourcePath);
   const leaseRootStat = await fsp.stat(leaseRoot.realPath);
-  if (!leaseRootStat.isDirectory()) throw new Error(`${lease.path} is not a directory`);
+  const leaseRelativePath = normalizeLeaseRelativePath(requestPath);
+  if (leaseRootStat.isFile()) {
+    if (leaseRelativePath) throw new Error(`${output.leasePath} is a file`);
+    const policyPath = leaseRoot.relativePath || path.basename(leaseRoot.realPath);
+    if (matchesConfiguredOrGlobalPattern(policyPath, leaseRoot.mount.config.exclude)) {
+      throw new Error(`${leaseRoot.virtualPath} is excluded`);
+    }
+    const targetRealPath = await fsp.realpath(leaseRoot.realPath);
+    if (isGloballyDeniedPath(policyPath, targetRealPath)) {
+      throw new Error(`${leaseRoot.virtualPath} is globally denied`);
+    }
+    return {
+      mountName: leaseRoot.mount.config.name,
+      leasePath: output.leasePath,
+      virtualPath: leaseRoot.virtualPath,
+      leaseRelativePath: output.leaseRelativePath,
+      realPath: targetRealPath,
+      stat: await fsp.stat(targetRealPath),
+    };
+  }
+  if (!leaseRootStat.isDirectory()) throw new Error(`${output.leasePath} is not a file or directory`);
 
   const leaseRootRealPath = await fsp.realpath(leaseRoot.realPath);
-  const leaseRelativePath = normalizeLeaseRelativePath(requestPath);
-  const virtualPath = leaseRelativePath ? `${stripTrailingSlash(lease.path)}/${leaseRelativePath}` : stripTrailingSlash(lease.path);
+  const virtualPath = leaseRelativePath ? `${stripTrailingSlash(sourcePath)}/${leaseRelativePath}` : stripTrailingSlash(sourcePath);
   const resolved = registry.resolve(virtualPath);
   const policyPath = resolved.relativePath || path.basename(resolved.realPath);
   if (matchesConfiguredOrGlobalPattern(policyPath, resolved.mount.config.exclude)) {
@@ -192,11 +249,76 @@ async function resolveLeaseTarget(
 
   return {
     mountName: resolved.mount.config.name,
+    leasePath: output.leasePath,
     virtualPath: resolved.virtualPath,
-    leaseRelativePath,
+    leaseRelativePath: output.leaseRelativePath,
     realPath: targetRealPath,
     stat: await fsp.stat(targetRealPath),
   };
+}
+
+async function listLeaseResourceRoot(
+  mounts: readonly LocalFolderMountConfig[],
+  lease: LeaseRecord,
+): Promise<LeaseDirectoryListing> {
+  const entries: LeaseDirectoryEntry[] = [];
+  for (const resource of leaseResources(lease)) {
+    try {
+      const target = await resolveLeaseSourceTarget(mounts, resource.sourcePath, '', {
+        leasePath: resource.path,
+        leaseRelativePath: toVirtualRelative(resource.path),
+      });
+      const type = resource.type === 'file' || target.stat.isFile() ? 'file' : 'directory';
+      entries.push({
+        name: path.basename(resource.path),
+        path: resource.path,
+        type,
+        size: type === 'file' ? target.stat.size : 0,
+        mtimeMs: target.stat.mtimeMs,
+      });
+    } catch {
+      // Unavailable resources stay invisible in the lease browser root.
+    }
+  }
+  entries.sort((a, b) => {
+    if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+  return {
+    label: lease.label,
+    leaseId: lease.id,
+    path: '/',
+    ...(lease.expiresAt ? { expiresAt: lease.expiresAt } : {}),
+    entries,
+  };
+}
+
+function usesResourceNamespace(lease: LeaseRecord): boolean {
+  const resources = leaseResources(lease);
+  return resources.length > 1 || resources[0]?.type === 'file';
+}
+
+function resourceForRequest(
+  resources: LeaseResource[],
+  leaseRelativePath: string,
+): { resource: LeaseResource; resourceRelativePath: string } {
+  const segments = leaseRelativePath.split('/').filter(Boolean);
+  const requestedRoot = segments[0];
+  const resource = resources.find((candidate) => toVirtualRelative(candidate.path) === requestedRoot);
+  if (!resource) throw new Error(`unknown lease resource: /${requestedRoot ?? ''}`);
+  return { resource, resourceRelativePath: segments.slice(1).join('/') };
+}
+
+function uploadResourceForRequest(lease: LeaseRecord, leaseRelativePath: string): LeaseResource {
+  const resources = leaseResources(lease);
+  if (usesResourceNamespace(lease)) return resourceForRequest(resources, leaseRelativePath).resource;
+  return resources[0]!;
+}
+
+function sourceRelativePathForResource(resource: LeaseResource, leaseRelativePath: string): string {
+  if (toVirtualRelative(resource.path) === leaseRelativePath) return '';
+  if (!leaseRelativePath.startsWith(`${toVirtualRelative(resource.path)}/`)) return leaseRelativePath;
+  return leaseRelativePath.slice(toVirtualRelative(resource.path).length + 1);
 }
 
 function normalizeLeaseRelativePath(inputPath: string): string {

@@ -7,10 +7,9 @@ import { addConnector, listConnectors } from '../src/cli/connectors.js';
 import { runConfigSetup, showConfig } from '../src/cli/config.js';
 import { doctor } from '../src/cli/doctor.js';
 import { init } from '../src/cli/init.js';
-import { createFolderLease, listFolderLeases, revokeFolderLease } from '../src/cli/lease.js';
+import { addPathsToLease, createFolderLease, listFolderLeases, revokeFolderLease } from '../src/cli/lease.js';
 import { reindex } from '../src/cli/reindex.js';
 import { addMount, editMount, listMounts, removeMount } from '../src/cli/mounts.js';
-import { addShareLink, listShareLinks, removeShareLink } from '../src/cli/share.js';
 import { start } from '../src/cli/start.js';
 import {
   configureTunnel,
@@ -49,8 +48,7 @@ program.addHelpText('after', examples([
   ['mvmt serve -i', 'start locally with the interactive prompt'],
   ['mvmt serve --path ~/Documents', 'serve one read-only folder for this run'],
   ['mvmt mounts add notes ~/notes --mount-path /notes --read-only', 'add a read-only mount'],
-  ['mvmt lease create ~/Taxes --label "Sarah - tax docs"', 'create a 24h folder lease'],
-  ['mvmt share add /notes/report.pdf', 'create a 24h browser download link'],
+  ['mvmt lease create ~/Taxes ~/Receipts --label "Sarah - tax docs"', 'create one 24h lease for multiple paths'],
   ['mvmt token add codex --scope notes:read', 'create a scoped API token'],
   ['mvmt doctor', 'validate config and mount roots'],
 ]));
@@ -174,51 +172,9 @@ mountsCommand
     await removeMount(name, withInheritedConfig(options, command));
   });
 
-const shareCommand = program
-  .command('share')
-  .description('Create browser download links for mounted files')
-  .option('-c, --config <path>', 'Config file path')
-  .option('--json', 'Output as JSON')
-  .action(async (options: { config?: string; json?: boolean }) => {
-    await listShareLinks(options);
-  });
-
-shareCommand
-  .command('list')
-  .description('List browser download links')
-  .option('-c, --config <path>', 'Config file path')
-  .option('--json', 'Output as JSON')
-  .action(async (options: { config?: string; json?: boolean }, command: Command) => {
-    await listShareLinks(withInheritedConfig(options, command));
-  });
-
-shareCommand
-  .command('add <path>')
-  .description('Create a browser download link for one mounted file')
-  .option('-c, --config <path>', 'Config file path')
-  .option('--expires <duration>', 'Share lifetime, such as 30m, 24h, 7d, or never')
-  .option('--ttl <duration>', 'Alias for --expires')
-  .option('--json', 'Output as JSON')
-  .addHelpText('after', examples([
-    ['mvmt share add /books/pg100.txt', 'create a 24h download link'],
-    ['mvmt share add /books/pg100.txt --expires 7d', 'create a download link that lasts 7 days'],
-  ]))
-  .action(async (inputPath: string, options: { config?: string; expires?: string; ttl?: string; json?: boolean }, command: Command) => {
-    await addShareLink(inputPath, withInheritedConfig(options, command));
-  });
-
-shareCommand
-  .command('remove <id>')
-  .alias('rm')
-  .description('Remove a browser download link')
-  .option('-c, --config <path>', 'Config file path')
-  .action(async (id: string, options: { config?: string }, command: Command) => {
-    await removeShareLink(id, withInheritedConfig(options, command));
-  });
-
 const leaseCommand = program
   .command('lease')
-  .description('Create folder leases')
+  .description('Create path leases')
   .option('-c, --config <path>', 'Config file path')
   .option('--json', 'Output as JSON')
   .action(async (options: { config?: string; json?: boolean }) => {
@@ -227,7 +183,7 @@ const leaseCommand = program
 
 leaseCommand
   .command('list')
-  .description('List folder leases')
+  .description('List leases')
   .option('-c, --config <path>', 'Config file path')
   .option('--json', 'Output as JSON')
   .action(async (options: { config?: string; json?: boolean }, command: Command) => {
@@ -235,9 +191,9 @@ leaseCommand
   });
 
 leaseCommand
-  .command('create <folder>')
+  .command('create <paths...>')
   .alias('add')
-  .description('Create a browser lease for one folder')
+  .description('Create one browser/MCP lease for one or more paths')
   .option('-c, --config <path>', 'Config file path')
   .requiredOption('--label <text>', 'Required lease label, such as "Sarah - tax docs"')
   .option('--mode <mode>', 'Lease mode: read or upload', 'read')
@@ -246,19 +202,33 @@ leaseCommand
   .option('--ttl <duration>', 'Alias for --expires')
   .option('--json', 'Output as JSON')
   .addHelpText('after', examples([
-    ['mvmt lease create ~/Documents/Taxes --label "Sarah - tax docs"', 'create a 24h folder lease'],
+    ['mvmt lease create ~/Documents/Taxes ~/Receipts --label "Sarah - tax docs"', 'create a 24h lease for multiple paths'],
+    ['mvmt lease create ~/Downloads/report.pdf --label "Report"', 'create a 24h lease for one file'],
     ['mvmt lease create ~/DropBox --label "Sarah uploads" --mode upload', 'create an upload-only folder lease'],
     ['mvmt lease create ~/Photos --label "Family photos" --expires never', 'lease until revoked'],
   ]))
-  .action(async (folder: string, options: { config?: string; label?: string; mode?: string; upload?: boolean; expires?: string; ttl?: string; json?: boolean }, command: Command) => {
-    await createFolderLease(folder, withInheritedConfig(options, command));
+  .action(async (paths: string[], options: { config?: string; label?: string; mode?: string; upload?: boolean; expires?: string; ttl?: string; json?: boolean }, command: Command) => {
+    await createFolderLease(paths, withInheritedConfig(options, command));
+  });
+
+leaseCommand
+  .command('add-path <id> <paths...>')
+  .alias('add-paths')
+  .description('Add paths to an existing read lease')
+  .option('-c, --config <path>', 'Config file path')
+  .option('--json', 'Output as JSON')
+  .addHelpText('after', examples([
+    ['mvmt lease add-path bz200Pmis1xCT1-8 ~/Documents/Receipts', 'add another folder to an existing lease'],
+  ]))
+  .action(async (id: string, paths: string[], options: { config?: string; json?: boolean }, command: Command) => {
+    await addPathsToLease(id, paths, withInheritedConfig(options, command));
   });
 
 leaseCommand
   .command('revoke <id>')
   .alias('remove')
   .alias('rm')
-  .description('Revoke a folder lease')
+  .description('Revoke a lease')
   .option('-c, --config <path>', 'Config file path')
   .action(async (id: string, options: { config?: string }, command: Command) => {
     await revokeFolderLease(id, withInheritedConfig(options, command));
@@ -476,7 +446,9 @@ tunnelCommand
   .command('config')
   .description('Choose a different tunnel and save it to config')
   .option('-c, --config <path>', 'Config file path')
-  .action(async (options: { config?: string }, command: Command) => {
+  .option('--quick', 'Configure Cloudflare Quick Tunnel without prompting')
+  .option('--cloudflare-config <path>', 'Configure a Cloudflare named tunnel from a cloudflared config file')
+  .action(async (options: { config?: string; quick?: boolean; cloudflareConfig?: string }, command: Command) => {
     await configureTunnel(withInheritedConfig(options, command));
   });
 

@@ -4,7 +4,7 @@ import { verifyApiToken } from '../utils/api-token-hash.js';
 import { isExpired } from '../utils/token-ttl.js';
 import { AccessToken } from './oauth.js';
 
-export type ClientIdentitySource = 'session' | 'token' | 'oauth' | 'quarantine';
+export type ClientIdentitySource = 'session' | 'token' | 'oauth' | 'lease' | 'quarantine';
 
 export interface ClientIdentity {
   // Stable mvmt-internal id used by audit, policy, and admin UI lookups.

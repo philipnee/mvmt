@@ -6,7 +6,19 @@ import { MvmtConfig } from '../config/schema.js';
 import { resolveSetupPath } from '../connectors/setup-paths.js';
 import { MountRegistry, normalizeVirtualPath } from '../context/mount-registry.js';
 import { addMountToConfig, MountInput } from './mounts.js';
-import { createLease, DEFAULT_LEASE_TTL, defaultLeasesPath, LeasePermission, leaseUnavailableReason, listLeases, revokeLease } from '../lease/store.js';
+import {
+  addLeaseResources,
+  createLease,
+  DEFAULT_LEASE_TTL,
+  defaultLeasesPath,
+  findLease,
+  LeasePermission,
+  LeaseResource,
+  leaseResources,
+  leaseUnavailableReason,
+  listLeases,
+  revokeLease,
+} from '../lease/store.js';
 import { parseTokenTtl } from '../utils/token-ttl.js';
 import { normalizeTunnelBaseUrl } from '../utils/tunnel.js';
 
@@ -31,7 +43,7 @@ export async function listFolderLeases(options: LeaseCommandOptions = {}): Promi
     return;
   }
 
-  console.log(chalk.bold('Folder leases'));
+  console.log(chalk.bold('Leases'));
   if (leases.length === 0) {
     console.log(`  ${chalk.dim('none')}`);
     return;
@@ -42,25 +54,28 @@ export async function listFolderLeases(options: LeaseCommandOptions = {}): Promi
     const activity = lease.permissions.includes('upload')
       ? `uploads ${lease.uploadCount ?? 0}`
       : `downloads ${lease.downloadCount ?? 0}`;
-    console.log(`  ${lease.id.padEnd(16)} ${state}  ${lease.label}  ${lease.path}  expires ${lease.expiresAt ?? 'never'}  ${activity}`);
+    const resourceText = leaseResources(lease).map((resource) => resource.path).join(',');
+    console.log(`  ${lease.id.padEnd(16)} ${state}  ${lease.label}  ${resourceText}  expires ${lease.expiresAt ?? 'never'}  ${activity}`);
   }
 }
 
-export async function createFolderLease(inputPath: string | undefined, options: CreateLeaseOptions = {}): Promise<void> {
-  if (!inputPath) throw new Error('Folder is required. Example: mvmt lease create ~/Documents/Taxes --label "Sarah - tax docs"');
+export async function createFolderLease(inputPath: string | string[] | undefined, options: CreateLeaseOptions = {}): Promise<void> {
+  const inputPaths = Array.isArray(inputPath) ? inputPath : inputPath ? [inputPath] : [];
+  if (inputPaths.length === 0) throw new Error('Path is required. Example: mvmt lease create ~/Documents/Taxes --label "Sarah - tax docs"');
   const label = options.label?.trim();
   if (!label) throw new Error('Label is required. Example: --label "Sarah - tax docs"');
 
   const configPath = options.config ? resolveSetupPath(options.config) : getConfigPath();
   const config = configExists(configPath) ? loadConfig(configPath) : parseConfig({ version: 1 });
   const permissions = permissionsFromOptions(options);
-  const prepared = await prepareLeasePath(config, inputPath, label, permissions);
+  const prepared = await prepareLeasePaths(config, inputPaths, label, permissions);
   if (prepared.config !== config) await saveConfig(configPath, prepared.config);
 
   const ttl = parseTokenTtl(options.expires ?? options.ttl ?? DEFAULT_LEASE_TTL);
   const created = createLease(resolveLeaseStorePath(options), {
     label,
-    path: prepared.leasePath,
+    path: prepared.resources[0]!.sourcePath,
+    resources: prepared.resources,
     expiresAt: ttl.expiresAt,
     permissions,
   });
@@ -71,14 +86,14 @@ export async function createFolderLease(inputPath: string | undefined, options: 
     return;
   }
 
-  console.log(chalk.green('Folder lease created'));
+  console.log(chalk.green('Lease created'));
   console.log(`  Label: ${created.record.label}`);
-  console.log(`  Folder: ${created.record.path}`);
+  console.log(`  Paths: ${leaseResources(created.record).map((resource) => resource.path).join(', ')}`);
   console.log(`  Mode: ${formatPermissions(created.record.permissions)}`);
   console.log(`  Expires: ${created.record.expiresAt ?? 'never'}${options.expires || options.ttl ? '' : ` (${DEFAULT_LEASE_TTL} default)`}`);
-  if (prepared.addedMount) {
-    const access = prepared.addedMount.writeAccess ? 'upload-capable' : 'read-only';
-    console.log(chalk.dim(`  Added ${access} mount: ${prepared.addedMount.name} -> ${prepared.addedMount.root}`));
+  for (const mount of prepared.addedMounts) {
+    const access = mount.writeAccess ? 'upload-capable' : 'read-only';
+    console.log(chalk.dim(`  Added ${access} mount: ${mount.name} -> ${mount.root}`));
   }
   console.log(`  URL: ${url}`);
 }
@@ -86,7 +101,73 @@ export async function createFolderLease(inputPath: string | undefined, options: 
 export async function revokeFolderLease(id: string | undefined, options: LeaseCommandOptions = {}): Promise<void> {
   if (!id) throw new Error('Lease id is required.');
   if (!revokeLease(resolveLeaseStorePath(options), id)) throw new Error(`Unknown lease: ${id}`);
-  console.log(chalk.green(`Folder lease ${id} revoked`));
+  console.log(chalk.green(`Lease ${id} revoked`));
+}
+
+export async function addPathsToLease(
+  id: string | undefined,
+  inputPath: string | string[] | undefined,
+  options: LeaseCommandOptions = {},
+): Promise<void> {
+  const leaseId = id?.trim();
+  if (!leaseId) throw new Error('Lease id is required.');
+  const inputPaths = Array.isArray(inputPath) ? inputPath : inputPath ? [inputPath] : [];
+  if (inputPaths.length === 0) throw new Error('Path is required. Example: mvmt lease add-path <lease-id> ~/Documents/Receipts');
+
+  const storePath = resolveLeaseStorePath(options);
+  const lease = findLease(storePath, leaseId);
+  if (!lease) throw new Error(`Unknown lease: ${leaseId}`);
+  const unavailable = leaseUnavailableReason(lease);
+  if (unavailable) throw new Error(`Lease ${leaseId} is ${unavailable}; create a new lease instead.`);
+  if (lease.permissions.includes('upload')) throw new Error('Upload leases currently support one folder. Create a new upload lease instead.');
+
+  const configPath = options.config ? resolveSetupPath(options.config) : getConfigPath();
+  const config = configExists(configPath) ? loadConfig(configPath) : parseConfig({ version: 1 });
+  const prepared = await prepareLeasePaths(config, inputPaths, lease.label, lease.permissions);
+  if (prepared.config !== config) await saveConfig(configPath, prepared.config);
+  const before = new Set(leaseResources(lease).map((resource) => `${resource.sourcePath}:${resource.type}`));
+  const added = prepared.resources.filter((resource) => !before.has(`${resource.sourcePath}:${resource.type}`));
+  const updated = addLeaseResources(storePath, leaseId, prepared.resources);
+  if (!updated) throw new Error(`Unknown lease: ${leaseId}`);
+
+  if (options.json) {
+    console.log(JSON.stringify({ lease: updated, added }, null, 2));
+    return;
+  }
+
+  console.log(chalk.green('Lease updated'));
+  if (added.length === 0) {
+    console.log(chalk.dim('  No new paths added.'));
+  } else {
+    console.log(`  Added paths: ${added.map((resource) => resource.path).join(', ')}`);
+  }
+  console.log(`  Paths: ${leaseResources(updated).map((resource) => resource.path).join(', ')}`);
+  console.log(chalk.dim('  Existing lease token and URL now include these paths.'));
+  for (const mount of prepared.addedMounts) {
+    const access = mount.writeAccess ? 'upload-capable' : 'read-only';
+    console.log(chalk.dim(`  Added ${access} mount: ${mount.name} -> ${mount.root}`));
+  }
+}
+
+async function prepareLeasePaths(
+  config: MvmtConfig,
+  inputPaths: string[],
+  label: string,
+  permissions: LeasePermission[],
+): Promise<{ config: MvmtConfig; resources: LeaseResource[]; addedMounts: MountInput[] }> {
+  if (permissions.includes('upload') && inputPaths.length > 1) {
+    throw new Error('Upload leases currently support one folder.');
+  }
+  let nextConfig = config;
+  const resources: LeaseResource[] = [];
+  const addedMounts: MountInput[] = [];
+  for (const inputPath of inputPaths) {
+    const prepared = await prepareLeasePath(nextConfig, inputPath, label, permissions);
+    nextConfig = prepared.config;
+    resources.push(prepared.resource);
+    if (prepared.addedMount) addedMounts.push(prepared.addedMount);
+  }
+  return { config: nextConfig, resources: uniqueLeaseResources(resources), addedMounts };
 }
 
 async function prepareLeasePath(
@@ -94,21 +175,32 @@ async function prepareLeasePath(
   inputPath: string,
   label: string,
   permissions: LeasePermission[],
-): Promise<{ config: MvmtConfig; leasePath: string; addedMount?: MountInput }> {
+): Promise<{ config: MvmtConfig; resource: LeaseResource; addedMount?: MountInput }> {
   const resolvedLocalPath = resolveSetupPath(inputPath);
   const localStat = await statIfExists(resolvedLocalPath);
   if (localStat?.isDirectory()) return prepareLocalFolderLeasePath(config, resolvedLocalPath, label, permissions);
+  if (localStat?.isFile()) return prepareLocalFileLeasePath(config, resolvedLocalPath, label, permissions);
   if (inputPath.trim().startsWith('/')) {
     const leasePath = normalizeVirtualPath(inputPath);
     const resolved = new MountRegistry(config.mounts).resolve(leasePath);
     const stat = await fsp.stat(resolved.realPath);
-    if (!stat.isDirectory()) throw new Error(`${leasePath} is not a mounted folder`);
+    if (!stat.isDirectory() && !stat.isFile()) throw new Error(`${leasePath} is not a mounted file or folder`);
     if (permissions.includes('upload') && !resolved.mount.config.writeAccess) {
       throw new Error(`${leasePath} is read-only; create the lease from a local folder path so mvmt can add an upload-capable mount.`);
     }
-    return { config, leasePath };
+    if (permissions.includes('upload') && !stat.isDirectory()) {
+      throw new Error('Upload leases require a folder.');
+    }
+    return {
+      config,
+      resource: {
+        path: resourcePathForVirtualPath(leasePath),
+        sourcePath: leasePath,
+        type: stat.isFile() ? 'file' : 'folder',
+      },
+    };
   }
-  throw new Error(`Folder not found: ${resolvedLocalPath}`);
+  throw new Error(`Path not found: ${resolvedLocalPath}`);
 }
 
 async function prepareLocalFolderLeasePath(
@@ -116,14 +208,14 @@ async function prepareLocalFolderLeasePath(
   root: string,
   label: string,
   permissions: LeasePermission[],
-): Promise<{ config: MvmtConfig; leasePath: string; addedMount?: MountInput }> {
+): Promise<{ config: MvmtConfig; resource: LeaseResource; addedMount?: MountInput }> {
   const realRoot = await fsp.realpath(root);
   const needsWritableMount = permissions.includes('upload');
   for (const mount of config.mounts) {
     try {
       const mountRoot = await fsp.realpath(resolveSetupPath(mount.root));
       if (mount.enabled !== false && mountRoot === realRoot && (!needsWritableMount || mount.writeAccess)) {
-        return { config, leasePath: mount.path };
+        return { config, resource: { path: mount.path, sourcePath: mount.path, type: 'folder' } };
       }
     } catch {
       // Ignore stale mount roots while creating a lease for a valid folder.
@@ -132,7 +224,7 @@ async function prepareLocalFolderLeasePath(
 
   const prefix = needsWritableMount ? 'lease-upload' : 'lease';
   const name = uniqueMountName(config, `${prefix}-${slugFromPath(realRoot)}`);
-  const mountPath = uniqueMountPath(config, `/${name}`);
+  const mountPath = uniqueMountPath(config, resourcePathForLocalPath(realRoot));
   const mount: MountInput = {
     name,
     root,
@@ -142,7 +234,38 @@ async function prepareLocalFolderLeasePath(
     guidance: '',
     enabled: true,
   };
-  return { config: addMountToConfig(config, mount), leasePath: mountPath, addedMount: mount };
+  return { config: addMountToConfig(config, mount), resource: { path: mountPath, sourcePath: mountPath, type: 'folder' }, addedMount: mount };
+}
+
+async function prepareLocalFileLeasePath(
+  config: MvmtConfig,
+  root: string,
+  label: string,
+  permissions: LeasePermission[],
+): Promise<{ config: MvmtConfig; resource: LeaseResource; addedMount?: MountInput }> {
+  if (permissions.includes('upload')) throw new Error('Upload leases require a folder.');
+  const realRoot = await fsp.realpath(root);
+  for (const mount of config.mounts) {
+    try {
+      const mountRoot = await fsp.realpath(resolveSetupPath(mount.root));
+      if (mount.enabled !== false && mountRoot === realRoot) return { config, resource: { path: mount.path, sourcePath: mount.path, type: 'file' } };
+    } catch {
+      // Ignore stale mount roots while creating a lease for a valid file.
+    }
+  }
+
+  const name = uniqueMountName(config, `lease-file-${slugFromPath(realRoot)}`);
+  const mountPath = uniqueMountPath(config, resourcePathForLocalPath(realRoot));
+  const mount: MountInput = {
+    name,
+    root,
+    path: mountPath,
+    writeAccess: false,
+    description: `Lease source: ${label}`,
+    guidance: '',
+    enabled: true,
+  };
+  return { config: addMountToConfig(config, mount), resource: { path: mountPath, sourcePath: mountPath, type: 'file' }, addedMount: mount };
 }
 
 function permissionsFromOptions(options: CreateLeaseOptions): LeasePermission[] {
@@ -202,4 +325,30 @@ function slugFromPath(inputPath: string): string {
     .replace(/[^a-z0-9_-]+/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-+|-+$/g, '') || 'folder';
+}
+
+function resourcePathForLocalPath(inputPath: string): string {
+  const leaf = path.basename(inputPath) || 'folder';
+  const segment = leaf
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'folder';
+  return `/${segment}`;
+}
+
+function resourcePathForVirtualPath(inputPath: string): string {
+  const relative = inputPath.split('/').filter(Boolean).join('-');
+  return `/${relative || 'resource'}`;
+}
+
+function uniqueLeaseResources(resources: LeaseResource[]): LeaseResource[] {
+  const seen = new Set<string>();
+  const unique: LeaseResource[] = [];
+  for (const resource of resources) {
+    const key = `${resource.sourcePath}:${resource.type}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(resource);
+  }
+  return unique;
 }

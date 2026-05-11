@@ -105,9 +105,10 @@ describe('Interactive help', () => {
   it('presents leases as the primary surface', () => {
     const lines = captureConsole(() => printInteractiveHelp());
 
-    expect(lines).toContain('  lease               list folder leases');
-    expect(lines).toContain('  lease create        create a folder lease');
-    expect(lines).toContain('  lease revoke        revoke a folder lease');
+    expect(lines).toContain('  lease               list leases');
+    expect(lines).toContain('  lease create        create a path lease');
+    expect(lines).toContain('  lease add-path      add paths to a lease');
+    expect(lines).toContain('  lease revoke        revoke a lease');
     expect(lines).toContain('  advanced            show mount/token/MCP commands');
     expect(lines).not.toContain('  token               list scoped API tokens');
     expect(lines).not.toContain('  mounts      list configured mounts');
@@ -119,7 +120,6 @@ describe('Interactive help', () => {
 
     expect(lines).toContain('  advanced mounts              list internal mounts');
     expect(lines).toContain('  advanced token               list scoped API tokens');
-    expect(lines).toContain('  advanced share               list legacy file share links');
     expect(lines).toContain('  advanced connectors          list loaded MCP connectors');
   });
 });

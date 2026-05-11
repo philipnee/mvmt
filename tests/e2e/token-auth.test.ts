@@ -161,19 +161,17 @@ describeIfDocker('mvmt e2e: token + auth', () => {
     expect(res.status).toBe(401);
   });
 
-  it('mounts one file, creates a share link, and downloads it by checksum', async () => {
-    const addFileMount = await container.exec([
-      'mounts', 'add', 'shared', '/data/shared.bin', '--mount-path', '/shared.bin', '--read-only',
+  it('creates a file lease and downloads it by checksum', async () => {
+    const lease = await container.exec(['lease', 'create', '/data/shared.bin', '--label', 'Shared file']);
+    expect(lease.exitCode, lease.stderr).toBe(0);
+    expect(lease.stdout).toContain('(24h default)');
+    const match = lease.stdout.match(/URL:\s+(http:\/\/127\.0\.0\.1:4141\/lease\/\S+)/);
+    if (!match) throw new Error(`could not parse lease URL from output:\n${lease.stdout}`);
+    const url = new URL(match[1]);
+
+    const downloaded = await container.run([
+      'curl', '-fsSL', `${url.origin}${url.pathname}/files/shared.bin?token=${url.searchParams.get('token')}`,
     ]);
-    expect(addFileMount.exitCode, addFileMount.stderr).toBe(0);
-
-    const share = await container.exec(['share', 'add', '/shared.bin']);
-    expect(share.exitCode, share.stderr).toBe(0);
-    expect(share.stdout).toContain('(24h default)');
-    const match = share.stdout.match(/URL:\s+(http:\/\/127\.0\.0\.1:4141\/share\/\S+)/);
-    if (!match) throw new Error(`could not parse share URL from output:\n${share.stdout}`);
-
-    const downloaded = await container.run(['curl', '-fsSL', match[1]]);
     expect(downloaded.exitCode, downloaded.stderr).toBe(0);
     const expectedHash = createHash('sha256').update(fs.readFileSync(sharedFileHost)).digest('hex');
     const actualHash = createHash('sha256').update(downloaded.stdout).digest('hex');

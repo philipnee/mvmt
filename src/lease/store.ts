@@ -10,11 +10,19 @@ export const LEASES_PATH = path.join(os.homedir(), '.mvmt', '.leases.json');
 export const DEFAULT_LEASE_TTL = '24h';
 
 export type LeasePermission = 'read' | 'upload';
+export type LeaseResourceType = 'file' | 'folder';
+
+export interface LeaseResource {
+  path: string;
+  sourcePath: string;
+  type: LeaseResourceType;
+}
 
 export interface LeaseRecord {
   id: string;
   label: string;
   path: string;
+  resources: LeaseResource[];
   permissions: LeasePermission[];
   tokenHash: string;
   createdAt: string;
@@ -42,14 +50,18 @@ export function defaultLeasesPath(tokenPath: string | undefined = TOKEN_PATH): s
 
 export function createLease(
   storePath: string,
-  input: { label: string; path: string; expiresAt?: string; permissions?: LeasePermission[] },
+  input: { label: string; path?: string; resources?: LeaseResource[]; expiresAt?: string; permissions?: LeasePermission[] },
 ): CreatedLease {
   const store = readLeaseStore(storePath);
   const token = `mvmt_l_${crypto.randomBytes(32).toString('base64url')}`;
+  const resources = normalizeLeaseResources(input.resources, input.path);
+  if (resources.length === 0) throw new Error('lease must include at least one resource');
+  const path = input.path ?? resources[0]!.sourcePath;
   const record: LeaseRecord = {
     id: uniqueLeaseId(store),
     label: input.label,
-    path: input.path,
+    path,
+    resources,
     permissions: input.permissions ?? ['read'],
     tokenHash: hashApiToken(token),
     createdAt: new Date().toISOString(),
@@ -68,6 +80,27 @@ export function listLeases(storePath: string): LeaseRecord[] {
 
 export function findLease(storePath: string, id: string): LeaseRecord | undefined {
   return readLeaseStore(storePath).leases.find((lease) => lease.id === id);
+}
+
+export function findLeaseByToken(storePath: string, token: string | undefined): LeaseRecord | undefined {
+  if (!token) return undefined;
+  return readLeaseStore(storePath).leases.find((lease) => validateLeaseToken(lease, token));
+}
+
+export function addLeaseResources(storePath: string, id: string, resources: LeaseResource[]): LeaseRecord | undefined {
+  const store = readLeaseStore(storePath);
+  const index = store.leases.findIndex((lease) => lease.id === id);
+  if (index < 0) return undefined;
+  const current = store.leases[index]!;
+  const nextResources = mergeLeaseResources(leaseResources(current), resources);
+  const nextLease = {
+    ...current,
+    path: current.path || nextResources[0]!.sourcePath,
+    resources: nextResources,
+  };
+  store.leases[index] = nextLease;
+  writeLeaseStore(storePath, store);
+  return nextLease;
 }
 
 export function revokeLease(storePath: string, id: string): boolean {
@@ -110,6 +143,10 @@ export function leaseAllows(lease: LeaseRecord, permission: LeasePermission): bo
   return lease.permissions.includes(permission);
 }
 
+export function leaseResources(lease: LeaseRecord): LeaseResource[] {
+  return normalizeLeaseResources(lease.resources, lease.path);
+}
+
 function readLeaseStore(storePath: string): LeaseStoreFile {
   try {
     const parsed = JSON.parse(fs.readFileSync(storePath, 'utf-8')) as LeaseStoreFile;
@@ -118,6 +155,7 @@ function readLeaseStore(storePath: string): LeaseStoreFile {
       version: 1,
       leases: parsed.leases.map((lease) => ({
         ...lease,
+        resources: normalizeLeaseResources((lease as Partial<LeaseRecord>).resources, lease.path),
         permissions: lease.permissions?.filter(isLeasePermission) ?? ['read'],
         downloadCount: lease.downloadCount ?? 0,
         uploadCount: lease.uploadCount ?? 0,
@@ -148,4 +186,35 @@ function uniqueLeaseId(store: LeaseStoreFile): string {
 
 function isLeasePermission(value: unknown): value is LeasePermission {
   return value === 'read' || value === 'upload';
+}
+
+function normalizeLeaseResources(resources: LeaseResource[] | undefined, fallbackPath: string | undefined): LeaseResource[] {
+  const normalized = (resources ?? [])
+    .map((resource) => ({
+      path: normalizeLeasePath(resource.path),
+      sourcePath: normalizeLeasePath(resource.sourcePath),
+      type: resource.type === 'file' ? 'file' as const : 'folder' as const,
+    }))
+    .filter((resource) => resource.path !== '/' && resource.sourcePath !== '/');
+  if (normalized.length > 0) return normalized;
+  if (!fallbackPath) return [];
+  const path = normalizeLeasePath(fallbackPath ?? '/lease');
+  return [{ path, sourcePath: path, type: 'folder' }];
+}
+
+function normalizeLeasePath(inputPath: string): string {
+  const normalized = inputPath.trim().replaceAll('\\', '/').split('/').filter(Boolean).join('/');
+  return normalized ? `/${normalized}` : '/';
+}
+
+function mergeLeaseResources(current: LeaseResource[], added: LeaseResource[]): LeaseResource[] {
+  const merged: LeaseResource[] = [];
+  const seen = new Set<string>();
+  for (const resource of [...current, ...normalizeLeaseResources(added, undefined)]) {
+    const key = `${resource.sourcePath}:${resource.type}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(resource);
+  }
+  return merged;
 }
