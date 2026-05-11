@@ -675,7 +675,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       if (leaseAllows(lease, 'upload')) {
         recordLeaseUse(leaseStorePath, lease.id);
         logHttpRequest(requestLog, req, 200, 'lease.request', 'upload_page', lease.id);
-        res.status(200).type('html').send(renderLeaseUploadPage(req, lease));
+        res.status(200).type('html').send(renderLeaseUploadPage(lease, browserLeaseToken(req)));
         return;
       }
       logHttpRequest(requestLog, req, 403, 'lease.request', 'permission_denied', lease.id);
@@ -687,7 +687,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       const listing = await listLeaseDirectory(resolveLeaseMounts(options.leaseMounts), lease, requestPath);
       recordLeaseUse(leaseStorePath, lease.id);
       logHttpRequest(requestLog, req, 200, 'lease.request', listing.path, lease.id);
-      res.status(200).type('html').send(renderLeasePage(req, listing));
+      res.status(200).type('html').send(renderLeasePage(listing, browserLeaseToken(req)));
     } catch (err) {
       const detail = err instanceof Error ? err.message : 'unavailable';
       logHttpRequest(requestLog, req, 404, 'lease.request', detail, lease.id);
@@ -1197,8 +1197,18 @@ function regexParam(req: Request, index: number): string | undefined {
 
 function bearerToken(req: Request): string | undefined {
   const header = firstHeaderValue(req.headers.authorization);
-  const match = /^Bearer\s+(.+)$/i.exec(header ?? '');
-  return match?.[1];
+  if (!header) return undefined;
+  const scheme = 'bearer';
+  if (header.slice(0, scheme.length).toLowerCase() !== scheme) return undefined;
+  let index = scheme.length;
+  if (!isHttpWhitespace(header[index])) return undefined;
+  while (isHttpWhitespace(header[index])) index += 1;
+  const token = header.slice(index).trim();
+  return token.length > 0 ? token : undefined;
+}
+
+function isHttpWhitespace(value: string | undefined): boolean {
+  return value === ' ' || value === '\t';
 }
 
 type ByteRange = { start: number; end: number };
@@ -1270,14 +1280,13 @@ function isNodeErrorCode(err: unknown, code: string): boolean {
   return typeof err === 'object' && err !== null && (err as NodeJS.ErrnoException).code === code;
 }
 
-function renderLeasePage(req: Request, listing: LeaseDirectoryListing): string {
-  const token = firstStringQuery(req.query.token) ?? firstStringQuery(req.query.t);
+function renderLeasePage(listing: LeaseDirectoryListing, token: string | undefined): string {
   const rows = listing.entries.map((entry) => {
     const href = entry.type === 'directory'
       ? leasePageUrl(listing.leaseId, entry.path, token)
       : leaseFileUrl(listing.leaseId, entry.path, token);
     const size = entry.type === 'directory' ? '' : String(entry.size);
-    return `<tr><td><a href="${escapeHtml(href)}">${escapeHtml(entry.name)}</a></td><td>${entry.type}</td><td>${escapeHtml(size)}</td></tr>`;
+    return `<tr><td><a href="${escapeHtml(href)}">${escapeHtml(entry.name)}</a></td><td>${escapeHtml(entry.type)}</td><td>${escapeHtml(size)}</td></tr>`;
   }).join('');
   const parent = listing.path === '/'
     ? ''
@@ -1305,8 +1314,8 @@ ${parent}
 </html>`;
 }
 
-function renderLeaseUploadPage(req: Request, lease: { id: string; label: string; expiresAt?: string }): string {
-  const token = firstStringQuery(req.query.token) ?? firstStringQuery(req.query.t) ?? '';
+function renderLeaseUploadPage(lease: { id: string; label: string; expiresAt?: string }, token: string | undefined): string {
+  const safeToken = token ?? '';
   return `<!doctype html>
 <html>
 <head>
@@ -1328,8 +1337,8 @@ button{padding:.55rem .8rem}
   <p class="status" id="status">Choose files or drop them here.</p>
 </div>
 <script>
-const token = ${JSON.stringify(token)};
-const leaseId = ${JSON.stringify(lease.id)};
+const token = ${scriptStringLiteral(safeToken)};
+const leaseId = ${scriptStringLiteral(lease.id)};
 const drop = document.querySelector('.drop');
 const input = document.getElementById('files');
 const status = document.getElementById('status');
@@ -1361,6 +1370,23 @@ drop.addEventListener('drop', (event) => {
 </html>`;
 }
 
+function browserLeaseToken(req: Request): string | undefined {
+  const token = firstStringQuery(req.query.token) ?? firstStringQuery(req.query.t);
+  return token && isSafeBrowserLeaseToken(token) ? token : undefined;
+}
+
+function isSafeBrowserLeaseToken(value: string): boolean {
+  if (!value.startsWith('mvmt_l_') || value.length > 96) return false;
+  for (let index = 'mvmt_l_'.length; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    const isDigit = code >= 48 && code <= 57;
+    const isUpper = code >= 65 && code <= 90;
+    const isLower = code >= 97 && code <= 122;
+    if (!isDigit && !isUpper && !isLower && value[index] !== '_' && value[index] !== '-') return false;
+  }
+  return true;
+}
+
 function leasePageUrl(id: string, listingPath: string, token: string | undefined): string {
   const params = new URLSearchParams();
   if (listingPath !== '/') params.set('path', listingPath);
@@ -1390,6 +1416,15 @@ function escapeHtml(value: string): string {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
+}
+
+function scriptStringLiteral(value: string): string {
+  return JSON.stringify(value)
+    .replaceAll('<', '\\u003C')
+    .replaceAll('>', '\\u003E')
+    .replaceAll('&', '\\u0026')
+    .replaceAll('\u2028', '\\u2028')
+    .replaceAll('\u2029', '\\u2029');
 }
 
 function requestClientHint(req: Request, oauthClientId?: string): string | undefined {

@@ -248,6 +248,66 @@ describe('folder lease access', () => {
     }
   });
 
+  it('escapes browser lease pages and does not reflect unsafe query tokens', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-lease-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const leaseStorePath = path.join(tmp, '.leases.json');
+    const readRoot = path.join(tmp, 'read');
+    const uploadRoot = path.join(tmp, 'upload');
+    fs.mkdirSync(readRoot, { recursive: true });
+    fs.mkdirSync(uploadRoot, { recursive: true });
+    fs.writeFileSync(path.join(readRoot, 'report & <draft>.txt'), 'draft', 'utf-8');
+    const config = parseConfig({
+      version: 1,
+      mounts: [
+        { name: 'read', type: 'local_folder', path: '/read', root: readRoot },
+        { name: 'upload', type: 'local_folder', path: '/upload', root: uploadRoot, writeAccess: true },
+      ],
+    });
+    const label = '<img src=x onerror=alert(1)> Sarah';
+    const readLease = createLease(leaseStorePath, {
+      label,
+      path: '/read',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const uploadLease = createLease(leaseStorePath, {
+      label,
+      path: '/upload',
+      permissions: ['upload'],
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: config.mounts,
+      leaseStorePath,
+    });
+    try {
+      const unsafeQuery = encodeURIComponent('</script><img src=x onerror=alert(1)>');
+      const readPage = await fetch(`http://127.0.0.1:${server.port}/lease/${readLease.record.id}?token=${unsafeQuery}`, {
+        headers: { Authorization: `Bearer     ${readLease.token}` },
+      });
+      expect(readPage.status).toBe(200);
+      const readHtml = await readPage.text();
+      expect(readHtml).toContain('&lt;img src=x onerror=alert(1)&gt; Sarah');
+      expect(readHtml).toContain('report &amp; &lt;draft&gt;.txt');
+      expect(readHtml).not.toContain('<img src=x onerror=alert(1)>');
+      expect(readHtml).not.toContain('token=');
+
+      const uploadPage = await fetch(`http://127.0.0.1:${server.port}/lease/${uploadLease.record.id}?token=${unsafeQuery}`, {
+        headers: { Authorization: `Bearer     ${uploadLease.token}` },
+      });
+      expect(uploadPage.status).toBe(200);
+      const uploadHtml = await uploadPage.text();
+      expect(uploadHtml).toContain('&lt;img src=x onerror=alert(1)&gt; Sarah');
+      expect(uploadHtml).not.toContain('</script><img');
+      expect(uploadHtml).not.toContain('token = "</script>');
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('serves multiple lease resources through one browser link and one MCP token', async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-lease-test-'));
     const tokenPath = path.join(tmp, '.session-token');
