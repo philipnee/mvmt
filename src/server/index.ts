@@ -2,7 +2,6 @@ import { createHash, randomUUID } from 'crypto';
 import { createReadStream, createWriteStream } from 'fs';
 import fsp from 'fs/promises';
 import { Server as HttpServer } from 'node:http';
-import os from 'os';
 import path from 'path';
 import { Transform } from 'stream';
 import { pipeline } from 'stream/promises';
@@ -895,19 +894,6 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     return options.configPath;
   };
 
-  app.get('/dashboard/api/browse', dashboardOriginMiddleware, dashboardAuthMiddleware, dashboardAdminMiddleware, async (req, res) => {
-    const requestPath = firstStringQuery(req.query.path);
-    try {
-      const listing = await listLocalDirectory(requestPath);
-      logHttpRequest(requestLog, req, 200, 'dashboard.browse', listing.path);
-      res.json(listing);
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : 'unavailable';
-      logHttpRequest(requestLog, req, 404, 'dashboard.browse', detail);
-      res.status(404).json({ error: 'path_unavailable' });
-    }
-  });
-
   app.post('/dashboard/api/mounts', dashboardOriginMiddleware, dashboardAuthMiddleware, dashboardAdminMiddleware, async (req, res) => {
     const configPath = requireConfigPath(req, res);
     if (!configPath) return;
@@ -1740,58 +1726,6 @@ function dashboardLeasePaths(body: Record<string, unknown>): string[] {
   return typeof body.path === 'string' && body.path.trim().length > 0 ? [body.path] : [];
 }
 
-interface LocalDirectoryEntry {
-  name: string;
-  path: string;
-  type: 'directory' | 'file';
-}
-
-interface LocalDirectoryListing {
-  path: string;
-  parent?: string;
-  entries: LocalDirectoryEntry[];
-}
-
-async function listLocalDirectory(requestPath: string | undefined): Promise<LocalDirectoryListing> {
-  const target = requestPath && requestPath.trim().length > 0
-    ? path.resolve(expandHomePrefix(requestPath.trim()))
-    : os.homedir();
-  // This powers the dashboard's admin-only local file picker. The route is
-  // authenticated and role-gated before this helper is called.
-  // lgtm[js/path-injection]
-  const stat = await fsp.stat(target);
-  if (!stat.isDirectory()) throw new Error(`${target} is not a directory`);
-  // lgtm[js/path-injection]
-  const dirents = await fsp.readdir(target, { withFileTypes: true });
-  const entries: LocalDirectoryEntry[] = [];
-  for (const dirent of dirents) {
-    if (!dirent.isDirectory() && !dirent.isFile()) continue;
-    entries.push({
-      name: dirent.name,
-      path: path.join(target, dirent.name),
-      type: dirent.isDirectory() ? 'directory' : 'file',
-    });
-  }
-  entries.sort((a, b) => {
-    if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
-    return a.name.localeCompare(b.name);
-  });
-  const parent = path.dirname(target);
-  return {
-    path: target,
-    ...(parent !== target ? { parent } : {}),
-    entries,
-  };
-}
-
-function expandHomePrefix(value: string): string {
-  if (value === '~') return os.homedir();
-  if (value.startsWith('~/') || value.startsWith('~\\')) {
-    return path.join(os.homedir(), value.slice(2));
-  }
-  return value;
-}
-
 function mountInputFromBody(
   body: Record<string, unknown>,
   existing: readonly { name: string }[],
@@ -2062,15 +1996,6 @@ table.t{border-collapse:collapse;width:100%}
 .toast.info{border-left:3px solid var(--info)}
 .toast.info .icon{color:var(--info)}
 @keyframes slide{from{transform:translateX(8px);opacity:0}to{transform:none;opacity:1}}
-/* Picker rows */
-.picker-list{max-height:360px;overflow:auto;border:1px solid var(--border);border-radius:var(--radius-sm)}
-.picker-row{display:flex;align-items:center;gap:.55rem;padding:.5rem .75rem;border-bottom:1px solid var(--border);cursor:pointer;transition:background .1s}
-.picker-row:last-child{border-bottom:none}
-.picker-row:hover{background:var(--hover)}
-.picker-row .icon{flex:none;color:var(--muted)}
-.picker-row .name-text{flex:1;font-size:.88rem;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.picker-row.disabled{opacity:.4;cursor:not-allowed}
-.picker-current-path{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.78rem;color:var(--text-2);padding:.4rem .6rem;background:var(--hover);border-radius:var(--radius-sm);margin-bottom:.6rem;word-break:break-all}
 /* Misc */
 .divider{height:1px;background:var(--border);margin:.85rem 0}
 @media (max-width:760px){
@@ -2247,10 +2172,7 @@ table.t{border-collapse:collapse;width:100%}
       <div class="modal-body">
         <div class="form-grid">
           <label for="mount-root">Local path</label>
-          <div style="display:flex;gap:.4rem;">
-            <input id="mount-root" placeholder="/Users/you/Documents" style="flex:1;">
-            <button type="button" class="btn" id="open-picker">Browse…</button>
-          </div>
+          <input id="mount-root" placeholder="/Users/you/Documents">
           <label for="mount-name">Name</label>
           <input id="mount-name" placeholder="auto">
           <label for="mount-path">Shared as</label>
@@ -2270,26 +2192,6 @@ table.t{border-collapse:collapse;width:100%}
     </div>
   </div>
 
-  <div id="picker-modal" class="modal hidden" role="dialog" aria-modal="true">
-    <div class="modal-card">
-      <div class="modal-head">
-        <h2>Pick a folder or file</h2>
-        <button class="btn btn-ghost btn-icon" type="button" id="picker-close" title="Close">
-          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
-        </button>
-      </div>
-      <div class="modal-body">
-        <p class="subtle" style="margin:0 0 .5rem;">Click a folder to open it. Click a file to select it. Use "Select this folder" to mount the current directory itself.</p>
-        <div class="picker-current-path" id="picker-current-path"></div>
-        <div class="picker-list" id="picker-list"></div>
-        <p class="subtle" id="picker-status" style="margin:.5rem 0 0;"></p>
-      </div>
-      <div class="modal-foot">
-        <button type="button" class="btn" id="picker-cancel">Cancel</button>
-        <button type="button" class="btn btn-primary" id="picker-select">Select this folder</button>
-      </div>
-    </div>
-  </div>
 </main>
 
 <script>
@@ -2317,7 +2219,6 @@ table.t{border-collapse:collapse;width:100%}
     canManageMounts: false,
     activeTab: 'active',
     editingMount: null,
-    pickerCurrentPath: null,
     leaseMode: null,
   };
 
@@ -2904,67 +2805,6 @@ table.t{border-collapse:collapse;width:100%}
     finally { save.disabled = false; }
   }
 
-  // ---------- picker ----------
-  async function openPicker(startPath) {
-    $('picker-status').textContent = '';
-    $('picker-modal').classList.remove('hidden');
-    await loadPicker(startPath || $('mount-root').value.trim() || null);
-  }
-  function closePicker() { $('picker-modal').classList.add('hidden'); }
-
-  async function loadPicker(targetPath) {
-    try {
-      var qs = targetPath ? '?path=' + encodeURIComponent(targetPath) : '';
-      var listing = await api('/dashboard/api/browse' + qs);
-      state.pickerCurrentPath = listing.path;
-      $('picker-current-path').textContent = listing.path;
-      var rows = [];
-      if (listing.parent) {
-        rows.push(makePickerRow({ name: '.. (parent)', path: listing.parent, type: 'directory' }, true));
-      }
-      var entries = listing.entries || [];
-      for (var i = 0; i < entries.length; i += 1) rows.push(makePickerRow(entries[i]));
-      $('picker-list').replaceChildren.apply($('picker-list'), rows);
-      $('picker-status').textContent = entries.length === 0 ? 'Empty directory.' : '';
-    } catch (err) {
-      $('picker-status').textContent = (err && err.message) ? humanizeError(err.message) : 'Unable to open path.';
-    }
-  }
-
-  function makePickerRow(entry, isParent) {
-    var row = document.createElement('div');
-    row.className = 'picker-row';
-    var iconSpan = document.createElement('span');
-    iconSpan.innerHTML = entry.type === 'directory' ? ICONS.folder : ICONS.file;
-    var name = document.createElement('span');
-    name.className = 'name-text';
-    name.textContent = entry.name;
-    var pick = document.createElement('button');
-    pick.className = 'btn btn-ghost btn-sm';
-    pick.type = 'button';
-    pick.textContent = isParent ? 'Open' : (entry.type === 'directory' ? 'Open' : 'Select');
-    (function (p, type) {
-      pick.addEventListener('click', function (e) {
-        e.stopPropagation();
-        if (type === 'directory' && !isParent) {
-          loadPicker(p);
-        } else if (type === 'directory' && isParent) {
-          loadPicker(p);
-        } else {
-          $('mount-root').value = p;
-          closePicker();
-        }
-      });
-    })(entry.path, entry.type);
-    if (entry.type === 'directory') {
-      (function (p) { row.addEventListener('click', function () { loadPicker(p); }); })(entry.path);
-    } else {
-      (function (p) { row.addEventListener('click', function () { $('mount-root').value = p; closePicker(); }); })(entry.path);
-    }
-    row.append(iconSpan, name, pick);
-    return row;
-  }
-
   // ---------- refresh / boot ----------
   async function refresh() {
     await reloadMounts();
@@ -3017,14 +2857,6 @@ table.t{border-collapse:collapse;width:100%}
   $('mount-save').addEventListener('click', function () { saveMount().catch(showError); });
   $('mount-modal').addEventListener('click', function (event) { if (event.target === $('mount-modal')) closeMountModal(); });
 
-  $('open-picker').addEventListener('click', function () { openPicker(null).catch(showError); });
-  $('picker-close').addEventListener('click', closePicker);
-  $('picker-cancel').addEventListener('click', closePicker);
-  $('picker-select').addEventListener('click', function () {
-    if (state.pickerCurrentPath) { $('mount-root').value = state.pickerCurrentPath; closePicker(); }
-  });
-  $('picker-modal').addEventListener('click', function (event) { if (event.target === $('picker-modal')) closePicker(); });
-
   document.addEventListener('click', function (event) {
     var tile = event.target.closest('#lease-tiles .tile');
     if (tile) selectTile(tile);
@@ -3042,7 +2874,6 @@ table.t{border-collapse:collapse;width:100%}
     if (event.key === 'Escape') {
       if (!$('lease-modal').classList.contains('hidden')) closeLeaseModal();
       else if (!$('mount-modal').classList.contains('hidden')) closeMountModal();
-      else if (!$('picker-modal').classList.contains('hidden')) closePicker();
     }
   });
 

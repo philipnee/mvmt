@@ -680,7 +680,7 @@ describe('dashboard access', () => {
     }
   });
 
-  it('adds, edits, removes mounts and browses the local filesystem through dashboard APIs', async () => {
+  it('adds, edits, and removes mounts through dashboard APIs', async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-mounts-test-'));
     const tokenPath = path.join(tmp, '.session-token');
     const leaseStorePath = path.join(tmp, '.leases.json');
@@ -747,14 +747,6 @@ describe('dashboard access', () => {
       const editBody = await edit.json() as { mount: { writeAccess: boolean; description?: string } };
       expect(editBody.mount.writeAccess).toBe(true);
       expect(editBody.mount.description).toBe('family photos');
-
-      const browse = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/browse?path=${encodeURIComponent(tmp)}`, {
-        headers: { Cookie: cookie },
-      });
-      expect(browse.status).toBe(200);
-      const browseBody = await browse.json() as { path: string; entries: { name: string; type: string }[] };
-      expect(browseBody.path).toBe(tmp);
-      expect(browseBody.entries.map((entry) => entry.name)).toEqual(expect.arrayContaining(['photos', 'reports']));
 
       const remove = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/mounts/${encodeURIComponent(addBody.mount.name)}`, {
         method: 'DELETE',
@@ -869,7 +861,7 @@ describe('dashboard access', () => {
     }
   });
 
-  it('refuses mount mutation and local browse for non-admin dashboard users', async () => {
+  it('refuses mount mutation for non-admin dashboard users', async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-non-admin-test-'));
     const tokenPath = path.join(tmp, '.session-token');
     const leaseStorePath = path.join(tmp, '.leases.json');
@@ -901,9 +893,6 @@ describe('dashboard access', () => {
       const mountsBody = await mounts.json() as { canManage: boolean; mounts: { root?: string }[] };
       expect(mountsBody.canManage).toBe(false);
       expect(mountsBody.mounts[0]?.root).toBeUndefined();
-
-      const browse = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/browse?path=${encodeURIComponent(tmp)}`, { headers: { Cookie: cookie } });
-      expect(browse.status).toBe(403);
 
       const addBlocked = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/mounts`, {
         method: 'POST',
@@ -1073,7 +1062,6 @@ describe('dashboard access', () => {
       expect(html).toContain('Sources');
       expect(html).toContain('Shared links');
       expect(html).toContain('id="mount-modal"');
-      expect(html).toContain('id="picker-modal"');
       expect(html).toContain('id="lease-modal"');
       expect(html).toContain('id="lease-tiles"');
       expect(html).toContain('id="copy-url"');
