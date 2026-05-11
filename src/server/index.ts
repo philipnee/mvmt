@@ -28,7 +28,7 @@ import {
 } from './oauth.js';
 import { rateLimit } from './rate-limit.js';
 import { ClientConfig, LocalFolderMountConfig } from '../config/schema.js';
-import { LeaseDirectoryListing, listLeaseDirectory, resolveLeaseFileTarget, resolveLeaseUploadTarget } from '../lease/files.js';
+import { listLeaseDirectory, resolveLeaseFileTarget, resolveLeaseUploadTarget } from '../lease/files.js';
 import {
   defaultLeasesPath,
   findLease,
@@ -675,24 +675,16 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       if (leaseAllows(lease, 'upload')) {
         recordLeaseUse(leaseStorePath, lease.id);
         logHttpRequest(requestLog, req, 200, 'lease.request', 'upload_page', lease.id);
-        res.status(200).type('html').send(renderLeaseUploadPage(lease, browserLeaseToken(req)));
+        res.status(200).type('html').send(LEASE_UPLOAD_PAGE_HTML);
         return;
       }
       logHttpRequest(requestLog, req, 403, 'lease.request', 'permission_denied', lease.id);
       res.status(403).json({ error: 'lease_permission_denied' });
       return;
     }
-    const requestPath = firstStringQuery(req.query.path) ?? '';
-    try {
-      const listing = await listLeaseDirectory(resolveLeaseMounts(options.leaseMounts), lease, requestPath);
-      recordLeaseUse(leaseStorePath, lease.id);
-      logHttpRequest(requestLog, req, 200, 'lease.request', listing.path, lease.id);
-      res.status(200).type('html').send(renderLeasePage(listing, browserLeaseToken(req)));
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : 'unavailable';
-      logHttpRequest(requestLog, req, 404, 'lease.request', detail, lease.id);
-      res.status(404).json({ error: 'lease_target_unavailable' });
-    }
+    recordLeaseUse(leaseStorePath, lease.id);
+    logHttpRequest(requestLog, req, 200, 'lease.request', 'browser_page', lease.id);
+    res.status(200).type('html').send(LEASE_BROWSER_PAGE_HTML);
   };
 
   const leaseFilesHandler: express.RequestHandler = async (req, res) => {
@@ -1280,48 +1272,105 @@ function isNodeErrorCode(err: unknown, code: string): boolean {
   return typeof err === 'object' && err !== null && (err as NodeJS.ErrnoException).code === code;
 }
 
-function renderLeasePage(listing: LeaseDirectoryListing, token: string | undefined): string {
-  const rows = listing.entries.map((entry) => {
-    const href = entry.type === 'directory'
-      ? leasePageUrl(listing.leaseId, entry.path, token)
-      : leaseFileUrl(listing.leaseId, entry.path, token);
-    const size = entry.type === 'directory' ? '' : String(entry.size);
-    return `<tr><td><a href="${escapeHtml(href)}">${escapeHtml(entry.name)}</a></td><td>${escapeHtml(entry.type)}</td><td>${escapeHtml(size)}</td></tr>`;
-  }).join('');
-  const parent = listing.path === '/'
-    ? ''
-    : `<p><a href="${escapeHtml(leasePageUrl(listing.leaseId, parentLeasePath(listing.path), token))}">..</a></p>`;
-  return `<!doctype html>
+const LEASE_BROWSER_PAGE_HTML = `<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escapeHtml(listing.label)}</title>
+<title>mvmt folder lease</title>
 <style>
 body{font-family:ui-sans-serif,system-ui,sans-serif;margin:2rem;max-width:960px}
 table{border-collapse:collapse;width:100%}
 td,th{border-bottom:1px solid #ddd;padding:.5rem;text-align:left}
 a{color:#0f766e}
-.meta{color:#666}
+.meta,.status{color:#666}
 </style>
 </head>
 <body>
-<h1>${escapeHtml(listing.label)}</h1>
-<p class="meta">${escapeHtml(listing.path)}${listing.expiresAt ? ` - expires ${escapeHtml(listing.expiresAt)}` : ''}</p>
-${parent}
-<table><thead><tr><th>Name</th><th>Type</th><th>Bytes</th></tr></thead><tbody>${rows}</tbody></table>
-</body>
-</html>`;
+<h1 id="title">Folder lease</h1>
+<p class="meta" id="meta"></p>
+<p id="parent"></p>
+<p class="status" id="status"></p>
+<table><thead><tr><th>Name</th><th>Type</th><th>Bytes</th></tr></thead><tbody id="entries"></tbody></table>
+<script>
+const pathParts = location.pathname.split('/').filter(Boolean);
+const leaseId = decodeURIComponent(pathParts[1] || '');
+const params = new URLSearchParams(location.search);
+const token = params.get('token') || params.get('t') || '';
+const requestedPath = params.get('path') || '';
+const title = document.getElementById('title');
+const meta = document.getElementById('meta');
+const parent = document.getElementById('parent');
+const status = document.getElementById('status');
+const entries = document.getElementById('entries');
+
+function pageUrl(nextPath) {
+  const url = new URL('/lease/' + encodeURIComponent(leaseId), location.origin);
+  if (nextPath && nextPath !== '/') url.searchParams.set('path', nextPath);
+  if (token) url.searchParams.set('token', token);
+  return url.pathname + url.search;
 }
 
-function renderLeaseUploadPage(lease: { id: string; label: string; expiresAt?: string }, token: string | undefined): string {
-  const safeToken = token ?? '';
-  return `<!doctype html>
+function fileUrl(entryPath) {
+  const encodedPath = entryPath.split('/').filter(Boolean).map(encodeURIComponent).join('/');
+  const url = new URL('/lease/' + encodeURIComponent(leaseId) + '/files/' + encodedPath, location.origin);
+  if (token) url.searchParams.set('token', token);
+  return url.pathname + url.search;
+}
+
+function parentPath(inputPath) {
+  const parts = inputPath.split('/').filter(Boolean);
+  parts.pop();
+  return parts.length === 0 ? '/' : '/' + parts.join('/');
+}
+
+async function loadListing() {
+  const url = new URL('/lease/' + encodeURIComponent(leaseId) + '/files', location.origin);
+  if (requestedPath) url.searchParams.set('path', requestedPath);
+  if (token) url.searchParams.set('token', token);
+  const response = await fetch(url);
+  if (!response.ok) {
+    status.textContent = response.status === 401 ? 'Invalid or missing lease token.' : 'Folder is unavailable.';
+    return;
+  }
+  const listing = await response.json();
+  title.textContent = listing.label || 'Folder lease';
+  meta.textContent = (listing.path || '/') + (listing.expiresAt ? ' - expires ' + listing.expiresAt : '');
+  if (listing.path && listing.path !== '/') {
+    const link = document.createElement('a');
+    link.href = pageUrl(parentPath(listing.path));
+    link.textContent = '..';
+    parent.replaceChildren(link);
+  }
+  entries.replaceChildren(...listing.entries.map((entry) => {
+    const row = document.createElement('tr');
+    const nameCell = document.createElement('td');
+    const link = document.createElement('a');
+    link.href = entry.type === 'directory' ? pageUrl(entry.path) : fileUrl(entry.path);
+    link.textContent = entry.name;
+    nameCell.append(link);
+    const typeCell = document.createElement('td');
+    typeCell.textContent = entry.type;
+    const sizeCell = document.createElement('td');
+    sizeCell.textContent = entry.type === 'directory' ? '' : String(entry.size);
+    row.append(nameCell, typeCell, sizeCell);
+    return row;
+  }));
+}
+
+loadListing().catch(() => {
+  status.textContent = 'Folder is unavailable.';
+});
+</script>
+</body>
+</html>`;
+
+const LEASE_UPLOAD_PAGE_HTML = `<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escapeHtml(lease.label)}</title>
+<title>mvmt upload lease</title>
 <style>
 body{font-family:ui-sans-serif,system-ui,sans-serif;margin:2rem;max-width:720px}
 .drop{border:2px dashed #bbb;border-radius:8px;padding:2rem;text-align:center}
@@ -1330,15 +1379,17 @@ button{padding:.55rem .8rem}
 </style>
 </head>
 <body>
-<h1>${escapeHtml(lease.label)}</h1>
-<p class="meta">Upload-only lease${lease.expiresAt ? ` - expires ${escapeHtml(lease.expiresAt)}` : ''}</p>
+<h1>Upload files</h1>
+<p class="meta">Upload-only lease</p>
 <div class="drop">
   <input id="files" type="file" multiple>
   <p class="status" id="status">Choose files or drop them here.</p>
 </div>
 <script>
-const token = ${scriptStringLiteral(safeToken)};
-const leaseId = ${scriptStringLiteral(lease.id)};
+const pathParts = location.pathname.split('/').filter(Boolean);
+const leaseId = decodeURIComponent(pathParts[1] || '');
+const params = new URLSearchParams(location.search);
+const token = params.get('token') || params.get('t') || '';
 const drop = document.querySelector('.drop');
 const input = document.getElementById('files');
 const status = document.getElementById('status');
@@ -1368,64 +1419,6 @@ drop.addEventListener('drop', (event) => {
 </script>
 </body>
 </html>`;
-}
-
-function browserLeaseToken(req: Request): string | undefined {
-  const token = firstStringQuery(req.query.token) ?? firstStringQuery(req.query.t);
-  return token && isSafeBrowserLeaseToken(token) ? token : undefined;
-}
-
-function isSafeBrowserLeaseToken(value: string): boolean {
-  if (!value.startsWith('mvmt_l_') || value.length > 96) return false;
-  for (let index = 'mvmt_l_'.length; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    const isDigit = code >= 48 && code <= 57;
-    const isUpper = code >= 65 && code <= 90;
-    const isLower = code >= 97 && code <= 122;
-    if (!isDigit && !isUpper && !isLower && value[index] !== '_' && value[index] !== '-') return false;
-  }
-  return true;
-}
-
-function leasePageUrl(id: string, listingPath: string, token: string | undefined): string {
-  const params = new URLSearchParams();
-  if (listingPath !== '/') params.set('path', listingPath);
-  if (token) params.set('token', token);
-  const query = params.toString();
-  return `/lease/${encodeURIComponent(id)}${query ? `?${query}` : ''}`;
-}
-
-function leaseFileUrl(id: string, entryPath: string, token: string | undefined): string {
-  const encodedPath = entryPath.split('/').filter(Boolean).map(encodeURIComponent).join('/');
-  const params = new URLSearchParams();
-  if (token) params.set('token', token);
-  const query = params.toString();
-  return `/lease/${encodeURIComponent(id)}/files/${encodedPath}${query ? `?${query}` : ''}`;
-}
-
-function parentLeasePath(inputPath: string): string {
-  const parts = inputPath.split('/').filter(Boolean);
-  parts.pop();
-  return parts.length === 0 ? '/' : `/${parts.join('/')}`;
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;');
-}
-
-function scriptStringLiteral(value: string): string {
-  return JSON.stringify(value)
-    .replaceAll('<', '\\u003C')
-    .replaceAll('>', '\\u003E')
-    .replaceAll('&', '\\u0026')
-    .replaceAll('\u2028', '\\u2028')
-    .replaceAll('\u2029', '\\u2029');
-}
 
 function requestClientHint(req: Request, oauthClientId?: string): string | undefined {
   const values = [

@@ -233,7 +233,7 @@ describe('folder lease access', () => {
 
       const html = await fetch(`http://127.0.0.1:${server.port}/lease/${lease.record.id}?token=${lease.token}`);
       expect(html.status).toBe(200);
-      expect(await html.text()).toContain('Sarah - tax docs');
+      expect(await html.text()).toContain('Folder lease');
 
       const download = await fetch(`http://127.0.0.1:${server.port}/lease/${lease.record.id}/files/w2.pdf?token=${lease.token}`);
       expect(download.status).toBe(200);
@@ -289,17 +289,19 @@ describe('folder lease access', () => {
       });
       expect(readPage.status).toBe(200);
       const readHtml = await readPage.text();
-      expect(readHtml).toContain('&lt;img src=x onerror=alert(1)&gt; Sarah');
-      expect(readHtml).toContain('report &amp; &lt;draft&gt;.txt');
+      expect(readHtml).toContain('Folder lease');
+      expect(readHtml).not.toContain('&lt;img src=x onerror=alert(1)&gt; Sarah');
+      expect(readHtml).not.toContain('report &amp; &lt;draft&gt;.txt');
       expect(readHtml).not.toContain('<img src=x onerror=alert(1)>');
-      expect(readHtml).not.toContain('token=');
+      expect(readHtml).not.toContain('</script><img');
 
       const uploadPage = await fetch(`http://127.0.0.1:${server.port}/lease/${uploadLease.record.id}?token=${unsafeQuery}`, {
         headers: { Authorization: `Bearer     ${uploadLease.token}` },
       });
       expect(uploadPage.status).toBe(200);
       const uploadHtml = await uploadPage.text();
-      expect(uploadHtml).toContain('&lt;img src=x onerror=alert(1)&gt; Sarah');
+      expect(uploadHtml).toContain('Upload-only lease');
+      expect(uploadHtml).not.toContain('&lt;img src=x onerror=alert(1)&gt; Sarah');
       expect(uploadHtml).not.toContain('</script><img');
       expect(uploadHtml).not.toContain('token = "</script>');
     } finally {
