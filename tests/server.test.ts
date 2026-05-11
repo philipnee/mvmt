@@ -17,6 +17,7 @@ import { parseConfig } from '../src/config/loader.js';
 import { TextContextIndex } from '../src/context/text-index.js';
 import { OAuthStore } from '../src/server/oauth.js';
 import { ToolRouter } from '../src/server/router.js';
+import { createLease, listLeases, revokeLease } from '../src/lease/store.js';
 import { createShare, listShares } from '../src/share/store.js';
 import { hashApiToken } from '../src/utils/api-token-hash.js';
 import { ensureSigningKey, generateSessionToken, rotateSigningKey } from '../src/utils/token.js';
@@ -179,6 +180,119 @@ describe('share downloads', () => {
       expect(invalid.status).toBe(401);
       const gone = await fetch(`http://127.0.0.1:${server.port}/share/${expired.record.id}?token=${expired.token}`);
       expect(gone.status).toBe(410);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('folder lease access', () => {
+  it('lists a leased folder and streams arbitrary files by checksum', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-lease-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const leaseStorePath = path.join(tmp, '.leases.json');
+    const root = path.join(tmp, 'taxes');
+    fs.mkdirSync(path.join(root, 'nested'), { recursive: true });
+    fs.mkdirSync(path.join(root, '.ssh'), { recursive: true });
+    const payload = Buffer.from([0, 1, 2, 3, 4, 255]);
+    fs.writeFileSync(path.join(root, 'w2.pdf'), payload);
+    fs.writeFileSync(path.join(root, 'nested', 'note.txt'), 'nested note', 'utf-8');
+    fs.writeFileSync(path.join(root, '.ssh', 'id_ed25519'), 'secret', 'utf-8');
+    const config = parseConfig({
+      version: 1,
+      mounts: [{ name: 'taxes', type: 'local_folder', path: '/taxes', root }],
+    });
+    const lease = createLease(leaseStorePath, {
+      label: 'Sarah - tax docs',
+      path: '/taxes',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: config.mounts,
+      leaseStorePath,
+    });
+    try {
+      const listing = await fetch(`http://127.0.0.1:${server.port}/lease/${lease.record.id}/files?token=${lease.token}`);
+      expect(listing.status).toBe(200);
+      const body = await listing.json() as { entries: { name: string; type: string }[] };
+      expect(body.entries).toEqual([
+        expect.objectContaining({ name: 'nested', type: 'directory' }),
+        expect.objectContaining({ name: 'w2.pdf', type: 'file' }),
+      ]);
+      expect(body.entries.some((entry) => entry.name === '.ssh')).toBe(false);
+
+      const html = await fetch(`http://127.0.0.1:${server.port}/lease/${lease.record.id}?token=${lease.token}`);
+      expect(html.status).toBe(200);
+      expect(await html.text()).toContain('Sarah - tax docs');
+
+      const download = await fetch(`http://127.0.0.1:${server.port}/lease/${lease.record.id}/files/w2.pdf?token=${lease.token}`);
+      expect(download.status).toBe(200);
+      expect(download.headers.get('content-disposition')).toContain('w2.pdf');
+      const downloaded = Buffer.from(await download.arrayBuffer());
+      expect(createHash('sha256').update(downloaded).digest('hex')).toBe(createHash('sha256').update(payload).digest('hex'));
+      expect(listLeases(leaseStorePath)[0].downloadCount).toBe(1);
+      expect(listLeases(leaseStorePath)[0].lastUsedAt).toBeTruthy();
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('enforces lease token, expiry, revocation, range, and path boundaries', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-lease-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const leaseStorePath = path.join(tmp, '.leases.json');
+    const root = path.join(tmp, 'leased');
+    fs.mkdirSync(root, { recursive: true });
+    fs.writeFileSync(path.join(root, 'payload.bin'), Buffer.from([10, 11, 12, 13, 14]));
+    const config = parseConfig({
+      version: 1,
+      mounts: [{ name: 'leased', type: 'local_folder', path: '/leased', root }],
+    });
+    const active = createLease(leaseStorePath, {
+      label: 'Active',
+      path: '/leased',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const expired = createLease(leaseStorePath, {
+      label: 'Expired',
+      path: '/leased',
+      expiresAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+    const revoked = createLease(leaseStorePath, {
+      label: 'Revoked',
+      path: '/leased',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    revokeLease(leaseStorePath, revoked.record.id);
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: config.mounts,
+      leaseStorePath,
+    });
+    try {
+      const invalid = await fetch(`http://127.0.0.1:${server.port}/lease/${active.record.id}/files?token=wrong`);
+      expect(invalid.status).toBe(401);
+
+      const gone = await fetch(`http://127.0.0.1:${server.port}/lease/${expired.record.id}/files?token=${expired.token}`);
+      expect(gone.status).toBe(410);
+
+      const revokedResponse = await fetch(`http://127.0.0.1:${server.port}/lease/${revoked.record.id}/files?token=${revoked.token}`);
+      expect(revokedResponse.status).toBe(410);
+
+      const range = await fetch(`http://127.0.0.1:${server.port}/lease/${active.record.id}/files/payload.bin?token=${active.token}`, {
+        headers: { Range: 'bytes=1-3' },
+      });
+      expect(range.status).toBe(206);
+      expect(range.headers.get('content-range')).toBe('bytes 1-3/5');
+      expect([...Buffer.from(await range.arrayBuffer())]).toEqual([11, 12, 13]);
+
+      const traversal = await fetch(`http://127.0.0.1:${server.port}/lease/${active.record.id}/files/%2e%2e/payload.bin?token=${active.token}`);
+      expect(traversal.status).toBe(404);
     } finally {
       await server.close();
       fs.rmSync(tmp, { recursive: true, force: true });

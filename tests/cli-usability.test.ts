@@ -18,6 +18,8 @@ describe('CLI usability', () => {
     expect(stdout).toContain('Examples:');
     expect(stdout).toContain('mvmt serve --path ~/Documents');
     expect(stdout).toContain('serve one read-only folder for this run');
+    expect(stdout).toContain('mvmt lease create ~/Taxes --label "Sarah - tax docs"');
+    expect(stdout).toContain('create a 24h read-only folder lease');
   });
 
   it('suggests close command names for typos', async () => {

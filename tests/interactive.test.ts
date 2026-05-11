@@ -4,6 +4,8 @@ import {
   formatAuditEntry, 
   formatHttpRequestEntry,
   isPromptCancelError,
+  printAdvancedHelp,
+  printInteractiveHelp,
   shouldShutdownOnSigint,
 } from '../src/cli/interactive.js';
 import { AuditLogger } from '../src/utils/audit.js';
@@ -98,3 +100,39 @@ describe('Interactive prompt control helpers', () => {
     expect(isPromptCancelError(new Error('regular failure'))).toBe(false);
   });
 });
+
+describe('Interactive help', () => {
+  it('presents leases as the primary surface', () => {
+    const lines = captureConsole(() => printInteractiveHelp());
+
+    expect(lines).toContain('  lease               list folder leases');
+    expect(lines).toContain('  lease create        create a read-only folder lease');
+    expect(lines).toContain('  lease revoke        revoke a folder lease');
+    expect(lines).toContain('  advanced            show mount/token/MCP commands');
+    expect(lines).not.toContain('  token               list scoped API tokens');
+    expect(lines).not.toContain('  mounts      list configured mounts');
+    expect(lines).not.toContain('  share               list browser download links');
+  });
+
+  it('keeps implementation-level commands under advanced help', () => {
+    const lines = captureConsole(() => printAdvancedHelp());
+
+    expect(lines).toContain('  advanced mounts              list internal mounts');
+    expect(lines).toContain('  advanced token               list scoped API tokens');
+    expect(lines).toContain('  advanced share               list legacy file share links');
+    expect(lines).toContain('  advanced connectors          list loaded MCP connectors');
+  });
+});
+
+function captureConsole(fn: () => void): string {
+  const lines: string[] = [];
+  const spy = vi.spyOn(console, 'log').mockImplementation((line = '') => {
+    lines.push(String(line));
+  });
+  try {
+    fn();
+    return lines.join('\n');
+  } finally {
+    spy.mockRestore();
+  }
+}

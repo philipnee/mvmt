@@ -140,6 +140,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
       resolvePublicBaseUrl: () => tunnelController.publicUrl,
       clients: createLiveClientsResolver(configPath, config, textIndex),
       shareMounts: createLiveMountsResolver(configPath, config, textIndex),
+      leaseMounts: createLiveMountsResolver(configPath, config, textIndex),
       allowLegacyDefaultClient: () => config.server.access !== 'tunnel' || legacyTunnelOverrideEnabled(),
       requestLog: interactiveMode
         ? (entry) => (audit as InteractiveAuditLogger).recordHttp(entry)
@@ -440,9 +441,9 @@ function printStartupBanner(
     console.log('');
   }
   if (interactiveMode) {
-    console.log(`${chalk.bold('Tokens')}       type ${chalk.cyan('token')} to list scoped API tokens`);
+    console.log(`${chalk.bold('Folder leases')} type ${chalk.cyan('lease')} to list or ${chalk.cyan('lease create')} to share a folder`);
     console.log(`${chalk.bold('Tool-call log')} ${AUDIT_LOG_PATH}`);
-    console.log(`${chalk.bold('Live events')}   OAuth, MCP auth, and tool-call attempts`);
+    console.log(`${chalk.bold('Live events')}   lease, OAuth, MCP auth, and tool-call attempts`);
     console.log(`\n${chalk.dim('Interactive mode: type "help" for commands.')}`);
   } else {
     console.log(`${chalk.bold('Session')}      ${TOKEN_PATH}`);

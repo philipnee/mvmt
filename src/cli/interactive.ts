@@ -1,5 +1,5 @@
 import readline from 'node:readline';
-import { confirm, select } from '@inquirer/prompts';
+import { confirm, input, select } from '@inquirer/prompts';
 import chalk from 'chalk';
 import { MvmtConfig } from '../config/schema.js';
 import { AuditEntry, AuditLogger, AUDIT_LOG_PATH } from '../utils/audit.js';
@@ -22,6 +22,9 @@ import { LoadedConnector } from './connector-loader.js';
 import { TunnelController } from './tunnel-controller.js';
 import { ToolResultPlugin } from '../plugins/types.js';
 import { listShareLinks, promptAndAddShareLink, promptAndRemoveShareLink } from './share.js';
+import { createFolderLease, listFolderLeases, revokeFolderLease } from './lease.js';
+import { DEFAULT_LEASE_TTL, defaultLeasesPath, listLeases } from '../lease/store.js';
+import { loadConfig } from '../config/loader.js';
 
 const SIGINT_EXIT_WINDOW_MS = 2_000;
 
@@ -195,59 +198,105 @@ async function handleInteractiveCommand(
   switch (command) {
     case '':
       return;
+    case 'lease':
+    case 'lease list':
+    case 'leases':
+    case 'leases list':
+      await listFolderLeases();
+      return;
+    case 'lease create':
+    case 'lease add':
+    case 'leases create':
+    case 'leases add':
+      await handleLeaseCreate(state);
+      return;
+    case 'lease revoke':
+    case 'lease remove':
+    case 'lease rm':
+    case 'leases revoke':
+    case 'leases remove':
+    case 'leases rm':
+      await handleLeaseRevoke();
+      return;
+    case 'advanced':
+      printAdvancedHelp();
+      return;
     case 'config':
+    case 'advanced config':
       printConfigSummary(state.config, state.configPath, {
         tunnel: state.tunnel.snapshot(),
       });
       return;
     case 'config setup':
+    case 'advanced config setup':
       console.log(chalk.dim('Run `mvmt config setup` in another shell, then restart `mvmt serve` to apply the new config.'));
       return;
     case 'token':
     case 'token list':
     case 'token show':
+    case 'advanced token':
+    case 'advanced token list':
+    case 'advanced token show':
       printApiTokens(state.config);
       return;
     case 'token add':
+    case 'advanced token add':
       await handleTokensAdd(state);
       return;
     case 'token edit':
+    case 'advanced token edit':
       await handleTokensEdit(state);
       return;
     case 'token rotate':
+    case 'advanced token rotate':
       await handleTokensRotate(state);
       return;
     case 'token remove':
+    case 'advanced token remove':
       await handleTokensRemove(state);
       return;
     case 'share':
     case 'share list':
     case 'shares':
     case 'shares list':
+    case 'advanced share':
+    case 'advanced share list':
+    case 'advanced shares':
+    case 'advanced shares list':
       await listShareLinks();
       return;
     case 'share add':
     case 'shares add':
+    case 'advanced share add':
+    case 'advanced shares add':
       await promptAndAddShareLink(state.configPath);
       return;
     case 'share remove':
     case 'shares remove':
+    case 'advanced share remove':
+    case 'advanced shares remove':
       await promptAndRemoveShareLink();
       return;
     case 'tokens':
     case 'tokens list':
+    case 'advanced tokens':
+    case 'advanced tokens list':
       printApiTokens(state.config);
       return;
     case 'tokens add':
+    case 'advanced tokens add':
       await handleTokensAdd(state);
       return;
     case 'tokens edit':
+    case 'advanced tokens edit':
       await handleTokensEdit(state);
       return;
     case 'tokens rotate':
+    case 'advanced tokens rotate':
       await handleTokensRotate(state);
       return;
     case 'tokens remove':
+    case 'advanced tokens remove':
       await handleTokensRemove(state);
       return;
     case 'logs':
@@ -290,18 +339,23 @@ async function handleInteractiveCommand(
       console.log(chalk.dim('Use `mvmt tunnel logs stream` from another shell to follow tunnel output continuously.'));
       return;
     case 'connectors':
+    case 'advanced connectors':
       printConnectorSummary(state.loaded, state.totalTools);
       return;
     case 'mounts':
+    case 'advanced mounts':
       printMounts(state.config);
       return;
     case 'mounts add':
+    case 'advanced mounts add':
       await handleMountsAdd(state);
       return;
     case 'mounts edit':
+    case 'advanced mounts edit':
       await handleMountsEdit(state);
       return;
     case 'mounts remove':
+    case 'advanced mounts remove':
       await handleMountsRemove(state);
       return;
     default:
@@ -310,33 +364,42 @@ async function handleInteractiveCommand(
   }
 }
 
-function printInteractiveHelp(): void {
+export function printInteractiveHelp(): void {
   console.log('');
   console.log(chalk.bold('Commands'));
-  console.log('  config              show saved mvmt config');
-  console.log('  config setup        rerun guided setup in another shell');
-  console.log('  token               list scoped API tokens');
-  console.log('  token add/edit      manage scoped API tokens');
-  console.log('  token rotate        rotate a scoped API token');
-  console.log('  token remove        remove a scoped API token');
-  console.log('  share               list browser download links');
-  console.log('  share add/remove    create or remove file share links');
+  console.log('  lease               list folder leases');
+  console.log('  lease create        create a read-only folder lease');
+  console.log('  lease revoke        revoke a folder lease');
   console.log('  tunnel              show tunnel status');
-  console.log('  tunnel config       choose a different tunnel');
+  console.log('  tunnel config       choose a tunnel');
   console.log('  tunnel start        start the configured tunnel');
   console.log('  tunnel refresh      restart the tunnel and print the new URL');
   console.log('  tunnel stop         stop public tunnel exposure');
-  console.log('  tunnel logs         show recent tunnel output');
-  console.log('  tunnel logs stream  stream tunnel output from another shell');
   console.log('  logs                show live request/tool log state');
   console.log('  logs on/off         toggle live request/tool logs');
-  console.log('  status      show server, connector, token, and log status');
-  console.log('  url         show local and public MCP URLs');
-  console.log('  connectors  list loaded connectors');
-  console.log('  mounts      list configured mounts');
-  console.log('  mounts add/edit/remove');
-  console.log('  clear       clear the terminal');
-  console.log('  quit        stop mvmt');
+  console.log('  status              show server and lease access status');
+  console.log('  url                 show local and public URLs');
+  console.log('  advanced            show mount/token/MCP commands');
+  console.log('  clear               clear the terminal');
+  console.log('  quit                stop mvmt');
+  console.log('');
+}
+
+export function printAdvancedHelp(): void {
+  console.log('');
+  console.log(chalk.bold('Advanced commands'));
+  console.log('  advanced config              show saved mvmt config');
+  console.log('  advanced config setup        rerun guided setup in another shell');
+  console.log('  advanced mounts              list internal mounts');
+  console.log('  advanced mounts add/edit/remove');
+  console.log('  advanced token               list scoped API tokens');
+  console.log('  advanced token add/edit      manage scoped API tokens');
+  console.log('  advanced token rotate/remove');
+  console.log('  advanced share               list legacy file share links');
+  console.log('  advanced share add/remove    manage legacy file share links');
+  console.log('  advanced connectors          list loaded MCP connectors');
+  console.log('  tunnel logs                  show recent tunnel output');
+  console.log('  tunnel logs stream           stream tunnel output from another shell');
   console.log('');
 }
 
@@ -348,13 +411,11 @@ function printInteractiveStatus(state: InteractivePromptState): void {
   console.log('');
   console.log(chalk.bold('Status'));
   printInteractiveUrls(state);
-  console.log(`token command  ${chalk.cyan('token')}`);
+  console.log(`leases       ${chalk.cyan('lease')}`);
   console.log(`tool-call log  ${AUDIT_LOG_PATH}`);
   console.log(`live logs      ${state.audit.getLiveLogs() ? chalk.green('on') : chalk.dim('off')}`);
   printTunnelStatus(state);
-  printPluginSummary(state.plugins);
-  printConnectorSummary(state.loaded, state.totalTools);
-  printMounts(state.config);
+  console.log(chalk.dim('Type `advanced` for internal mounts, tokens, connectors, and MCP details.'));
 }
 
 function printInteractiveUrls(state: InteractivePromptState): void {
@@ -396,7 +457,7 @@ async function handleTunnelStart(state: InteractivePromptState): Promise<void> {
     console.log(`public URL  ${chalk.yellow(formatMcpPublicUrl(tunnel.url))}`);
   }
   if ((state.config.clients?.length ?? 0) === 0 && state.config.server.access === 'tunnel') {
-    console.log(chalk.dim('No API tokens are configured. Run `token add` before expecting MCP data access over the tunnel.'));
+    console.log(chalk.dim('Folder lease links work with lease tokens. For MCP over this tunnel, use `advanced token add`.'));
   }
 }
 
@@ -476,6 +537,51 @@ function printConnectorSummary(loaded: LoadedConnector[], totalTools: number): v
     console.log(`  ${chalk.green('ok')} ${entry.connector.id.padEnd(22)} ${String(entry.toolCount).padStart(3)} tools`);
   }
   console.log(`  ${chalk.dim('total'.padEnd(25))} ${String(totalTools).padStart(3)} tools`);
+}
+
+async function handleLeaseCreate(state: InteractivePromptState): Promise<void> {
+  const folder = await input({
+    message: 'Folder to lease:',
+    validate: (value) => value.trim().length > 0 ? true : 'Enter a folder path',
+  });
+  const label = await input({
+    message: 'Lease label:',
+    validate: (value) => value.trim().length > 0 ? true : 'Enter a label such as "Sarah - tax docs"',
+  });
+  const expires = await input({
+    message: 'Expires after:',
+    default: DEFAULT_LEASE_TTL,
+  });
+  await createFolderLease(folder.trim(), {
+    config: state.configPath,
+    label: label.trim(),
+    expires: expires.trim() || DEFAULT_LEASE_TTL,
+  });
+  state.config = loadConfig(state.configPath);
+}
+
+async function handleLeaseRevoke(): Promise<void> {
+  const leases = listLeases(defaultLeasesPath());
+  if (leases.length === 0) {
+    console.log(chalk.yellow('No folder leases configured.'));
+    return;
+  }
+  const id = await select({
+    message: 'Revoke which lease?',
+    choices: leases.map((lease) => ({
+      name: `${lease.label} (${lease.path})`,
+      value: lease.id,
+    })),
+  });
+  const ok = await confirm({
+    message: `Revoke lease ${id}? Existing links will stop working.`,
+    default: false,
+  });
+  if (!ok) {
+    console.log(chalk.yellow('Lease unchanged.'));
+    return;
+  }
+  await revokeFolderLease(id);
 }
 
 async function handleMountsAdd(state: InteractivePromptState): Promise<void> {

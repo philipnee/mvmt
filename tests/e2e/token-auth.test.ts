@@ -179,4 +179,26 @@ describeIfDocker('mvmt e2e: token + auth', () => {
     const actualHash = createHash('sha256').update(downloaded.stdout).digest('hex');
     expect(actualHash).toBe(expectedHash);
   });
+
+  it('creates a folder lease and downloads a file by checksum', async () => {
+    const lease = await container.exec(['lease', 'create', '/data/notes', '--label', 'E2E notes']);
+    expect(lease.exitCode, lease.stderr).toBe(0);
+    expect(lease.stdout).toContain('(24h default)');
+    const match = lease.stdout.match(/URL:\s+(http:\/\/127\.0\.0\.1:4141\/lease\/\S+)/);
+    if (!match) throw new Error(`could not parse lease URL from output:\n${lease.stdout}`);
+    const url = new URL(match[1]);
+
+    const listing = await container.run(['curl', '-fsSL', match[1]]);
+    expect(listing.exitCode, listing.stderr).toBe(0);
+    expect(listing.stdout).toContain('E2E notes');
+    expect(listing.stdout).toContain('launch.md');
+
+    const downloaded = await container.run([
+      'curl', '-fsSL', `${url.origin}${url.pathname}/files/launch.md?token=${url.searchParams.get('token')}`,
+    ]);
+    expect(downloaded.exitCode, downloaded.stderr).toBe(0);
+    const expectedHash = createHash('sha256').update(fs.readFileSync(path.join(notesHost, 'launch.md'))).digest('hex');
+    const actualHash = createHash('sha256').update(downloaded.stdout).digest('hex');
+    expect(actualHash).toBe(expectedHash);
+  });
 });

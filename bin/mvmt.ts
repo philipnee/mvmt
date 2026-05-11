@@ -7,6 +7,7 @@ import { addConnector, listConnectors } from '../src/cli/connectors.js';
 import { runConfigSetup, showConfig } from '../src/cli/config.js';
 import { doctor } from '../src/cli/doctor.js';
 import { init } from '../src/cli/init.js';
+import { createFolderLease, listFolderLeases, revokeFolderLease } from '../src/cli/lease.js';
 import { reindex } from '../src/cli/reindex.js';
 import { addMount, editMount, listMounts, removeMount } from '../src/cli/mounts.js';
 import { addShareLink, listShareLinks, removeShareLink } from '../src/cli/share.js';
@@ -48,6 +49,7 @@ program.addHelpText('after', examples([
   ['mvmt serve -i', 'start locally with the interactive prompt'],
   ['mvmt serve --path ~/Documents', 'serve one read-only folder for this run'],
   ['mvmt mounts add notes ~/notes --mount-path /notes --read-only', 'add a read-only mount'],
+  ['mvmt lease create ~/Taxes --label "Sarah - tax docs"', 'create a 24h read-only folder lease'],
   ['mvmt share add /notes/report.pdf', 'create a 24h browser download link'],
   ['mvmt token add codex --scope notes:read', 'create a scoped API token'],
   ['mvmt doctor', 'validate config and mount roots'],
@@ -212,6 +214,51 @@ shareCommand
   .option('-c, --config <path>', 'Config file path')
   .action(async (id: string, options: { config?: string }, command: Command) => {
     await removeShareLink(id, withInheritedConfig(options, command));
+  });
+
+const leaseCommand = program
+  .command('lease')
+  .description('Create read-only folder leases')
+  .option('-c, --config <path>', 'Config file path')
+  .option('--json', 'Output as JSON')
+  .action(async (options: { config?: string; json?: boolean }) => {
+    await listFolderLeases(options);
+  });
+
+leaseCommand
+  .command('list')
+  .description('List folder leases')
+  .option('-c, --config <path>', 'Config file path')
+  .option('--json', 'Output as JSON')
+  .action(async (options: { config?: string; json?: boolean }, command: Command) => {
+    await listFolderLeases(withInheritedConfig(options, command));
+  });
+
+leaseCommand
+  .command('create <folder>')
+  .alias('add')
+  .description('Create a read-only browser lease for one folder')
+  .option('-c, --config <path>', 'Config file path')
+  .requiredOption('--label <text>', 'Required lease label, such as "Sarah - tax docs"')
+  .option('--expires <duration>', 'Lease lifetime, such as 24h, 7d, or never')
+  .option('--ttl <duration>', 'Alias for --expires')
+  .option('--json', 'Output as JSON')
+  .addHelpText('after', examples([
+    ['mvmt lease create ~/Documents/Taxes --label "Sarah - tax docs"', 'create a 24h read-only folder lease'],
+    ['mvmt lease create ~/Photos --label "Family photos" --expires never', 'lease until revoked'],
+  ]))
+  .action(async (folder: string, options: { config?: string; label?: string; expires?: string; ttl?: string; json?: boolean }, command: Command) => {
+    await createFolderLease(folder, withInheritedConfig(options, command));
+  });
+
+leaseCommand
+  .command('revoke <id>')
+  .alias('remove')
+  .alias('rm')
+  .description('Revoke a folder lease')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (id: string, options: { config?: string }, command: Command) => {
+    await revokeFolderLease(id, withInheritedConfig(options, command));
   });
 
 const configCommand = program
