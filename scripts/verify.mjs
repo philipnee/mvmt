@@ -155,7 +155,8 @@ function waitForStartup(child) {
 
     const onData = (chunk) => {
       output += chunk.toString('utf-8');
-      const match = output.match(/mvmt running -> http:\/\/127\.0\.0\.1:(\d+)\/mcp/);
+      const match = output.match(/mvmt running -> http:\/\/127\.0\.0\.1:(\d+)\/dashboard/)
+        ?? output.match(/mvmt running -> http:\/\/127\.0\.0\.1:(\d+)\/mcp/);
       if (match) {
         cleanup();
         resolve({ port: Number(match[1]) });

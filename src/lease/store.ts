@@ -9,7 +9,7 @@ import { isExpired } from '../utils/token-ttl.js';
 export const LEASES_PATH = path.join(os.homedir(), '.mvmt', '.leases.json');
 export const DEFAULT_LEASE_TTL = '24h';
 
-export type LeasePermission = 'read' | 'upload';
+export type LeasePermission = 'read' | 'write' | 'upload';
 export type LeaseResourceType = 'file' | 'folder';
 
 export interface LeaseResource {
@@ -103,6 +103,17 @@ export function addLeaseResources(storePath: string, id: string, resources: Leas
   return nextLease;
 }
 
+export function rotateLeaseToken(storePath: string, id: string): CreatedLease | undefined {
+  const store = readLeaseStore(storePath);
+  const index = store.leases.findIndex((lease) => lease.id === id);
+  if (index < 0) return undefined;
+  const token = `mvmt_l_${crypto.randomBytes(32).toString('base64url')}`;
+  const next: LeaseRecord = { ...store.leases[index], tokenHash: hashApiToken(token) };
+  store.leases[index] = next;
+  writeLeaseStore(storePath, store);
+  return { record: next, token };
+}
+
 export function revokeLease(storePath: string, id: string): boolean {
   const store = readLeaseStore(storePath);
   const index = store.leases.findIndex((lease) => lease.id === id);
@@ -185,7 +196,7 @@ function uniqueLeaseId(store: LeaseStoreFile): string {
 }
 
 function isLeasePermission(value: unknown): value is LeasePermission {
-  return value === 'read' || value === 'upload';
+  return value === 'read' || value === 'write' || value === 'upload';
 }
 
 function normalizeLeaseResources(resources: LeaseResource[] | undefined, fallbackPath: string | undefined): LeaseResource[] {

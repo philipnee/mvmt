@@ -1,6 +1,6 @@
 import { MvmtConfig, TunnelConfig } from '../config/schema.js';
 import { Logger } from '../utils/logger.js';
-import { formatMcpPublicUrl, missingTunnelDependency, RunningTunnel, startTunnel } from '../utils/tunnel.js';
+import { formatDashboardPublicUrl, missingTunnelDependency, RunningTunnel, startTunnel } from '../utils/tunnel.js';
 import { withTerminalProgress } from './progress.js';
 import { printMissingTunnelDependencyWarning } from './tunnel.js';
 
@@ -108,7 +108,7 @@ export class TunnelController {
         this.logger.warn('Tunnel process started, but mvmt could not detect a public URL from its output yet.');
         return tunnel;
       }
-      this.logger.info(`Tunnel URL: ${formatMcpPublicUrl(tunnel.url)}`);
+      this.logger.info(`Dashboard URL: ${formatDashboardPublicUrl(tunnel.url)}`);
       return tunnel;
     } catch (err) {
       this.lastError = err instanceof Error ? err.message : 'Unknown error';

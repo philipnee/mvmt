@@ -55,7 +55,15 @@ export function renderTunnelCommand(commandTemplate: string, port: number): stri
 }
 
 export function formatMcpPublicUrl(publicUrl: string): string {
-  return `${trimTrailingSlashes(publicUrl)}/mcp`;
+  return formatPublicPath(publicUrl, '/mcp');
+}
+
+export function formatDashboardPublicUrl(publicUrl: string): string {
+  return formatPublicPath(publicUrl, '/dashboard');
+}
+
+function formatPublicPath(publicUrl: string, route: string): string {
+  return `${trimTrailingSlashes(publicUrl)}${route}`;
 }
 
 export function normalizeTunnelBaseUrl(value: string): string {

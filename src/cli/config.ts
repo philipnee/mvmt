@@ -6,7 +6,7 @@ import { MvmtConfig } from '../config/schema.js';
 import { configExists, expandHome, readConfig, resolveConfigPath, saveConfig } from '../config/loader.js';
 import { filesystemSetupDefinition } from '../connectors/filesystem-setup.js';
 import { buildConfig, SetupConfigOptions, setupConfig } from './init.js';
-import { formatMcpPublicUrl } from '../utils/tunnel.js';
+import { formatDashboardPublicUrl, formatMcpPublicUrl } from '../utils/tunnel.js';
 
 export interface ConfigCommandOptions {
   config?: string;
@@ -95,7 +95,8 @@ export function printConfigSummary(
 
   console.log('\nServer');
   console.log(`  port: ${config.server.port}`);
-  console.log(`  local URL: http://127.0.0.1:${config.server.port}/mcp`);
+  console.log(`  dashboard: http://127.0.0.1:${config.server.port}/dashboard`);
+  console.log(`  MCP: http://127.0.0.1:${config.server.port}/mcp`);
   console.log(`  access: ${config.server.access}`);
 
   if (config.server.access === 'tunnel') {
@@ -109,7 +110,9 @@ export function printConfigSummary(
       console.log(`  command: ${tunnelStatus?.command ?? tunnel?.command}`);
     }
     if (tunnelStatus?.publicUrl ?? tunnel?.url) {
-      console.log(`  public URL: ${formatMcpPublicUrl(tunnelStatus?.publicUrl ?? tunnel?.url ?? '')}`);
+      const publicUrl = tunnelStatus?.publicUrl ?? tunnel?.url ?? '';
+      console.log(`  public dashboard: ${formatDashboardPublicUrl(publicUrl)}`);
+      console.log(`  public MCP: ${formatMcpPublicUrl(publicUrl)}`);
     }
   }
 

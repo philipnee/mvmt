@@ -6,7 +6,7 @@ import * as tunnelUtils from '../src/utils/tunnel.js';
 vi.mock('../src/utils/tunnel.js', () => ({
   missingTunnelDependency: vi.fn(),
   startTunnel: vi.fn(),
-  formatMcpPublicUrl: (url: string) => url,
+  formatDashboardPublicUrl: (url: string) => url,
 }));
 
 vi.mock('../src/cli/tunnel.js', () => ({
@@ -89,7 +89,7 @@ describe('TunnelController', () => {
       running: true,
       publicUrl: 'https://test.localhost.run',
     });
-    expect(logger.info).toHaveBeenCalledWith('Tunnel URL: https://test.localhost.run');
+    expect(logger.info).toHaveBeenCalledWith('Dashboard URL: https://test.localhost.run');
   });
 
   it('captures logs and notifies subscribers', async () => {

@@ -185,8 +185,8 @@ async function prepareLeasePath(
     const resolved = new MountRegistry(config.mounts).resolve(leasePath);
     const stat = await fsp.stat(resolved.realPath);
     if (!stat.isDirectory() && !stat.isFile()) throw new Error(`${leasePath} is not a mounted file or folder`);
-    if (permissions.includes('upload') && !resolved.mount.config.writeAccess) {
-      throw new Error(`${leasePath} is read-only; create the lease from a local folder path so mvmt can add an upload-capable mount.`);
+    if ((permissions.includes('upload') || permissions.includes('write')) && !resolved.mount.config.writeAccess) {
+      throw new Error(`${leasePath} is read-only; create the lease from a local path so mvmt can add a writable mount.`);
     }
     if (permissions.includes('upload') && !stat.isDirectory()) {
       throw new Error('Upload leases require a folder.');
@@ -210,7 +210,7 @@ async function prepareLocalFolderLeasePath(
   permissions: LeasePermission[],
 ): Promise<{ config: MvmtConfig; resource: LeaseResource; addedMount?: MountInput }> {
   const realRoot = await fsp.realpath(root);
-  const needsWritableMount = permissions.includes('upload');
+  const needsWritableMount = permissions.includes('upload') || permissions.includes('write');
   for (const mount of config.mounts) {
     try {
       const mountRoot = await fsp.realpath(resolveSetupPath(mount.root));
@@ -222,7 +222,7 @@ async function prepareLocalFolderLeasePath(
     }
   }
 
-  const prefix = needsWritableMount ? 'lease-upload' : 'lease';
+  const prefix = needsWritableMount ? 'lease-write' : 'lease';
   const name = uniqueMountName(config, `${prefix}-${slugFromPath(realRoot)}`);
   const mountPath = uniqueMountPath(config, resourcePathForLocalPath(realRoot));
   const mount: MountInput = {
@@ -245,10 +245,13 @@ async function prepareLocalFileLeasePath(
 ): Promise<{ config: MvmtConfig; resource: LeaseResource; addedMount?: MountInput }> {
   if (permissions.includes('upload')) throw new Error('Upload leases require a folder.');
   const realRoot = await fsp.realpath(root);
+  const needsWritableMount = permissions.includes('write');
   for (const mount of config.mounts) {
     try {
       const mountRoot = await fsp.realpath(resolveSetupPath(mount.root));
-      if (mount.enabled !== false && mountRoot === realRoot) return { config, resource: { path: mount.path, sourcePath: mount.path, type: 'file' } };
+      if (mount.enabled !== false && mountRoot === realRoot && (!needsWritableMount || mount.writeAccess)) {
+        return { config, resource: { path: mount.path, sourcePath: mount.path, type: 'file' } };
+      }
     } catch {
       // Ignore stale mount roots while creating a lease for a valid file.
     }
@@ -260,7 +263,7 @@ async function prepareLocalFileLeasePath(
     name,
     root,
     path: mountPath,
-    writeAccess: false,
+    writeAccess: needsWritableMount,
     description: `Lease source: ${label}`,
     guidance: '',
     enabled: true,
@@ -271,12 +274,16 @@ async function prepareLocalFileLeasePath(
 function permissionsFromOptions(options: CreateLeaseOptions): LeasePermission[] {
   const mode = options.upload ? 'upload' : (options.mode ?? 'read').trim().toLowerCase();
   if (mode === 'read' || mode === 'download') return ['read'];
+  if (mode === 'write' || mode === 'writable') return ['read', 'write'];
   if (mode === 'upload') return ['upload'];
-  throw new Error('Invalid lease mode. Use --mode read or --mode upload.');
+  if (mode === 'two-way' || mode === 'two_way' || mode === 'read+upload') return ['read', 'upload'];
+  throw new Error('Invalid lease mode. Use --mode read, --mode upload, --mode two-way, or --mode write.');
 }
 
 function formatPermissions(permissions: readonly LeasePermission[]): string {
   if (permissions.length === 1 && permissions[0] === 'read') return 'browse/download';
+  if (permissions.includes('read') && permissions.includes('write')) return 'browse/download/write';
+  if (permissions.includes('read') && permissions.includes('upload')) return 'browse/download/upload';
   if (permissions.length === 1 && permissions[0] === 'upload') return 'upload only';
   return permissions.join(', ');
 }
