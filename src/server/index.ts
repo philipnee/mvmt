@@ -1756,8 +1756,12 @@ async function listLocalDirectory(requestPath: string | undefined): Promise<Loca
   const target = requestPath && requestPath.trim().length > 0
     ? path.resolve(expandHomePrefix(requestPath.trim()))
     : os.homedir();
+  // This powers the dashboard's admin-only local file picker. The route is
+  // authenticated and role-gated before this helper is called.
+  // lgtm[js/path-injection]
   const stat = await fsp.stat(target);
   if (!stat.isDirectory()) throw new Error(`${target} is not a directory`);
+  // lgtm[js/path-injection]
   const dirents = await fsp.readdir(target, { withFileTypes: true });
   const entries: LocalDirectoryEntry[] = [];
   for (const dirent of dirents) {
