@@ -18,6 +18,7 @@ import { TextContextIndex } from '../src/context/text-index.js';
 import { OAuthStore } from '../src/server/oauth.js';
 import { ToolRouter } from '../src/server/router.js';
 import { addLeaseResources, createLease, listLeases, revokeLease } from '../src/lease/store.js';
+import { createPrivilegedUser } from '../src/dashboard/users.js';
 import { hashApiToken } from '../src/utils/api-token-hash.js';
 import { ensureSigningKey, generateSessionToken, rotateSigningKey } from '../src/utils/token.js';
 
@@ -523,6 +524,101 @@ describe('folder lease access', () => {
 
       const traversal = await fetch(`http://127.0.0.1:${server.port}/lease/${active.record.id}/files/%2e%2e/payload.bin?token=${active.token}`);
       expect(traversal.status).toBe(404);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('dashboard access', () => {
+  it('logs in privileged users, browses mounted files, and creates revokable leases', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const leaseStorePath = path.join(tmp, '.leases.json');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    const readRoot = path.join(tmp, 'read');
+    const writeRoot = path.join(tmp, 'write');
+    fs.mkdirSync(readRoot, { recursive: true });
+    fs.mkdirSync(writeRoot, { recursive: true });
+    fs.writeFileSync(path.join(readRoot, 'note.txt'), 'read note', 'utf-8');
+    fs.writeFileSync(path.join(writeRoot, 'draft.txt'), 'old draft', 'utf-8');
+    createPrivilegedUser(usersPath, { username: 'sarah', password: 'correct horse battery staple' });
+    const config = parseConfig({
+      version: 1,
+      mounts: [
+        { name: 'read', type: 'local_folder', path: '/read', root: readRoot },
+        { name: 'write', type: 'local_folder', path: '/write', root: writeRoot, writeAccess: true },
+      ],
+    });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: config.mounts,
+      leaseStorePath,
+      privilegedUsersPath: usersPath,
+    });
+    try {
+      const rejected = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/files`);
+      expect(rejected.status).toBe(401);
+
+      const cookie = await loginDashboard(server.port, 'sarah', 'correct horse battery staple');
+      const listing = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/files?path=/`, {
+        headers: { Cookie: cookie },
+      });
+      expect(listing.status).toBe(200);
+      const listingBody = await listing.json() as { entries: { path: string; writeAccess: boolean }[] };
+      expect(listingBody.entries).toEqual([
+        expect.objectContaining({ path: '/read', writeAccess: false }),
+        expect.objectContaining({ path: '/write', writeAccess: true }),
+      ]);
+
+      const readLease = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: '/read/note.txt', label: 'Read note', mode: 'read', expires: '1h' }),
+      });
+      expect(readLease.status).toBe(201);
+      const readBody = await readLease.json() as { lease: { id: string; url: string; permissions: string[] } };
+      expect(readBody.lease.url).toContain(`/lease/${readBody.lease.id}?token=mvmt_l_`);
+      expect(readBody.lease.permissions).toEqual(['read']);
+
+      const writeRejected = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: '/read/note.txt', label: 'Bad write', mode: 'write' }),
+      });
+      expect(writeRejected.status).toBe(400);
+
+      const writeLease = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: '/write/draft.txt', label: 'Writable draft', mode: 'write' }),
+      });
+      expect(writeLease.status).toBe(201);
+      const writeBody = await writeLease.json() as { lease: { id: string; url: string; permissions: string[] } };
+      expect(writeBody.lease.permissions).toEqual(['read', 'write']);
+
+      const writableUrl = new URL(writeBody.lease.url);
+      const replace = await fetch(`${writableUrl.origin}${writableUrl.pathname}/files/write-draft.txt?token=${writableUrl.searchParams.get('token')}`, {
+        method: 'PUT',
+        body: 'new draft',
+      });
+      expect(replace.status).toBe(200);
+      expect(fs.readFileSync(path.join(writeRoot, 'draft.txt'), 'utf-8')).toBe('new draft');
+
+      const remove = await fetch(`${writableUrl.origin}${writableUrl.pathname}/files/write-draft.txt?token=${writableUrl.searchParams.get('token')}`, {
+        method: 'DELETE',
+      });
+      expect(remove.status).toBe(200);
+      expect(fs.existsSync(path.join(writeRoot, 'draft.txt'))).toBe(false);
+
+      const revoke = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases/${readBody.lease.id}/revoke`, {
+        method: 'POST',
+        headers: { Cookie: cookie },
+      });
+      expect(revoke.status).toBe(200);
+      expect(listLeases(leaseStorePath).find((lease) => lease.id === readBody.lease.id)?.revokedAt).toBeTruthy();
     } finally {
       await server.close();
       fs.rmSync(tmp, { recursive: true, force: true });
@@ -2676,6 +2772,18 @@ async function initializeMcpSession(port: number, token: string): Promise<string
   expect(sessionId).toBeTruthy();
   await response.text();
   return sessionId!;
+}
+
+async function loginDashboard(port: number, username: string, password: string): Promise<string> {
+  const response = await fetch(`http://127.0.0.1:${port}/dashboard/api/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  expect(response.status).toBe(200);
+  const cookie = response.headers.get('set-cookie')?.split(';')[0];
+  expect(cookie).toBeTruthy();
+  return cookie!;
 }
 
 async function mcpJsonRequest(

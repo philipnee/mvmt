@@ -9,7 +9,7 @@ import { isExpired } from '../utils/token-ttl.js';
 export const LEASES_PATH = path.join(os.homedir(), '.mvmt', '.leases.json');
 export const DEFAULT_LEASE_TTL = '24h';
 
-export type LeasePermission = 'read' | 'upload';
+export type LeasePermission = 'read' | 'write' | 'upload';
 export type LeaseResourceType = 'file' | 'folder';
 
 export interface LeaseResource {
@@ -185,7 +185,7 @@ function uniqueLeaseId(store: LeaseStoreFile): string {
 }
 
 function isLeasePermission(value: unknown): value is LeasePermission {
-  return value === 'read' || value === 'upload';
+  return value === 'read' || value === 'write' || value === 'upload';
 }
 
 function normalizeLeaseResources(resources: LeaseResource[] | undefined, fallbackPath: string | undefined): LeaseResource[] {

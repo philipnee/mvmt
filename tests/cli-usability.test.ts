@@ -57,6 +57,32 @@ describe('CLI usability', () => {
     }
   });
 
+  it('creates privileged dashboard users non-interactively', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    try {
+      const env = { ...process.env, HOME: tmp };
+      const created = await execFileAsync(
+        process.execPath,
+        [...cliArgs, 'users', 'add', 'sarah', '--password', 'correct horse battery staple', '--json'],
+        { cwd: root, env },
+      );
+      expect(JSON.parse(created.stdout)).toMatchObject({
+        user: { username: 'sarah' },
+      });
+
+      const listed = await execFileAsync(
+        process.execPath,
+        [...cliArgs, 'users', '--json'],
+        { cwd: root, env },
+      );
+      expect(JSON.parse(listed.stdout)).toMatchObject({
+        users: [expect.objectContaining({ username: 'sarah', disabled: false })],
+      });
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('removes a mount non-interactively with --yes', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
     const configPath = path.join(tmp, 'config.yaml');

@@ -109,18 +109,48 @@ export async function resolveLeaseUploadTarget(
   mounts: readonly LocalFolderMountConfig[],
   lease: LeaseRecord,
   requestPath: string,
+  options: { allowOverwrite?: boolean } = {},
 ): Promise<LeaseUploadTarget> {
   const leaseRelativePath = normalizeLeaseRelativePath(requestPath);
   if (!leaseRelativePath) throw new Error('upload path is required');
   const resource = uploadResourceForRequest(lease, leaseRelativePath);
   const sourceRelativePath = sourceRelativePathForResource(resource, leaseRelativePath);
-  if (!sourceRelativePath) throw new Error('upload path is required');
+  if (!sourceRelativePath && !(options.allowOverwrite && resource.type === 'file')) {
+    throw new Error('upload path is required');
+  }
 
   const registry = new MountRegistry([...mounts]);
   const leaseRoot = registry.resolve(resource.sourcePath);
   const leaseRootStat = await fsp.stat(leaseRoot.realPath);
-  if (!leaseRootStat.isDirectory()) throw new Error(`${resource.path} is not a directory`);
   if (!leaseRoot.mount.config.writeAccess) throw new Error(`${resource.path} is read-only`);
+
+  if (leaseRootStat.isFile()) {
+    if (!options.allowOverwrite || resource.type !== 'file' || sourceRelativePath) {
+      throw new Error(`${resource.path} is not a directory`);
+    }
+    const policyPath = leaseRoot.relativePath || path.basename(leaseRoot.realPath);
+    if (matchesConfiguredOrGlobalPattern(policyPath, leaseRoot.mount.config.exclude)) {
+      throw new Error(`${leaseRoot.virtualPath} is excluded`);
+    }
+    if (matchesPathPatterns(policyPath, leaseRoot.mount.config.protect)) {
+      throw new Error(`${leaseRoot.virtualPath} is protected`);
+    }
+    const targetRealPath = await fsp.realpath(leaseRoot.realPath);
+    if (isGloballyDeniedPath(policyPath, targetRealPath)) {
+      throw new Error(`${leaseRoot.virtualPath} is globally denied`);
+    }
+    return {
+      mountName: leaseRoot.mount.config.name,
+      leasePath: resource.path,
+      virtualPath: leaseRoot.virtualPath,
+      leaseRelativePath,
+      realPath: targetRealPath,
+      parentRealPath: await fsp.realpath(path.dirname(leaseRoot.realPath)),
+      filename: path.basename(leaseRoot.realPath),
+    };
+  }
+
+  if (!leaseRootStat.isDirectory()) throw new Error(`${resource.path} is not a directory`);
 
   const leaseRootRealPath = await fsp.realpath(leaseRoot.realPath);
   const virtualPath = `${stripTrailingSlash(resource.sourcePath)}/${sourceRelativePath}`;
@@ -148,8 +178,9 @@ export async function resolveLeaseUploadTarget(
     throw new Error(`${resolved.virtualPath} is globally denied`);
   }
   try {
-    await fsp.lstat(targetRealPath);
-    throw new Error(`${resolved.virtualPath} already exists`);
+    const existing = await fsp.lstat(targetRealPath);
+    if (!options.allowOverwrite) throw new Error(`${resolved.virtualPath} already exists`);
+    if (existing.isDirectory()) throw new Error(`${resolved.virtualPath} is a directory`);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }

@@ -15,7 +15,7 @@ import { ToolRouter } from './router.js';
 import { log } from '../utils/logger.js';
 import { defaultClientsPath, defaultRefreshTokensPath, defaultSigningKeyPath, ensureSessionToken, ensureSigningKey, readSigningKey, TOKEN_PATH, validateSessionToken } from '../utils/token.js';
 import { verifyApiToken } from '../utils/api-token-hash.js';
-import { isExpired } from '../utils/token-ttl.js';
+import { isExpired, parseTokenTtl } from '../utils/token-ttl.js';
 import {
   CodeChallengeMethod,
   OAuthClientAlreadyRegisteredError,
@@ -28,16 +28,27 @@ import {
 } from './oauth.js';
 import { rateLimit } from './rate-limit.js';
 import { ClientConfig, LocalFolderMountConfig } from '../config/schema.js';
+import { listDashboardFiles, normalizeDashboardPath, resolveDashboardFileTarget } from '../dashboard/files.js';
+import {
+  defaultPrivilegedUsersPath,
+  PrivilegedUser,
+  recordPrivilegedUserLogin,
+  verifyPrivilegedUserPassword,
+} from '../dashboard/users.js';
 import { listLeaseDirectory, resolveLeaseFileTarget, resolveLeaseUploadTarget } from '../lease/files.js';
 import {
+  createLease,
   defaultLeasesPath,
   findLease,
   findLeaseByToken,
   leaseAllows,
   LeaseRecord,
+  LeaseResource,
   leaseResources,
   leaseUnavailableReason,
+  listLeases,
   recordLeaseUse,
+  revokeLease,
   validateLeaseToken,
 } from '../lease/store.js';
 import {
@@ -60,6 +71,9 @@ const DEFAULT_AUTH_RATE_LIMIT = { windowMs: 60_000, max: 30 };
 const DEFAULT_MCP_RATE_LIMIT = { windowMs: 60_000, max: 600 };
 const DEFAULT_HEALTH_RATE_LIMIT = { windowMs: 60_000, max: 120 };
 const DEFAULT_MAX_LEASE_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024;
+const DEFAULT_DASHBOARD_LEASE_TTL = '24h';
+const DASHBOARD_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const DASHBOARD_SESSION_COOKIE = 'mvmt_dashboard';
 
 type McpSession = {
   transport: StreamableHTTPServerTransport;
@@ -71,6 +85,13 @@ type McpSession = {
 
 type ClientIdentityRef = {
   current?: ClientIdentity;
+};
+
+type DashboardSession = {
+  id: string;
+  userId: string;
+  username: string;
+  expiresAt: number;
 };
 
 export interface RateLimitOverrides {
@@ -100,6 +121,7 @@ export interface HttpServerOptions {
   clients?: readonly ClientConfig[] | (() => readonly ClientConfig[] | undefined);
   leaseMounts?: readonly LocalFolderMountConfig[] | (() => readonly LocalFolderMountConfig[] | undefined);
   leaseStorePath?: string;
+  privilegedUsersPath?: string;
   // Defaults to true for local backward compatibility. Tunnel mode passes
   // false unless MVMT_ALLOW_LEGACY_TUNNEL is set, so a public endpoint can
   // start with no API tokens while exposing no data.
@@ -201,6 +223,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   ensureSessionToken(tokenPath);
   const signingKeyPath = options.signingKeyPath ?? defaultSigningKeyPath(tokenPath ?? TOKEN_PATH);
   const leaseStorePath = options.leaseStorePath ?? defaultLeasesPath(tokenPath ?? TOKEN_PATH);
+  const privilegedUsersPath = options.privilegedUsersPath ?? defaultPrivilegedUsersPath(tokenPath ?? TOKEN_PATH);
   // Create the signing key file on first boot, then re-read it on every
   // HMAC op. This way internal session-token rotation (which rewrites the file)
   // invalidates outstanding OAuth access tokens immediately, without
@@ -217,6 +240,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   oauthCleanup.unref();
 
   const sessions = new Map<string, McpSession>();
+  const dashboardSessions = new Map<string, DashboardSession>();
   const cleanupInterval = setInterval(() => {
     const now = Date.now();
     const staleTimeoutMs = 30 * 60 * 1000;
@@ -226,6 +250,10 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
         session.transport.close().catch(() => undefined);
         sessions.delete(id);
       }
+    }
+
+    for (const [id, session] of dashboardSessions) {
+      if (session.expiresAt <= now) dashboardSessions.delete(id);
     }
   }, 5 * 60 * 1000);
   cleanupInterval.unref();
@@ -643,6 +671,141 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     }
   });
 
+  const dashboardOriginMiddleware: express.RequestHandler = (req, res, next) => {
+    if (originCheck(req) || originMatchesBaseUrl(req, baseUrlFor(req))) {
+      next();
+      return;
+    }
+    logHttpRequest(requestLog, req, 403, 'dashboard.origin', 'origin_not_allowed');
+    res.status(403).json({ error: 'Origin not allowed' });
+  };
+
+  const dashboardAuthMiddleware: express.RequestHandler = (req, res, next) => {
+    const session = dashboardSessionForRequest(req, dashboardSessions);
+    if (!session) {
+      logHttpRequest(requestLog, req, 401, 'dashboard.auth', 'missing_session');
+      res.status(401).json({ error: 'dashboard_login_required' });
+      return;
+    }
+    res.locals.dashboardSession = session;
+    next();
+  };
+
+  app.get('/dashboard', (_req, res) => {
+    res.status(200).type('html').send(DASHBOARD_PAGE_HTML);
+  });
+
+  app.post('/dashboard/api/login', authLimiter, dashboardOriginMiddleware, (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const username = typeof body.username === 'string' ? body.username : undefined;
+    const password = typeof body.password === 'string' ? body.password : undefined;
+    const user = verifyPrivilegedUserPassword(privilegedUsersPath, username, password);
+    if (!user) {
+      logHttpRequest(requestLog, req, 401, 'dashboard.login', 'invalid_credentials', username);
+      res.status(401).json({ error: 'invalid_credentials' });
+      return;
+    }
+    recordPrivilegedUserLogin(privilegedUsersPath, user.id);
+    const session = createDashboardSession(user.id, user.username);
+    dashboardSessions.set(session.id, session);
+    res.setHeader('Set-Cookie', dashboardSessionCookie(session, baseUrlFor(req)));
+    logHttpRequest(requestLog, req, 200, 'dashboard.login', 'ok', user.username);
+    res.json({ user: publicDashboardUser(user) });
+  });
+
+  app.post('/dashboard/api/logout', dashboardOriginMiddleware, dashboardAuthMiddleware, (req, res) => {
+    const session = res.locals.dashboardSession as DashboardSession;
+    dashboardSessions.delete(session.id);
+    res.setHeader('Set-Cookie', clearDashboardSessionCookie(baseUrlFor(req)));
+    logHttpRequest(requestLog, req, 200, 'dashboard.logout', 'ok', session.username);
+    res.json({ ok: true });
+  });
+
+  app.get('/dashboard/api/me', dashboardOriginMiddleware, dashboardAuthMiddleware, (_req, res) => {
+    const session = res.locals.dashboardSession as DashboardSession;
+    res.json({ user: { username: session.username }, localOwner: false });
+  });
+
+  app.get('/dashboard/api/mounts', dashboardOriginMiddleware, dashboardAuthMiddleware, (req, res) => {
+    const mounts = resolveLeaseMounts(options.leaseMounts).filter((mount) => mount.enabled !== false);
+    logHttpRequest(requestLog, req, 200, 'dashboard.mounts');
+    res.json({
+      mounts: mounts.map((mount) => ({
+        name: mount.name,
+        path: mount.path,
+        description: mount.description,
+        writeAccess: Boolean(mount.writeAccess),
+      })),
+    });
+  });
+
+  app.get('/dashboard/api/files', dashboardOriginMiddleware, dashboardAuthMiddleware, async (req, res) => {
+    const requestPath = firstStringQuery(req.query.path) ?? '/';
+    try {
+      const listing = await listDashboardFiles(resolveLeaseMounts(options.leaseMounts), requestPath);
+      logHttpRequest(requestLog, req, 200, 'dashboard.files', listing.path);
+      res.json(listing);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'unavailable';
+      logHttpRequest(requestLog, req, 404, 'dashboard.files', detail);
+      res.status(404).json({ error: 'file_unavailable' });
+    }
+  });
+
+  app.get('/dashboard/api/leases', dashboardOriginMiddleware, dashboardAuthMiddleware, (req, res) => {
+    logHttpRequest(requestLog, req, 200, 'dashboard.leases');
+    res.json({ leases: listLeases(leaseStorePath) });
+  });
+
+  app.post('/dashboard/api/leases', dashboardOriginMiddleware, dashboardAuthMiddleware, async (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const label = typeof body.label === 'string' ? body.label.trim() : '';
+    const mode = typeof body.mode === 'string' ? body.mode.trim().toLowerCase() : 'read';
+    const paths = dashboardLeasePaths(body);
+    if (!label) {
+      res.status(400).json({ error: 'label_required' });
+      return;
+    }
+    if (paths.length === 0) {
+      res.status(400).json({ error: 'path_required' });
+      return;
+    }
+    if (mode !== 'read' && mode !== 'write') {
+      res.status(400).json({ error: 'invalid_mode' });
+      return;
+    }
+    try {
+      const resources = await dashboardLeaseResources(resolveLeaseMounts(options.leaseMounts), paths, mode);
+      const ttl = parseTokenTtl(typeof body.expires === 'string' ? body.expires : DEFAULT_DASHBOARD_LEASE_TTL);
+      const permissions = mode === 'write' ? ['read', 'write'] as const : ['read'] as const;
+      const created = createLease(leaseStorePath, {
+        label,
+        path: resources[0]!.sourcePath,
+        resources,
+        expiresAt: ttl.expiresAt,
+        permissions: [...permissions],
+      });
+      const url = leasePublicUrl(baseUrlFor(req), created.record.id, created.token);
+      logHttpRequest(requestLog, req, 201, 'dashboard.leases', `created ${created.record.id}`);
+      res.status(201).json({ lease: { ...created.record, url } });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'lease_failed';
+      logHttpRequest(requestLog, req, 400, 'dashboard.leases', detail);
+      res.status(400).json({ error: 'lease_failed', detail });
+    }
+  });
+
+  app.post('/dashboard/api/leases/:id/revoke', dashboardOriginMiddleware, dashboardAuthMiddleware, (req, res) => {
+    const id = firstStringQuery(req.params.id);
+    if (!id || !revokeLease(leaseStorePath, id)) {
+      logHttpRequest(requestLog, req, 404, 'dashboard.leases', 'unknown_lease');
+      res.status(404).json({ error: 'lease_not_found' });
+      return;
+    }
+    logHttpRequest(requestLog, req, 200, 'dashboard.leases', `revoked ${id}`);
+    res.json({ ok: true });
+  });
+
   const authorizeLeaseRequest = (req: Request, res: Response): ReturnType<typeof findLease> => {
     const id = regexParam(req, 0) ?? firstStringQuery(req.params.id);
     const lease = id ? findLease(leaseStorePath, id) : undefined;
@@ -766,7 +929,8 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   const leaseUploadHandler: express.RequestHandler = async (req, res) => {
     const lease = authorizeLeaseRequest(req, res);
     if (!lease) return;
-    if (!leaseAllows(lease, 'upload')) {
+    const allowOverwrite = leaseAllows(lease, 'write');
+    if (!leaseAllows(lease, 'upload') && !allowOverwrite) {
       logHttpRequest(requestLog, req, 403, 'lease.request', 'permission_denied', lease.id);
       res.status(403).json({ error: 'lease_permission_denied' });
       return;
@@ -787,7 +951,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     const requestPath = regexParam(req, 1) ?? firstStringQuery(req.query.path) ?? '';
     let target;
     try {
-      target = await resolveLeaseUploadTarget(resolveLeaseMounts(options.leaseMounts), lease, requestPath);
+      target = await resolveLeaseUploadTarget(resolveLeaseMounts(options.leaseMounts), lease, requestPath, { allowOverwrite });
     } catch (err) {
       const detail = err instanceof Error ? err.message : 'unavailable';
       const exists = detail.includes('already exists');
@@ -797,10 +961,11 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     }
 
     try {
-      const bytes = await writeUploadWithoutOverwrite(req, target.parentRealPath, target.realPath, DEFAULT_MAX_LEASE_UPLOAD_BYTES);
+      const bytes = await writeLeaseUpload(req, target.parentRealPath, target.realPath, DEFAULT_MAX_LEASE_UPLOAD_BYTES, { overwrite: allowOverwrite });
       recordLeaseUse(leaseStorePath, lease.id, { uploaded: true });
-      logHttpRequest(requestLog, req, 201, 'lease.upload', target.leaseRelativePath, lease.id);
-      res.status(201).json({ path: target.leaseRelativePath ? `/${target.leaseRelativePath}` : '/', bytes });
+      const status = allowOverwrite ? 200 : 201;
+      logHttpRequest(requestLog, req, status, 'lease.upload', target.leaseRelativePath, lease.id);
+      res.status(status).json({ path: target.leaseRelativePath ? `/${target.leaseRelativePath}` : '/', bytes });
     } catch (err) {
       const status = err instanceof LeaseUploadTooLargeError ? 413 : isNodeErrorCode(err, 'EEXIST') ? 409 : 500;
       const error = status === 413 ? 'lease_upload_too_large' : status === 409 ? 'lease_upload_exists' : 'lease_upload_failed';
@@ -810,11 +975,41 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     }
   };
 
+  const leaseDeleteHandler: express.RequestHandler = async (req, res) => {
+    const lease = authorizeLeaseRequest(req, res);
+    if (!lease) return;
+    if (!leaseAllows(lease, 'write')) {
+      logHttpRequest(requestLog, req, 403, 'lease.delete', 'permission_denied', lease.id);
+      res.status(403).json({ error: 'lease_permission_denied' });
+      return;
+    }
+    const requestPath = regexParam(req, 1) ?? firstStringQuery(req.query.path) ?? '';
+    let target;
+    try {
+      target = await resolveLeaseFileTarget(resolveLeaseMounts(options.leaseMounts), lease, requestPath);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'unavailable';
+      logHttpRequest(requestLog, req, 404, 'lease.delete', detail, lease.id);
+      res.status(404).json({ error: 'lease_target_unavailable' });
+      return;
+    }
+    try {
+      await fsp.unlink(target.realPath);
+      logHttpRequest(requestLog, req, 200, 'lease.delete', target.leaseRelativePath || '/', lease.id);
+      res.json({ ok: true });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'delete_failed';
+      logHttpRequest(requestLog, req, 500, 'lease.delete', detail, lease.id);
+      res.status(500).json({ error: 'lease_delete_failed' });
+    }
+  };
+
   const leaseFilesRoute = /^\/lease\/([^/]+)\/files(?:\/(.*))?$/;
   app.get('/lease/:id', mcpLimiter, leasePageHandler);
   app.get(leaseFilesRoute, mcpLimiter, leaseFilesHandler);
   app.head(leaseFilesRoute, mcpLimiter, leaseFilesHandler);
   app.put(leaseFilesRoute, mcpLimiter, leaseUploadHandler);
+  app.delete(leaseFilesRoute, mcpLimiter, leaseDeleteHandler);
 
   app.post('/mcp', mcpLimiter, authMiddleware, async (req, res) => {
     await handleMcpRequest(req, res, router, sessions);
@@ -998,7 +1193,9 @@ function identityFromLease(lease: LeaseRecord): ClientIdentity {
     permissions: leaseAllows(lease, 'read')
       ? leaseResources(lease).map((resource) => ({
           path: resource.type === 'folder' ? `${stripTrailingSlashes(resource.sourcePath)}/**` : resource.sourcePath,
-          actions: ['search' as const, 'read' as const],
+          actions: leaseAllows(lease, 'write')
+            ? ['search' as const, 'read' as const, 'write' as const]
+            : ['search' as const, 'read' as const],
         }))
       : [],
   };
@@ -1240,11 +1437,12 @@ class LeaseUploadTooLargeError extends Error {
   }
 }
 
-async function writeUploadWithoutOverwrite(
+async function writeLeaseUpload(
   req: Request,
   parentRealPath: string,
   targetRealPath: string,
   maxBytes: number,
+  options: { overwrite: boolean },
 ): Promise<number> {
   const tempPath = path.join(parentRealPath, `.mvmt-upload-${process.pid}-${randomUUID()}.tmp`);
   let bytes = 0;
@@ -1261,7 +1459,11 @@ async function writeUploadWithoutOverwrite(
 
   try {
     await pipeline(req, meter, createWriteStream(tempPath, { flags: 'wx', mode: 0o600 }));
-    await fsp.link(tempPath, targetRealPath);
+    if (options.overwrite) {
+      await fsp.rename(tempPath, targetRealPath);
+    } else {
+      await fsp.link(tempPath, targetRealPath);
+    }
     return bytes;
   } finally {
     await fsp.unlink(tempPath).catch(() => undefined);
@@ -1271,6 +1473,315 @@ async function writeUploadWithoutOverwrite(
 function isNodeErrorCode(err: unknown, code: string): boolean {
   return typeof err === 'object' && err !== null && (err as NodeJS.ErrnoException).code === code;
 }
+
+function createDashboardSession(userId: string, username: string): DashboardSession {
+  return {
+    id: randomUUID(),
+    userId,
+    username,
+    expiresAt: Date.now() + DASHBOARD_SESSION_TTL_MS,
+  };
+}
+
+function dashboardSessionForRequest(
+  req: Request,
+  sessions: ReadonlyMap<string, DashboardSession>,
+): DashboardSession | undefined {
+  const cookies = parseCookieHeader(firstHeaderValue(req.headers.cookie));
+  const id = cookies[DASHBOARD_SESSION_COOKIE];
+  if (!id) return undefined;
+  const session = sessions.get(id);
+  if (!session || session.expiresAt <= Date.now()) return undefined;
+  return session;
+}
+
+function dashboardSessionCookie(session: DashboardSession, baseUrl: string): string {
+  const maxAge = Math.max(0, Math.floor((session.expiresAt - Date.now()) / 1000));
+  const secure = baseUrl.startsWith('https://') ? '; Secure' : '';
+  return `${DASHBOARD_SESSION_COOKIE}=${encodeURIComponent(session.id)}; Path=/dashboard; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure}`;
+}
+
+function clearDashboardSessionCookie(baseUrl: string): string {
+  const secure = baseUrl.startsWith('https://') ? '; Secure' : '';
+  return `${DASHBOARD_SESSION_COOKIE}=; Path=/dashboard; HttpOnly; SameSite=Strict; Max-Age=0${secure}`;
+}
+
+function parseCookieHeader(header: string | undefined): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (!header) return result;
+  for (const part of header.split(';')) {
+    const index = part.indexOf('=');
+    if (index < 0) continue;
+    const key = part.slice(0, index).trim();
+    if (!key) continue;
+    try {
+      result[key] = decodeURIComponent(part.slice(index + 1).trim());
+    } catch {
+      result[key] = part.slice(index + 1).trim();
+    }
+  }
+  return result;
+}
+
+function publicDashboardUser(user: PrivilegedUser): { id: string; username: string; createdAt: string; lastLoginAt?: string } {
+  return {
+    id: user.id,
+    username: user.username,
+    createdAt: user.createdAt,
+    ...(user.lastLoginAt ? { lastLoginAt: user.lastLoginAt } : {}),
+  };
+}
+
+function dashboardLeasePaths(body: Record<string, unknown>): string[] {
+  if (Array.isArray(body.paths)) {
+    return body.paths.filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+  }
+  return typeof body.path === 'string' && body.path.trim().length > 0 ? [body.path] : [];
+}
+
+async function dashboardLeaseResources(
+  mounts: readonly LocalFolderMountConfig[],
+  paths: string[],
+  mode: 'read' | 'write',
+): Promise<LeaseResource[]> {
+  const resources: LeaseResource[] = [];
+  for (const inputPath of paths) {
+    const target = await resolveDashboardFileTarget(mounts, inputPath);
+    if (mode === 'write' && !target.writeAccess) {
+      throw new Error(`${target.virtualPath} is read-only`);
+    }
+    resources.push({
+      path: resourcePathForDashboardPath(target.virtualPath),
+      sourcePath: target.virtualPath,
+      type: target.type === 'file' ? 'file' : 'folder',
+    });
+  }
+  return uniqueDashboardLeaseResources(resources);
+}
+
+function resourcePathForDashboardPath(inputPath: string): string {
+  const segments = normalizeDashboardPath(inputPath).split('/').filter(Boolean);
+  return `/${segments.join('-') || 'resource'}`;
+}
+
+function uniqueDashboardLeaseResources(resources: LeaseResource[]): LeaseResource[] {
+  const seen = new Set<string>();
+  const unique: LeaseResource[] = [];
+  for (const resource of resources) {
+    const key = `${resource.sourcePath}:${resource.type}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(resource);
+  }
+  return unique;
+}
+
+function leasePublicUrl(baseUrl: string, id: string, token: string): string {
+  const url = new URL(`/lease/${encodeURIComponent(id)}`, baseUrl);
+  url.searchParams.set('token', token);
+  return url.toString();
+}
+
+const DASHBOARD_PAGE_HTML = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mvmt dashboard</title>
+<style>
+body{font-family:ui-sans-serif,system-ui,sans-serif;margin:2rem;max-width:1100px}
+button,input,select{font:inherit;padding:.45rem .55rem}
+table{border-collapse:collapse;width:100%;margin-top:1rem}
+td,th{border-bottom:1px solid #ddd;padding:.5rem;text-align:left}
+a{color:#0f766e}
+.row{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center}
+.panel{border:1px solid #ddd;border-radius:8px;padding:1rem;margin:1rem 0}
+.muted,.status{color:#666}
+.hidden{display:none}
+</style>
+</head>
+<body>
+<h1>mvmt dashboard</h1>
+<p class="status" id="status"></p>
+<section id="login" class="panel">
+  <h2>Login</h2>
+  <form id="login-form" class="row">
+    <input id="username" name="username" autocomplete="username" placeholder="username">
+    <input id="password" name="password" type="password" autocomplete="current-password" placeholder="password">
+    <button type="submit">Login</button>
+  </form>
+</section>
+<section id="app" class="hidden">
+  <div class="row">
+    <button id="refresh">Refresh</button>
+    <button id="logout">Logout</button>
+  </div>
+  <section class="panel">
+    <h2>Files</h2>
+    <p class="muted" id="current-path">/</p>
+    <table><thead><tr><th>Name</th><th>Type</th><th>Write</th><th>Share</th></tr></thead><tbody id="files"></tbody></table>
+  </section>
+  <section class="panel">
+    <h2>Create lease</h2>
+    <form id="lease-form" class="row">
+      <input id="lease-path" name="path" placeholder="/path">
+      <input id="lease-label" name="label" placeholder="label">
+      <select id="lease-mode" name="mode">
+        <option value="read">read</option>
+        <option value="write">write</option>
+      </select>
+      <input id="lease-expires" name="expires" placeholder="24h">
+      <button type="submit">Create</button>
+    </form>
+    <p class="status" id="lease-url"></p>
+  </section>
+  <section class="panel">
+    <h2>Leases</h2>
+    <table><thead><tr><th>Label</th><th>Paths</th><th>Expires</th><th></th></tr></thead><tbody id="leases"></tbody></table>
+  </section>
+</section>
+<script>
+const statusEl = document.getElementById('status');
+const loginSection = document.getElementById('login');
+const appSection = document.getElementById('app');
+const filesEl = document.getElementById('files');
+const leasesEl = document.getElementById('leases');
+const currentPathEl = document.getElementById('current-path');
+const leaseUrlEl = document.getElementById('lease-url');
+let currentPath = '/';
+
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    ...options,
+    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+  });
+  if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'request failed');
+  return response.json();
+}
+
+function showApp(show) {
+  loginSection.classList.toggle('hidden', show);
+  appSection.classList.toggle('hidden', !show);
+}
+
+async function loadFiles(path = currentPath) {
+  currentPath = path;
+  const listing = await api('/dashboard/api/files?path=' + encodeURIComponent(path));
+  currentPathEl.textContent = listing.path;
+  filesEl.replaceChildren(...listing.entries.map((entry) => {
+    const row = document.createElement('tr');
+    const name = document.createElement('td');
+    const link = document.createElement('a');
+    link.href = '#';
+    link.textContent = entry.name;
+    link.addEventListener('click', (event) => {
+      event.preventDefault();
+      if (entry.type === 'directory') loadFiles(entry.path).catch(showError);
+      else document.getElementById('lease-path').value = entry.path;
+    });
+    name.append(link);
+    const type = document.createElement('td');
+    type.textContent = entry.type;
+    const write = document.createElement('td');
+    write.textContent = entry.writeAccess ? 'yes' : 'no';
+    const share = document.createElement('td');
+    const button = document.createElement('button');
+    button.textContent = 'Use';
+    button.addEventListener('click', () => {
+      document.getElementById('lease-path').value = entry.path;
+      document.getElementById('lease-label').value = entry.name;
+    });
+    share.append(button);
+    row.append(name, type, write, share);
+    return row;
+  }));
+}
+
+async function loadLeases() {
+  const payload = await api('/dashboard/api/leases');
+  leasesEl.replaceChildren(...payload.leases.map((lease) => {
+    const row = document.createElement('tr');
+    const label = document.createElement('td');
+    label.textContent = lease.label;
+    const paths = document.createElement('td');
+    paths.textContent = (lease.resources || []).map((resource) => resource.path).join(', ');
+    const expires = document.createElement('td');
+    expires.textContent = lease.revokedAt ? 'revoked' : (lease.expiresAt || 'never');
+    const action = document.createElement('td');
+    if (!lease.revokedAt) {
+      const revoke = document.createElement('button');
+      revoke.textContent = 'Revoke';
+      revoke.addEventListener('click', async () => {
+        await api('/dashboard/api/leases/' + encodeURIComponent(lease.id) + '/revoke', { method: 'POST', body: '{}' });
+        await loadLeases();
+      });
+      action.append(revoke);
+    }
+    row.append(label, paths, expires, action);
+    return row;
+  }));
+}
+
+async function refresh() {
+  await loadFiles(currentPath);
+  await loadLeases();
+}
+
+function showError(error) {
+  statusEl.textContent = error.message || String(error);
+}
+
+document.getElementById('login-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  try {
+    await api('/dashboard/api/login', {
+      method: 'POST',
+      body: JSON.stringify({
+        username: document.getElementById('username').value,
+        password: document.getElementById('password').value,
+      }),
+    });
+    showApp(true);
+    await refresh();
+  } catch (error) {
+    showError(error);
+  }
+});
+
+document.getElementById('lease-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  try {
+    const payload = await api('/dashboard/api/leases', {
+      method: 'POST',
+      body: JSON.stringify({
+        path: document.getElementById('lease-path').value,
+        label: document.getElementById('lease-label').value,
+        mode: document.getElementById('lease-mode').value,
+        expires: document.getElementById('lease-expires').value || '24h',
+      }),
+    });
+    leaseUrlEl.textContent = payload.lease.url;
+    await loadLeases();
+  } catch (error) {
+    showError(error);
+  }
+});
+
+document.getElementById('refresh').addEventListener('click', () => refresh().catch(showError));
+document.getElementById('logout').addEventListener('click', async () => {
+  await api('/dashboard/api/logout', { method: 'POST', body: '{}' });
+  showApp(false);
+});
+
+api('/dashboard/api/me')
+  .then(async () => {
+    showApp(true);
+    await refresh();
+  })
+  .catch(() => showApp(false));
+</script>
+</body>
+</html>`;
 
 const LEASE_BROWSER_PAGE_HTML = `<!doctype html>
 <html>
