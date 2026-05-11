@@ -47,6 +47,35 @@ the source checkout path above.
 
 `-i` starts mvmt in interactive mode.
 
+## Desktop from source
+
+`mvmt-desktop` is an Electron shell over the local mvmt engine. Until a signed
+desktop build is published, keep the repos side by side and build this engine
+first:
+
+```bash
+cd ~/code
+git clone https://github.com/philipnee/mvmt.git
+git clone https://github.com/philipnee/mvmt-desktop.git
+
+cd mvmt
+npm install
+npm run build
+
+cd ../mvmt-desktop
+npm install
+npm run dev
+```
+
+For a standalone pre-alpha app bundle, vendor the built engine into the desktop
+repo before packaging:
+
+```bash
+cd ~/code/mvmt-desktop
+npm run vendor
+npm run dist:mac
+```
+
 On first run, mvmt creates:
 
 ```txt
