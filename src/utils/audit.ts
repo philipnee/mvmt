@@ -29,8 +29,24 @@ export interface AuditEntry {
   durationMs: number;
 }
 
+// HTTP request audit entry. Structurally identical to the server's
+// HttpRequestLogEntry; redeclared here to avoid a dependency from utils
+// back into the server module. Persisted to the same audit.log file as
+// tool-call entries, tagged with `type: 'http'` so consumers can split.
+export interface HttpAuditEntry {
+  ts: string;
+  kind: string;
+  method: string;
+  path: string;
+  status: number;
+  detail?: string;
+  clientId?: string;
+  ip?: string;
+}
+
 export interface AuditLogger {
   record(entry: AuditEntry): void;
+  recordHttp(entry: HttpAuditEntry): void;
 }
 
 export function createAuditLogger(logPath: string = AUDIT_LOG_PATH): AuditLogger {
@@ -47,13 +63,20 @@ export function createAuditLogger(logPath: string = AUDIT_LOG_PATH): AuditLogger
     }
   }
 
+  function append(line: string): void {
+    try {
+      fs.appendFileSync(logPath, `${line}\n`);
+    } catch {
+      // Never let audit logging break a tool call or request.
+    }
+  }
+
   return {
     record(entry: AuditEntry): void {
-      try {
-        fs.appendFileSync(logPath, `${JSON.stringify(entry)}\n`);
-      } catch {
-        // Never let audit logging break a tool call.
-      }
+      append(JSON.stringify(entry));
+    },
+    recordHttp(entry: HttpAuditEntry): void {
+      append(JSON.stringify({ type: 'http', ...entry }));
     },
   };
 }

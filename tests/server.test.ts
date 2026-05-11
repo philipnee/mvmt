@@ -13,12 +13,13 @@ import {
   MVMT_SERVER_INSTRUCTIONS,
   startHttpServer,
 } from '../src/server/index.js';
-import { parseConfig } from '../src/config/loader.js';
+import { parseConfig, readConfig, saveConfig } from '../src/config/loader.js';
 import { TextContextIndex } from '../src/context/text-index.js';
 import { OAuthStore } from '../src/server/oauth.js';
 import { ToolRouter } from '../src/server/router.js';
 import { addLeaseResources, createLease, listLeases, revokeLease } from '../src/lease/store.js';
 import { createPrivilegedUser } from '../src/dashboard/users.js';
+import { createAuditLogger } from '../src/utils/audit.js';
 import { hashApiToken } from '../src/utils/api-token-hash.js';
 import { ensureSigningKey, generateSessionToken, rotateSigningKey } from '../src/utils/token.js';
 
@@ -426,6 +427,12 @@ describe('folder lease access', () => {
       permissions: ['read'],
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     });
+    const readUploadLease = createLease(leaseStorePath, {
+      label: 'Read plus uploads',
+      path: '/dropbox',
+      permissions: ['read', 'upload'],
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
     const server = await startHttpServer(new ToolRouter(), {
       port: 0,
       tokenPath,
@@ -440,6 +447,13 @@ describe('folder lease access', () => {
       const listing = await fetch(`http://127.0.0.1:${server.port}/lease/${uploadLease.record.id}/files?token=${uploadLease.token}`);
       expect(listing.status).toBe(403);
 
+      const readUploadPage = await fetch(`http://127.0.0.1:${server.port}/lease/${readUploadLease.record.id}?token=${readUploadLease.token}`);
+      expect(readUploadPage.status).toBe(200);
+      const readUploadHtml = await readUploadPage.text();
+      expect(readUploadHtml).toContain('Upload to this folder');
+      const readUploadListing = await fetch(`http://127.0.0.1:${server.port}/lease/${readUploadLease.record.id}/files?token=${readUploadLease.token}`);
+      expect(((await readUploadListing.json()) as { canUpload: boolean }).canUpload).toBe(true);
+
       const uploaded = await fetch(`http://127.0.0.1:${server.port}/lease/${uploadLease.record.id}/files/nested/phone.txt?token=${uploadLease.token}`, {
         method: 'PUT',
         body: 'from phone',
@@ -448,12 +462,15 @@ describe('folder lease access', () => {
       expect(fs.readFileSync(path.join(root, 'nested', 'phone.txt'), 'utf-8')).toBe('from phone');
       expect(listLeases(leaseStorePath)[0].uploadCount).toBe(1);
 
+      // Upload-only leases never overwrite. A name collision is suffixed.
       const overwrite = await fetch(`http://127.0.0.1:${server.port}/lease/${uploadLease.record.id}/files/existing.txt?token=${uploadLease.token}`, {
         method: 'PUT',
         body: 'replace',
       });
-      expect(overwrite.status).toBe(409);
+      expect(overwrite.status).toBe(201);
+      expect(((await overwrite.json()) as { filename: string }).filename).toBe('existing (2).txt');
       expect(fs.readFileSync(path.join(root, 'existing.txt'), 'utf-8')).toBe('already here');
+      expect(fs.readFileSync(path.join(root, 'existing (2).txt'), 'utf-8')).toBe('replace');
 
       const traversal = await fetch(`http://127.0.0.1:${server.port}/lease/${uploadLease.record.id}/files/%2e%2e/escape.txt?token=${uploadLease.token}`, {
         method: 'PUT',
@@ -532,7 +549,7 @@ describe('folder lease access', () => {
 });
 
 describe('dashboard access', () => {
-  it('logs in privileged users, browses mounted files, and creates revokable leases', async () => {
+  it('logs in privileged users, creates read/upload/two-way leases, and suffixes collision uploads', async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-test-'));
     const tokenPath = path.join(tmp, '.session-token');
     const leaseStorePath = path.join(tmp, '.leases.json');
@@ -542,7 +559,6 @@ describe('dashboard access', () => {
     fs.mkdirSync(readRoot, { recursive: true });
     fs.mkdirSync(writeRoot, { recursive: true });
     fs.writeFileSync(path.join(readRoot, 'note.txt'), 'read note', 'utf-8');
-    fs.writeFileSync(path.join(writeRoot, 'draft.txt'), 'old draft', 'utf-8');
     createPrivilegedUser(usersPath, { username: 'sarah', password: 'correct horse battery staple' });
     const config = parseConfig({
       version: 1,
@@ -563,16 +579,8 @@ describe('dashboard access', () => {
       expect(rejected.status).toBe(401);
 
       const cookie = await loginDashboard(server.port, 'sarah', 'correct horse battery staple');
-      const listing = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/files?path=/`, {
-        headers: { Cookie: cookie },
-      });
-      expect(listing.status).toBe(200);
-      const listingBody = await listing.json() as { entries: { path: string; writeAccess: boolean }[] };
-      expect(listingBody.entries).toEqual([
-        expect.objectContaining({ path: '/read', writeAccess: false }),
-        expect.objectContaining({ path: '/write', writeAccess: true }),
-      ]);
 
+      // Read lease on a file: only 'read' mode is valid.
       const readLease = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases`, {
         method: 'POST',
         headers: { Cookie: cookie, 'Content-Type': 'application/json' },
@@ -580,45 +588,497 @@ describe('dashboard access', () => {
       });
       expect(readLease.status).toBe(201);
       const readBody = await readLease.json() as { lease: { id: string; url: string; permissions: string[] } };
-      expect(readBody.lease.url).toContain(`/lease/${readBody.lease.id}?token=mvmt_l_`);
       expect(readBody.lease.permissions).toEqual(['read']);
 
-      const writeRejected = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases`, {
+      // 'write' mode is no longer accepted by the dashboard.
+      const writeBlocked = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases`, {
         method: 'POST',
         headers: { Cookie: cookie, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: '/read/note.txt', label: 'Bad write', mode: 'write' }),
+        body: JSON.stringify({ path: '/write', label: 'Bad write', mode: 'write' }),
       });
-      expect(writeRejected.status).toBe(400);
+      expect(writeBlocked.status).toBe(400);
+      expect((await writeBlocked.json() as { error: string }).error).toBe('invalid_mode');
 
-      const writeLease = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases`, {
+      // Upload mode on a file target is rejected — needs a folder.
+      const uploadOnFile = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases`, {
         method: 'POST',
         headers: { Cookie: cookie, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: '/write/draft.txt', label: 'Writable draft', mode: 'write' }),
+        body: JSON.stringify({ path: '/read/note.txt', label: 'Bad upload', mode: 'upload' }),
       });
-      expect(writeLease.status).toBe(201);
-      const writeBody = await writeLease.json() as { lease: { id: string; url: string; permissions: string[] } };
-      expect(writeBody.lease.permissions).toEqual(['read', 'write']);
+      expect(uploadOnFile.status).toBe(400);
+      expect((await uploadOnFile.json() as { error: string }).error).toBe('mode_requires_folder');
 
-      const writableUrl = new URL(writeBody.lease.url);
-      const replace = await fetch(`${writableUrl.origin}${writableUrl.pathname}/files/write-draft.txt?token=${writableUrl.searchParams.get('token')}`, {
+      // Upload mode on a read-only mount is rejected.
+      const uploadOnReadOnly = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: '/read', label: 'Bad upload', mode: 'upload' }),
+      });
+      expect(uploadOnReadOnly.status).toBe(400);
+      expect((await uploadOnReadOnly.json() as { error: string }).error).toBe('mount_read_only');
+
+      // Two-way lease (read + upload) on a writable folder.
+      const twoWay = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: '/write', label: 'Inbox', mode: 'two-way' }),
+      });
+      expect(twoWay.status).toBe(201);
+      const twoWayBody = await twoWay.json() as { lease: { id: string; url: string; permissions: string[] } };
+      expect(twoWayBody.lease.permissions).toEqual(['read', 'upload']);
+
+      const twoWayUrl = new URL(twoWayBody.lease.url);
+      const token = twoWayUrl.searchParams.get('token');
+
+      // First upload of report.txt → stored as-is.
+      const firstUpload = await fetch(`${twoWayUrl.origin}${twoWayUrl.pathname}/files/report.txt?token=${token}`, {
         method: 'PUT',
-        body: 'new draft',
+        body: 'first',
       });
-      expect(replace.status).toBe(200);
-      expect(fs.readFileSync(path.join(writeRoot, 'draft.txt'), 'utf-8')).toBe('new draft');
+      expect(firstUpload.status).toBe(201);
+      const firstBody = await firstUpload.json() as { path: string; filename: string };
+      expect(firstBody.filename).toBe('report.txt');
+      expect(firstBody.path).toBe('/report.txt');
 
-      const remove = await fetch(`${writableUrl.origin}${writableUrl.pathname}/files/write-draft.txt?token=${writableUrl.searchParams.get('token')}`, {
+      // Second upload of report.txt → suffixed to report (2).txt; the original file is preserved.
+      const secondUpload = await fetch(`${twoWayUrl.origin}${twoWayUrl.pathname}/files/report.txt?token=${token}`, {
+        method: 'PUT',
+        body: 'second',
+      });
+      expect(secondUpload.status).toBe(201);
+      const secondBody = await secondUpload.json() as { path: string; filename: string };
+      expect(secondBody.filename).toBe('report (2).txt');
+      expect(secondBody.path).toBe('/report (2).txt');
+      expect(fs.readFileSync(path.join(writeRoot, 'report.txt'), 'utf-8')).toBe('first');
+      expect(fs.readFileSync(path.join(writeRoot, 'report (2).txt'), 'utf-8')).toBe('second');
+
+      // Third upload bumps to (3).
+      const thirdUpload = await fetch(`${twoWayUrl.origin}${twoWayUrl.pathname}/files/report.txt?token=${token}`, {
+        method: 'PUT',
+        body: 'third',
+      });
+      expect(thirdUpload.status).toBe(201);
+      expect(((await thirdUpload.json()) as { filename: string }).filename).toBe('report (3).txt');
+
+      // Two-way leases cannot DELETE existing files.
+      const deleteBlocked = await fetch(`${twoWayUrl.origin}${twoWayUrl.pathname}/files/report.txt?token=${token}`, {
         method: 'DELETE',
       });
-      expect(remove.status).toBe(200);
-      expect(fs.existsSync(path.join(writeRoot, 'draft.txt'))).toBe(false);
+      expect(deleteBlocked.status).toBe(403);
+      expect(fs.existsSync(path.join(writeRoot, 'report.txt'))).toBe(true);
 
+      // Revoke the read lease.
       const revoke = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases/${readBody.lease.id}/revoke`, {
         method: 'POST',
         headers: { Cookie: cookie },
       });
       expect(revoke.status).toBe(200);
       expect(listLeases(leaseStorePath).find((lease) => lease.id === readBody.lease.id)?.revokedAt).toBeTruthy();
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('adds, edits, removes mounts and browses the local filesystem through dashboard APIs', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-mounts-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const leaseStorePath = path.join(tmp, '.leases.json');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    const configPath = path.join(tmp, 'config.yaml');
+    const mountRoot = path.join(tmp, 'photos');
+    const otherRoot = path.join(tmp, 'reports');
+    fs.mkdirSync(mountRoot, { recursive: true });
+    fs.mkdirSync(otherRoot, { recursive: true });
+    fs.writeFileSync(path.join(mountRoot, 'one.txt'), 'one', 'utf-8');
+    createPrivilegedUser(usersPath, { username: 'admin', password: 'correct horse battery staple', admin: true });
+    await saveConfig(configPath, parseConfig({ version: 1 }));
+
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      configPath,
+      leaseMounts: () => readConfig(configPath).mounts,
+      leaseStorePath,
+      privilegedUsersPath: usersPath,
+    });
+    try {
+      const cookie = await loginDashboard(server.port, 'admin', 'correct horse battery staple');
+
+      const initialMounts = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/mounts`, { headers: { Cookie: cookie } });
+      const initialBody = await initialMounts.json() as { canManage: boolean; mounts: unknown[] };
+      expect(initialBody.canManage).toBe(true);
+      expect(initialBody.mounts).toEqual([]);
+
+      const add = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/mounts`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ root: mountRoot, path: '/photos', writeAccess: false }),
+      });
+      expect(add.status).toBe(201);
+      const addBody = await add.json() as { mount: { name: string; path: string; writeAccess: boolean } };
+      expect(addBody.mount.path).toBe('/photos');
+      expect(addBody.mount.writeAccess).toBe(false);
+
+      const persistedAfterAdd = readConfig(configPath);
+      expect(persistedAfterAdd.mounts).toHaveLength(1);
+      expect(persistedAfterAdd.mounts[0]?.path).toBe('/photos');
+
+      const filesListing = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/files?path=/photos`, {
+        headers: { Cookie: cookie },
+      });
+      expect(filesListing.status).toBe(200);
+      const filesBody = await filesListing.json() as { entries: { name: string }[] };
+      expect(filesBody.entries.map((entry) => entry.name)).toContain('one.txt');
+
+      const duplicate = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/mounts`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ root: otherRoot, path: '/photos' }),
+      });
+      expect(duplicate.status).toBe(400);
+
+      const edit = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/mounts/${encodeURIComponent(addBody.mount.name)}`, {
+        method: 'PATCH',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ writeAccess: true, description: 'family photos' }),
+      });
+      expect(edit.status).toBe(200);
+      const editBody = await edit.json() as { mount: { writeAccess: boolean; description?: string } };
+      expect(editBody.mount.writeAccess).toBe(true);
+      expect(editBody.mount.description).toBe('family photos');
+
+      const browse = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/browse?path=${encodeURIComponent(tmp)}`, {
+        headers: { Cookie: cookie },
+      });
+      expect(browse.status).toBe(200);
+      const browseBody = await browse.json() as { path: string; entries: { name: string; type: string }[] };
+      expect(browseBody.path).toBe(tmp);
+      expect(browseBody.entries.map((entry) => entry.name)).toEqual(expect.arrayContaining(['photos', 'reports']));
+
+      const remove = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/mounts/${encodeURIComponent(addBody.mount.name)}`, {
+        method: 'DELETE',
+        headers: { Cookie: cookie },
+      });
+      expect(remove.status).toBe(200);
+      expect(readConfig(configPath).mounts).toEqual([]);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('rotates a lease token, invalidating the old URL and issuing a new one', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-rotate-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const leaseStorePath = path.join(tmp, '.leases.json');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    const readRoot = path.join(tmp, 'read');
+    fs.mkdirSync(readRoot, { recursive: true });
+    fs.writeFileSync(path.join(readRoot, 'note.txt'), 'hello', 'utf-8');
+    createPrivilegedUser(usersPath, { username: 'admin', password: 'correct horse battery staple' });
+
+    const config = parseConfig({
+      version: 1,
+      mounts: [{ name: 'read', type: 'local_folder', path: '/read', root: readRoot }],
+    });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: config.mounts,
+      leaseStorePath,
+      privilegedUsersPath: usersPath,
+    });
+    try {
+      const cookie = await loginDashboard(server.port, 'admin', 'correct horse battery staple');
+      const create = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: '/read/note.txt', label: 'Note', mode: 'read', expires: '1h' }),
+      });
+      expect(create.status).toBe(201);
+      const createBody = await create.json() as { lease: { id: string; url: string } };
+      const originalUrl = new URL(createBody.lease.url);
+      const originalToken = originalUrl.searchParams.get('token');
+      expect(originalToken).toBeTruthy();
+
+      const rotate = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases/${encodeURIComponent(createBody.lease.id)}/rotate`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      expect(rotate.status).toBe(200);
+      const rotated = await rotate.json() as { lease: { url: string } };
+      const newUrl = new URL(rotated.lease.url);
+      const newToken = newUrl.searchParams.get('token');
+      expect(newToken).toBeTruthy();
+      expect(newToken).not.toBe(originalToken);
+
+      const oldFetch = await fetch(`${originalUrl.origin}/lease/${createBody.lease.id}/files?token=${originalToken}`);
+      expect(oldFetch.status).toBe(401);
+
+      const newFetch = await fetch(`${newUrl.origin}/lease/${createBody.lease.id}/files?token=${newToken}`);
+      expect(newFetch.status).toBe(200);
+
+      const revoked = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases/${encodeURIComponent(createBody.lease.id)}/revoke`, {
+        method: 'POST',
+        headers: { Cookie: cookie },
+      });
+      expect(revoked.status).toBe(200);
+      const rotateRevoked = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases/${encodeURIComponent(createBody.lease.id)}/rotate`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      expect(rotateRevoked.status).toBe(410);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses mount mutation when no configPath is wired', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-no-config-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const leaseStorePath = path.join(tmp, '.leases.json');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    createPrivilegedUser(usersPath, { username: 'admin', password: 'correct horse battery staple', admin: true });
+
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: [],
+      leaseStorePath,
+      privilegedUsersPath: usersPath,
+    });
+    try {
+      const cookie = await loginDashboard(server.port, 'admin', 'correct horse battery staple');
+      const mounts = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/mounts`, { headers: { Cookie: cookie } });
+      const mountsBody = await mounts.json() as { canManage: boolean };
+      expect(mountsBody.canManage).toBe(false);
+
+      const blocked = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/mounts`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ root: tmp, path: '/blocked' }),
+      });
+      expect(blocked.status).toBe(403);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses mount mutation and local browse for non-admin dashboard users', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-non-admin-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const leaseStorePath = path.join(tmp, '.leases.json');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    const configPath = path.join(tmp, 'config.yaml');
+    const mountRoot = path.join(tmp, 'photos');
+    fs.mkdirSync(mountRoot, { recursive: true });
+    createPrivilegedUser(usersPath, { username: 'member', password: 'correct horse battery staple' });
+    await saveConfig(configPath, parseConfig({
+      version: 1,
+      mounts: [{ name: 'photos', type: 'local_folder', path: '/photos', root: mountRoot }],
+    }));
+
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      configPath,
+      leaseMounts: () => readConfig(configPath).mounts,
+      leaseStorePath,
+      privilegedUsersPath: usersPath,
+    });
+    try {
+      const cookie = await loginDashboard(server.port, 'member', 'correct horse battery staple');
+
+      const me = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/me`, { headers: { Cookie: cookie } });
+      expect(((await me.json()) as { user: { admin: boolean } }).user.admin).toBe(false);
+
+      const mounts = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/mounts`, { headers: { Cookie: cookie } });
+      const mountsBody = await mounts.json() as { canManage: boolean; mounts: { root?: string }[] };
+      expect(mountsBody.canManage).toBe(false);
+      expect(mountsBody.mounts[0]?.root).toBeUndefined();
+
+      const browse = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/browse?path=${encodeURIComponent(tmp)}`, { headers: { Cookie: cookie } });
+      expect(browse.status).toBe(403);
+
+      const addBlocked = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/mounts`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ root: mountRoot }),
+      });
+      expect(addBlocked.status).toBe(403);
+
+      const patchBlocked = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/mounts/photos`, {
+        method: 'PATCH',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ writeAccess: true }),
+      });
+      expect(patchBlocked.status).toBe(403);
+
+      const deleteBlocked = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/mounts/photos`, {
+        method: 'DELETE',
+        headers: { Cookie: cookie },
+      });
+      expect(deleteBlocked.status).toBe(403);
+
+      // Non-admin can still create leases for already-mounted paths.
+      const leaseOk = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: '/photos', label: 'Read photos', mode: 'read', expires: '1h' }),
+      });
+      expect(leaseOk.status).toBe(201);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('auto-mount-name uses basename only and suffixes on collision', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-name-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const leaseStorePath = path.join(tmp, '.leases.json');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    const configPath = path.join(tmp, 'config.yaml');
+    const docs1 = path.join(tmp, 'parent-a', 'docs');
+    const docs2 = path.join(tmp, 'parent-b', 'docs');
+    fs.mkdirSync(docs1, { recursive: true });
+    fs.mkdirSync(docs2, { recursive: true });
+    createPrivilegedUser(usersPath, { username: 'admin', password: 'correct horse battery staple', admin: true });
+    await saveConfig(configPath, parseConfig({ version: 1 }));
+
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      configPath,
+      leaseMounts: () => readConfig(configPath).mounts,
+      leaseStorePath,
+      privilegedUsersPath: usersPath,
+    });
+    try {
+      const cookie = await loginDashboard(server.port, 'admin', 'correct horse battery staple');
+
+      const first = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/mounts`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ root: docs1, path: '/docs-a' }),
+      });
+      expect(first.status).toBe(201);
+      expect(((await first.json()) as { mount: { name: string } }).mount.name).toBe('docs');
+
+      const second = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/mounts`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ root: docs2, path: '/docs-b' }),
+      });
+      expect(second.status).toBe(201);
+      expect(((await second.json()) as { mount: { name: string } }).mount.name).toBe('docs-2');
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('persists dashboard activity to the audit log', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-audit-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const leaseStorePath = path.join(tmp, '.leases.json');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    const auditPath = path.join(tmp, 'audit.log');
+    const mountRoot = path.join(tmp, 'docs');
+    fs.mkdirSync(mountRoot, { recursive: true });
+    fs.writeFileSync(path.join(mountRoot, 'note.txt'), 'hello', 'utf-8');
+    createPrivilegedUser(usersPath, { username: 'sarah', password: 'correct horse battery staple' });
+
+    const config = parseConfig({
+      version: 1,
+      mounts: [{ name: 'docs', type: 'local_folder', path: '/docs', root: mountRoot }],
+    });
+    const audit = createAuditLogger(auditPath);
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: config.mounts,
+      leaseStorePath,
+      privilegedUsersPath: usersPath,
+      requestLog: (entry) => audit.recordHttp(entry),
+    });
+    try {
+      // A failed login still produces an audit entry.
+      await fetch(`http://127.0.0.1:${server.port}/dashboard/api/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: 'sarah', password: 'wrong' }),
+      });
+
+      const cookie = await loginDashboard(server.port, 'sarah', 'correct horse battery staple');
+      await fetch(`http://127.0.0.1:${server.port}/dashboard/api/files?path=/`, { headers: { Cookie: cookie } });
+      const leaseResp = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: '/docs/note.txt', label: 'Note', mode: 'read', expires: '1h' }),
+      });
+      const leaseBody = await leaseResp.json() as { lease: { id: string; url: string } };
+      const leaseUrl = new URL(leaseBody.lease.url);
+      await fetch(`${leaseUrl.origin}/lease/${leaseBody.lease.id}/files?token=${leaseUrl.searchParams.get('token')}`);
+
+      const lines = fs.readFileSync(auditPath, 'utf-8').split('\n').filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+      const kinds = lines.map((entry) => entry.kind);
+      expect(kinds).toContain('dashboard.login'); // includes both invalid_credentials and ok rows
+      expect(kinds).toContain('dashboard.files');
+      expect(kinds).toContain('dashboard.leases');
+      expect(kinds).toContain('lease.request');
+      // every entry is tagged http and carries source ip
+      for (const entry of lines) {
+        expect(entry.type).toBe('http');
+        expect(typeof entry.ip).toBe('string');
+        expect(entry.ip).toMatch(/^(127\.0\.0\.1|::1)$/);
+      }
+      // a failed login lands as 401 with detail invalid_credentials.
+      const failedLogin = lines.find((entry) => entry.kind === 'dashboard.login' && entry.detail === 'invalid_credentials');
+      expect(failedLogin?.status).toBe(401);
+      // a successful lease fetch lands as 200 with the lease id in detail.
+      const leaseFetch = lines.find((entry) => entry.kind === 'lease.request' && entry.status === 200);
+      expect(leaseFetch).toBeDefined();
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('serves a dashboard HTML page with breadcrumbs, lease tabs, and mount management controls', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-html-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const leaseStorePath = path.join(tmp, '.leases.json');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: [],
+      leaseStorePath,
+      privilegedUsersPath: usersPath,
+    });
+    try {
+      const response = await fetch(`http://127.0.0.1:${server.port}/dashboard`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-type')).toMatch(/text\/html/);
+      const html = await response.text();
+      expect(html).toContain('id="crumbs"');
+      expect(html).toContain('data-test="lease-tabs"');
+      expect(html).toContain('id="add-mount"');
+      expect(html).toContain('Sources');
+      expect(html).toContain('Shared links');
+      expect(html).toContain('id="mount-modal"');
+      expect(html).toContain('id="picker-modal"');
+      expect(html).toContain('id="lease-modal"');
+      expect(html).toContain('id="lease-tiles"');
+      expect(html).toContain('id="copy-url"');
+      expect(html).toContain('data-mode="upload"');
+      expect(html).toContain('data-mode="two-way"');
     } finally {
       await server.close();
       fs.rmSync(tmp, { recursive: true, force: true });

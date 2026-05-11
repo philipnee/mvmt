@@ -7,6 +7,7 @@ import { MvmtConfig, TunnelConfig } from '../config/schema.js';
 import {
   cloudflareNamedTunnelCommand,
   defaultTunnelCommand,
+  formatDashboardPublicUrl,
   formatMcpPublicUrl,
   missingTunnelDependency,
   normalizeTunnelBaseUrl,
@@ -86,7 +87,7 @@ export async function configureTunnel(options: TunnelCommandOptions = {}): Promi
     printTunnelEnabledWithNoTokens(applied.warning);
   }
   if (tunnel.url) {
-    console.log(`public URL  ${chalk.yellow(formatMcpPublicUrl(tunnel.url))}`);
+    printPublicTunnelUrls(tunnel.url);
   }
 
   try {
@@ -101,7 +102,7 @@ export async function configureTunnel(options: TunnelCommandOptions = {}): Promi
       token,
     );
     if (runtime.publicUrl) {
-      console.log(`public URL  ${chalk.yellow(formatMcpPublicUrl(runtime.publicUrl))}`);
+      printPublicTunnelUrls(runtime.publicUrl);
     } else {
       console.log(chalk.dim('Tunnel config applied. mvmt is still running locally.'));
     }
@@ -226,7 +227,8 @@ export function printTunnelSummary(config: MvmtConfig, runtime?: TunnelRuntimeSt
   console.log(`  provider: ${config.server.tunnel.provider}`);
   console.log(`  command: ${config.server.tunnel.command}`);
   if (config.server.tunnel.url) {
-    console.log(`  public URL: ${formatMcpPublicUrl(config.server.tunnel.url)}`);
+    console.log(`  dashboard: ${formatDashboardPublicUrl(config.server.tunnel.url)}`);
+    console.log(`  MCP: ${formatMcpPublicUrl(config.server.tunnel.url)}`);
   }
   if (config.server.access !== 'tunnel') {
     console.log(`  ${chalk.dim('Tunnel details are saved, but tunnel access is disabled.')}`);
@@ -240,7 +242,10 @@ export function printTunnelSummary(config: MvmtConfig, runtime?: TunnelRuntimeSt
   }
   console.log(`  status: ${runtime.running ? 'running' : 'stopped'}`);
   if (runtime.command) console.log(`  command: ${runtime.command}`);
-  if (runtime.publicUrl) console.log(`  public URL: ${formatMcpPublicUrl(runtime.publicUrl)}`);
+  if (runtime.publicUrl) {
+    console.log(`  dashboard: ${formatDashboardPublicUrl(runtime.publicUrl)}`);
+    console.log(`  MCP: ${formatMcpPublicUrl(runtime.publicUrl)}`);
+  }
 }
 
 export function applyTunnelConfig(
@@ -440,7 +445,7 @@ async function sendTunnelRequest(configOverride: string | undefined, type: strin
 
 function printTunnelActionResult(runtime: TunnelRuntimeStatus): void {
   if (runtime.publicUrl) {
-    console.log(`public URL  ${chalk.yellow(formatMcpPublicUrl(runtime.publicUrl))}`);
+    printPublicTunnelUrls(runtime.publicUrl);
     return;
   }
 
@@ -455,6 +460,11 @@ function printTunnelActionResult(runtime: TunnelRuntimeStatus): void {
   }
 
   console.log(chalk.dim('Tunnel is running, but no public URL has been detected yet.'));
+}
+
+function printPublicTunnelUrls(publicUrl: string): void {
+  console.log(`dashboard   ${chalk.yellow(formatDashboardPublicUrl(publicUrl))}`);
+  console.log(`MCP         ${chalk.dim(formatMcpPublicUrl(publicUrl))}`);
 }
 
 function printApiTokenWarningForConfig(configOverride: string | undefined): void {

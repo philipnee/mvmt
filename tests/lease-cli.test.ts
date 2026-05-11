@@ -164,6 +164,33 @@ describe('lease CLI helpers', () => {
     expect(logSpy.mock.calls.flat().join('\n')).toContain('Mode: upload only');
   });
 
+  it('creates a two-way folder lease with browse and upload permissions', async () => {
+    const folder = path.join(tmp, 'Shared Drop');
+    await fs.mkdir(folder);
+
+    await createFolderLease(folder, {
+      config: configPath,
+      leaseStorePath,
+      label: 'Sarah exchange',
+      mode: 'two-way',
+      expires: '1h',
+    });
+
+    const config = readConfig(configPath);
+    expect(config.mounts[0]).toMatchObject({
+      name: 'lease-write-shared-drop',
+      path: '/Shared-Drop',
+      root: folder,
+      writeAccess: true,
+    });
+    expect(listLeases(leaseStorePath)[0]).toMatchObject({
+      label: 'Sarah exchange',
+      path: '/Shared-Drop',
+      permissions: ['read', 'upload'],
+    });
+    expect(logSpy.mock.calls.flat().join('\n')).toContain('Mode: browse/download/upload');
+  });
+
   it('does not add paths to upload-only leases', async () => {
     const folder = path.join(tmp, 'Phone Drop');
     const other = path.join(tmp, 'Other Drop');

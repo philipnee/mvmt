@@ -17,7 +17,7 @@ describe('InteractiveAuditLogger', () => {
 
   beforeEach(() => {
     output = [];
-    inner = { record: vi.fn() };
+    inner = { record: vi.fn(), recordHttp: vi.fn() };
     logger = new InteractiveAuditLogger(inner);
     logger.setWriter((msg) => output.push(msg));
   });
@@ -42,9 +42,18 @@ describe('InteractiveAuditLogger', () => {
     expect(output.length).toBe(0);
   });
 
-  it('records HTTP entries only to writer', () => {
+  it('records HTTP entries to inner logger and writer', () => {
     const entry = { ts: new Date().toISOString(), kind: 'test', method: 'GET', path: '/test', status: 200 };
     logger.recordHttp(entry);
+    expect(inner.recordHttp).toHaveBeenCalledWith(entry);
+    expect(output.length).toBe(1);
+    expect(output[0]).toContain('GET /test');
+  });
+
+  it('streams HTTP entries only to writer', () => {
+    const entry = { ts: new Date().toISOString(), kind: 'test', method: 'GET', path: '/test', status: 200 };
+    logger.streamHttp(entry);
+    expect(inner.recordHttp).not.toHaveBeenCalled();
     expect(output.length).toBe(1);
     expect(output[0]).toContain('GET /test');
   });
@@ -105,10 +114,12 @@ describe('Interactive help', () => {
   it('presents leases as the primary surface', () => {
     const lines = captureConsole(() => printInteractiveHelp());
 
+    expect(lines).toContain('  dashboard           show dashboard URLs');
     expect(lines).toContain('  lease               list leases');
     expect(lines).toContain('  lease create        create a path lease');
     expect(lines).toContain('  lease add-path      add paths to a lease');
     expect(lines).toContain('  lease revoke        revoke a lease');
+    expect(lines).toContain('  url                 show dashboard and MCP URLs');
     expect(lines).toContain('  advanced            show mount/token/MCP commands');
     expect(lines).not.toContain('  token               list scoped API tokens');
     expect(lines).not.toContain('  mounts      list configured mounts');

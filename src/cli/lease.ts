@@ -276,12 +276,14 @@ function permissionsFromOptions(options: CreateLeaseOptions): LeasePermission[] 
   if (mode === 'read' || mode === 'download') return ['read'];
   if (mode === 'write' || mode === 'writable') return ['read', 'write'];
   if (mode === 'upload') return ['upload'];
-  throw new Error('Invalid lease mode. Use --mode read, --mode write, or --mode upload.');
+  if (mode === 'two-way' || mode === 'two_way' || mode === 'read+upload') return ['read', 'upload'];
+  throw new Error('Invalid lease mode. Use --mode read, --mode upload, --mode two-way, or --mode write.');
 }
 
 function formatPermissions(permissions: readonly LeasePermission[]): string {
   if (permissions.length === 1 && permissions[0] === 'read') return 'browse/download';
   if (permissions.includes('read') && permissions.includes('write')) return 'browse/download/write';
+  if (permissions.includes('read') && permissions.includes('upload')) return 'browse/download/upload';
   if (permissions.length === 1 && permissions[0] === 'upload') return 'upload only';
   return permissions.join(', ');
 }

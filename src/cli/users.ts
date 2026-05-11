@@ -4,6 +4,7 @@ import {
   createPrivilegedUser,
   defaultPrivilegedUsersPath,
   listPrivilegedUsers,
+  setPrivilegedUserAdmin,
 } from '../dashboard/users.js';
 
 export interface PrivilegedUserCommandOptions {
@@ -13,6 +14,7 @@ export interface PrivilegedUserCommandOptions {
 
 export interface CreatePrivilegedUserOptions extends PrivilegedUserCommandOptions {
   password?: string;
+  admin?: boolean;
 }
 
 export async function listPrivilegedUsersCommand(options: PrivilegedUserCommandOptions = {}): Promise<void> {
@@ -22,6 +24,7 @@ export async function listPrivilegedUsersCommand(options: PrivilegedUserCommandO
     createdAt: user.createdAt,
     lastLoginAt: user.lastLoginAt,
     disabled: user.disabled ?? false,
+    admin: Boolean(user.admin),
   }));
 
   if (options.json) {
@@ -36,7 +39,8 @@ export async function listPrivilegedUsersCommand(options: PrivilegedUserCommandO
   }
   for (const user of users) {
     const state = user.disabled ? chalk.yellow('disabled') : chalk.green('active');
-    console.log(`  ${user.username.padEnd(24)} ${state}  created ${user.createdAt}`);
+    const role = user.admin ? chalk.yellow('admin') : chalk.dim('member');
+    console.log(`  ${user.username.padEnd(24)} ${state}  ${role}  created ${user.createdAt}`);
   }
 }
 
@@ -50,15 +54,30 @@ export async function addPrivilegedUserCommand(
     mask: '*',
     validate: (value) => value.length >= 8 || 'Password must be at least 8 characters.',
   });
-  const user = createPrivilegedUser(resolveUsersPath(options), { username, password });
+  const user = createPrivilegedUser(resolveUsersPath(options), { username, password, admin: options.admin });
 
   if (options.json) {
-    console.log(JSON.stringify({ user: { id: user.id, username: user.username, createdAt: user.createdAt } }, null, 2));
+    console.log(JSON.stringify({ user: { id: user.id, username: user.username, createdAt: user.createdAt, admin: Boolean(user.admin) } }, null, 2));
     return;
   }
 
-  console.log(chalk.green('Privileged user created'));
+  console.log(chalk.green(user.admin ? 'Admin user created' : 'Privileged user created'));
   console.log(`  Username: ${user.username}`);
+  if (user.admin) console.log(chalk.yellow('  Role: admin (can manage mounts and browse local files via dashboard)'));
+}
+
+export async function setPrivilegedUserAdminCommand(
+  username: string | undefined,
+  admin: boolean,
+  options: PrivilegedUserCommandOptions = {},
+): Promise<void> {
+  if (!username) throw new Error(`Username is required. Example: mvmt users ${admin ? 'grant' : 'revoke'} sarah`);
+  const user = setPrivilegedUserAdmin(resolveUsersPath(options), username, admin);
+  if (options.json) {
+    console.log(JSON.stringify({ user: { id: user.id, username: user.username, admin: Boolean(user.admin) } }, null, 2));
+    return;
+  }
+  console.log(chalk.green(admin ? `Granted admin to ${user.username}` : `Revoked admin from ${user.username}`));
 }
 
 function resolveUsersPath(options: PrivilegedUserCommandOptions): string {

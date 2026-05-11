@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   cloudflareNamedTunnelCommand,
   extractPublicUrl,
+  formatDashboardPublicUrl,
   formatMcpPublicUrl,
   missingTunnelDependency,
   normalizeTunnelBaseUrl,
@@ -57,6 +58,12 @@ describe('tunnel utilities', () => {
   it('formats an MCP URL from the public tunnel base URL', () => {
     expect(formatMcpPublicUrl('https://quiet-river.trycloudflare.com/')).toBe(
       'https://quiet-river.trycloudflare.com/mcp',
+    );
+  });
+
+  it('formats a dashboard URL from the public tunnel base URL', () => {
+    expect(formatDashboardPublicUrl('https://quiet-river.trycloudflare.com/')).toBe(
+      'https://quiet-river.trycloudflare.com/dashboard',
     );
   });
 

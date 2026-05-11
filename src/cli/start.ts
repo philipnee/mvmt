@@ -13,7 +13,7 @@ import { createAuditLogger, AUDIT_LOG_PATH } from '../utils/audit.js';
 import { getControlSocketPath, startJsonControlServer } from '../utils/control.js';
 import { createLogger, Logger } from '../utils/logger.js';
 import { TOKEN_PATH, verifySessionTokenValue } from '../utils/token.js';
-import { formatMcpPublicUrl } from '../utils/tunnel.js';
+import { formatDashboardPublicUrl, formatMcpPublicUrl } from '../utils/tunnel.js';
 import { initializeConnectors, LoadedConnector } from './connector-loader.js';
 import { TunnelController } from './tunnel-controller.js';
 import { InteractiveAuditLogger, startInteractivePrompt, formatHttpRequestEntry } from './interactive.js';
@@ -145,12 +145,18 @@ export async function start(options: StartOptions = {}): Promise<void> {
       resolvePublicBaseUrl: () => tunnelController.publicUrl,
       clients: createLiveClientsResolver(configPath, config, textIndex),
       leaseMounts: createLiveMountsResolver(configPath, config, textIndex),
+      configPath,
       allowLegacyDefaultClient: () => config.server.access !== 'tunnel' || legacyTunnelOverrideEnabled(),
-      requestLog: interactiveMode
-        ? (entry) => (audit as InteractiveAuditLogger).recordHttp(entry)
-        : options.verbose
-          ? (entry) => logger.debug(formatHttpRequestEntry(entry))
-          : undefined,
+      // HTTP requests are always persisted to ~/.mvmt/audit.log so that
+      // dashboard logins, mount changes, lease creation, and lease URL
+      // fetches show up in the same audit trail as MCP tool calls. In
+      // interactive mode they also stream to the TUI; in --verbose they
+      // additionally mirror to logger.debug.
+      requestLog: (entry) => {
+        audit.recordHttp(entry);
+        if (interactiveMode) (audit as InteractiveAuditLogger).streamHttp(entry);
+        else if (options.verbose) logger.debug(formatHttpRequestEntry(entry));
+      },
     });
     cleanupTasks.push(() => httpServer.close());
     cleanupTasks.push(() => tunnelController.stop());
@@ -424,10 +430,11 @@ function printStartupBanner(
 ): void {
   console.log('');
   console.log(chalk.cyan(MVMT_LOGO));
-  console.log(`${chalk.bold('mvmt running')} -> ${chalk.cyan(`http://127.0.0.1:${port}/mcp`)}`);
+  console.log(`${chalk.bold('mvmt running')} -> ${chalk.cyan(localDashboardUrl(port))}`);
   if (publicUrl) {
-    console.log(`${chalk.bold('public URL  ')} -> ${chalk.yellow(formatMcpPublicUrl(publicUrl))}`);
+    console.log(`${chalk.bold('public UI')}    -> ${chalk.yellow(formatDashboardPublicUrl(publicUrl))}`);
   }
+  console.log(`${chalk.dim('MCP endpoint')} -> ${chalk.dim(localMcpUrl(port))}`);
   console.log('');
   console.log(chalk.bold('Runtime:'));
   for (const entry of loaded) {
@@ -445,9 +452,10 @@ function printStartupBanner(
     console.log('');
   }
   if (interactiveMode) {
-    console.log(`${chalk.bold('Leases')}       type ${chalk.cyan('lease')} to list or ${chalk.cyan('lease create')} to share paths`);
-    console.log(`${chalk.bold('Tool-call log')} ${AUDIT_LOG_PATH}`);
-    console.log(`${chalk.bold('Live events')}   lease, OAuth, MCP auth, and tool-call attempts`);
+    console.log(`${chalk.bold('Dashboard')}    manage sources, files, and leases in a browser`);
+    console.log(`${chalk.bold('Leases')}       type ${chalk.cyan('lease create')} to make a link from the terminal`);
+    console.log(`${chalk.bold('Events')}       lease, dashboard, MCP auth, and tool-call attempts`);
+    console.log(`${chalk.dim(`Audit log: ${AUDIT_LOG_PATH}`)}`);
     console.log(`\n${chalk.dim('Interactive mode: type "help" for commands.')}`);
   } else {
     console.log(`${chalk.bold('Session')}      ${TOKEN_PATH}`);
@@ -455,10 +463,18 @@ function printStartupBanner(
     console.log('\nCreate scoped client access with:');
     console.log(`  ${chalk.cyan('mvmt token add <name> --scope <mount>:read')}\n`);
     console.log('Connect a local HTTP client:');
-    console.log(`  URL: ${chalk.cyan(`http://127.0.0.1:${port}/mcp`)}`);
+    console.log(`  URL: ${chalk.cyan(localMcpUrl(port))}`);
     console.log('  Header: Authorization: Bearer <token>');
     console.log(chalk.dim('  Use `mvmt token session` only for legacy local testing with no scoped tokens configured.'));
   }
+}
+
+function localDashboardUrl(port: number): string {
+  return `http://127.0.0.1:${port}/dashboard`;
+}
+
+function localMcpUrl(port: number): string {
+  return `http://127.0.0.1:${port}/mcp`;
 }
 
 function parsePort(value: string | undefined): number | undefined {

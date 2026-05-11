@@ -22,7 +22,7 @@ import {
   streamTunnelLogs,
 } from '../src/cli/tunnel.js';
 import { rotateToken, showToken, showTokenSummary } from '../src/cli/token.js';
-import { addPrivilegedUserCommand, listPrivilegedUsersCommand } from '../src/cli/users.js';
+import { addPrivilegedUserCommand, listPrivilegedUsersCommand, setPrivilegedUserAdminCommand } from '../src/cli/users.js';
 import { maybePrintUpdateNotice, readPackageInfo } from '../src/utils/version.js';
 
 const packageInfo = readPackageInfo();
@@ -198,7 +198,7 @@ leaseCommand
   .description('Create one browser/MCP lease for one or more paths')
   .option('-c, --config <path>', 'Config file path')
   .requiredOption('--label <text>', 'Required lease label, such as "Sarah - tax docs"')
-  .option('--mode <mode>', 'Lease mode: read, write, or upload', 'read')
+  .option('--mode <mode>', 'Lease mode: read, upload, two-way, or write', 'read')
   .option('--upload', 'Shortcut for --mode upload')
   .option('--expires <duration>', 'Lease lifetime, such as 24h, 7d, or never')
   .option('--ttl <duration>', 'Alias for --expires')
@@ -208,6 +208,7 @@ leaseCommand
     ['mvmt lease create ~/Downloads/report.pdf --label "Report"', 'create a 24h lease for one file'],
     ['mvmt lease create ~/Documents/Shared --label "Writable folder" --mode write', 'create a writable lease'],
     ['mvmt lease create ~/DropBox --label "Sarah uploads" --mode upload', 'create an upload-only folder lease'],
+    ['mvmt lease create ~/DropBox --label "Sarah exchange" --mode two-way', 'create a browse + upload folder lease'],
     ['mvmt lease create ~/Photos --label "Family photos" --expires never', 'lease until revoked'],
   ]))
   .action(async (paths: string[], options: { config?: string; label?: string; mode?: string; upload?: boolean; expires?: string; ttl?: string; json?: boolean }, command: Command) => {
@@ -257,14 +258,37 @@ usersCommand
   .command('add <username>')
   .description('Create a privileged dashboard user')
   .option('--password <password>', 'Password for non-interactive setup')
+  .option('--admin', 'Grant admin (can manage mounts and browse local files via dashboard)')
   .option('--json', 'Output as JSON')
   .addHelpText('after', examples([
     ['mvmt users add sarah', 'prompt for a password and create sarah'],
     ['mvmt users add sarah --password "change-me-now"', 'non-interactive setup'],
+    ['mvmt users add owner --admin', 'create an admin who can add/remove mounts from the dashboard'],
   ]))
-  .action(async (username: string | undefined, _options: { password?: string; json?: boolean }, command: Command) => {
+  .action(async (username: string | undefined, _options: { password?: string; json?: boolean; admin?: boolean }, command: Command) => {
     await addPrivilegedUserCommand(username, {
       password: command.getOptionValue('password') as string | undefined,
+      admin: Boolean(command.getOptionValue('admin')),
+      json: Boolean(command.getOptionValue('json') || command.parent?.getOptionValue('json')),
+    });
+  });
+
+usersCommand
+  .command('grant <username>')
+  .description('Grant admin to an existing dashboard user')
+  .option('--json', 'Output as JSON')
+  .action(async (username: string | undefined, _options: { json?: boolean }, command: Command) => {
+    await setPrivilegedUserAdminCommand(username, true, {
+      json: Boolean(command.getOptionValue('json') || command.parent?.getOptionValue('json')),
+    });
+  });
+
+usersCommand
+  .command('revoke <username>')
+  .description('Revoke admin from a dashboard user (keeps the account)')
+  .option('--json', 'Output as JSON')
+  .action(async (username: string | undefined, _options: { json?: boolean }, command: Command) => {
+    await setPrivilegedUserAdminCommand(username, false, {
       json: Boolean(command.getOptionValue('json') || command.parent?.getOptionValue('json')),
     });
   });

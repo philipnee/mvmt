@@ -40,6 +40,7 @@ export interface LeaseDirectoryListing {
   leaseId: string;
   path: string;
   expiresAt?: string;
+  canUpload?: boolean;
   entries: LeaseDirectoryEntry[];
 }
 
@@ -109,7 +110,7 @@ export async function resolveLeaseUploadTarget(
   mounts: readonly LocalFolderMountConfig[],
   lease: LeaseRecord,
   requestPath: string,
-  options: { allowOverwrite?: boolean } = {},
+  options: { allowOverwrite?: boolean; suffixOnCollision?: boolean } = {},
 ): Promise<LeaseUploadTarget> {
   const leaseRelativePath = normalizeLeaseRelativePath(requestPath);
   if (!leaseRelativePath) throw new Error('upload path is required');
@@ -170,7 +171,8 @@ export async function resolveLeaseUploadTarget(
   if (!isWithin(leaseRootRealPath, parentRealPath)) {
     throw new Error(`${resolved.virtualPath} escapes lease root`);
   }
-  const targetRealPath = path.resolve(parentRealPath, filename);
+  let resolvedFilename = filename;
+  let targetRealPath = path.resolve(parentRealPath, resolvedFilename);
   if (!isWithin(leaseRootRealPath, targetRealPath)) {
     throw new Error(`${resolved.virtualPath} escapes lease root`);
   }
@@ -179,21 +181,46 @@ export async function resolveLeaseUploadTarget(
   }
   try {
     const existing = await fsp.lstat(targetRealPath);
-    if (!options.allowOverwrite) throw new Error(`${resolved.virtualPath} already exists`);
     if (existing.isDirectory()) throw new Error(`${resolved.virtualPath} is a directory`);
+    if (options.suffixOnCollision) {
+      const next = await findNextAvailableFilename(parentRealPath, filename);
+      resolvedFilename = next;
+      targetRealPath = path.resolve(parentRealPath, resolvedFilename);
+    } else if (!options.allowOverwrite) {
+      throw new Error(`${resolved.virtualPath} already exists`);
+    }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
+
+  const finalLeaseRelative = resolvedFilename === filename
+    ? leaseRelativePath
+    : path.join(path.dirname(leaseRelativePath), resolvedFilename);
 
   return {
     mountName: resolved.mount.config.name,
     leasePath: resource.path,
     virtualPath: resolved.virtualPath,
-    leaseRelativePath,
+    leaseRelativePath: finalLeaseRelative,
     realPath: targetRealPath,
     parentRealPath,
-    filename,
+    filename: resolvedFilename,
   };
+}
+
+async function findNextAvailableFilename(parentDir: string, filename: string): Promise<string> {
+  const ext = path.extname(filename);
+  const base = ext ? filename.slice(0, -ext.length) : filename;
+  for (let i = 2; i < 10_000; i += 1) {
+    const candidate = `${base} (${i})${ext}`;
+    try {
+      await fsp.lstat(path.join(parentDir, candidate));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return candidate;
+      throw err;
+    }
+  }
+  throw new Error(`could not find a free filename for ${filename}`);
 }
 
 async function resolveLeaseTarget(

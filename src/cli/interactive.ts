@@ -4,7 +4,7 @@ import chalk from 'chalk';
 import { MvmtConfig } from '../config/schema.js';
 import { AuditEntry, AuditLogger, AUDIT_LOG_PATH } from '../utils/audit.js';
 import { HttpRequestLogEntry } from '../server/index.js';
-import { formatMcpPublicUrl } from '../utils/tunnel.js';
+import { formatDashboardPublicUrl, formatMcpPublicUrl } from '../utils/tunnel.js';
 import { printApiTokenSaved, printApiTokens, promptAndAddApiToken, promptAndEditApiToken, promptAndRemoveApiToken, rotateApiTokenInConfig } from './api-tokens.js';
 import { printConfigSummary } from './config.js';
 import {
@@ -41,6 +41,16 @@ export class InteractiveAuditLogger implements AuditLogger {
   }
 
   recordHttp(entry: HttpRequestLogEntry): void {
+    this.inner.recordHttp(entry);
+    if (this.liveLogs && this.writer) {
+      this.writer(formatHttpRequestEntry(entry));
+    }
+  }
+
+  // Streams an HTTP entry to the TUI without re-persisting. Used when the
+  // request handler has already called the underlying recordHttp via the
+  // requestLog wiring in start.ts.
+  streamHttp(entry: HttpRequestLogEntry): void {
     if (this.liveLogs && this.writer) {
       this.writer(formatHttpRequestEntry(entry));
     }
@@ -296,6 +306,9 @@ async function handleInteractiveCommand(
     case 'status':
       printInteractiveStatus(state);
       return;
+    case 'dashboard':
+    case 'dashboard url':
+    case 'dashboard urls':
     case 'url':
     case 'urls':
       printInteractiveUrls(state);
@@ -350,6 +363,7 @@ async function handleInteractiveCommand(
 export function printInteractiveHelp(): void {
   console.log('');
   console.log(chalk.bold('Commands'));
+  console.log('  dashboard           show dashboard URLs');
   console.log('  lease               list leases');
   console.log('  lease create        create a path lease');
   console.log('  lease add-path      add paths to a lease');
@@ -362,7 +376,7 @@ export function printInteractiveHelp(): void {
   console.log('  logs                show live request/tool log state');
   console.log('  logs on/off         toggle live request/tool logs');
   console.log('  status              show server and lease access status');
-  console.log('  url                 show local and public URLs');
+  console.log('  url                 show dashboard and MCP URLs');
   console.log('  advanced            show mount/token/MCP commands');
   console.log('  clear               clear the terminal');
   console.log('  quit                stop mvmt');
@@ -401,9 +415,15 @@ function printInteractiveStatus(state: InteractivePromptState): void {
 }
 
 function printInteractiveUrls(state: InteractivePromptState): void {
-  console.log(`local URL   ${chalk.cyan(`http://127.0.0.1:${state.port}/mcp`)}`);
+  console.log(chalk.bold('dashboard'));
+  console.log(`  local   ${chalk.cyan(localDashboardUrl(state.port))}`);
   if (state.tunnel.publicUrl) {
-    console.log(`public URL  ${chalk.yellow(formatMcpPublicUrl(state.tunnel.publicUrl))}`);
+    console.log(`  public  ${chalk.yellow(formatDashboardPublicUrl(state.tunnel.publicUrl))}`);
+  }
+  console.log(chalk.bold('MCP endpoint'));
+  console.log(`  local   ${chalk.dim(localMcpUrl(state.port))}`);
+  if (state.tunnel.publicUrl) {
+    console.log(`  public  ${chalk.dim(formatMcpPublicUrl(state.tunnel.publicUrl))}`);
   }
 }
 
@@ -416,7 +436,8 @@ function printTunnelStatus(state: InteractivePromptState): void {
   console.log(`  status      ${state.tunnel.running ? chalk.green('running') : chalk.dim('stopped')}`);
   if (state.tunnel.command) console.log(`  command     ${chalk.dim(state.tunnel.command)}`);
   if (state.tunnel.publicUrl) {
-    console.log(`  public URL  ${chalk.yellow(formatMcpPublicUrl(state.tunnel.publicUrl))}`);
+    console.log(`  dashboard   ${chalk.yellow(formatDashboardPublicUrl(state.tunnel.publicUrl))}`);
+    console.log(`  MCP         ${chalk.dim(formatMcpPublicUrl(state.tunnel.publicUrl))}`);
   }
 }
 
@@ -436,7 +457,7 @@ async function handleTunnelStart(state: InteractivePromptState): Promise<void> {
     await state.persistConfig();
   }
   if (tunnel?.url) {
-    console.log(`public URL  ${chalk.yellow(formatMcpPublicUrl(tunnel.url))}`);
+    printPublicTunnelUrls(tunnel.url);
   }
   if ((state.config.clients?.length ?? 0) === 0 && state.config.server.access === 'tunnel') {
     console.log(chalk.dim('Lease links and MCP can use the same lease token.'));
@@ -455,10 +476,18 @@ async function handleTunnelRefresh(state: InteractivePromptState): Promise<void>
     await state.persistConfig();
   }
   if (tunnel?.url) {
-    console.log(`public URL  ${chalk.yellow(formatMcpPublicUrl(tunnel.url))}`);
+    printPublicTunnelUrls(tunnel.url);
   } else {
     console.log(chalk.yellow('Tunnel refreshed, but no public URL was detected yet.'));
   }
+}
+
+function localDashboardUrl(port: number): string {
+  return `http://127.0.0.1:${port}/dashboard`;
+}
+
+function localMcpUrl(port: number): string {
+  return `http://127.0.0.1:${port}/mcp`;
 }
 
 async function handleTunnelConfig(state: InteractivePromptState): Promise<void> {
@@ -488,8 +517,13 @@ async function handleTunnelConfig(state: InteractivePromptState): Promise<void> 
   console.log('Restarting tunnel with new config...');
   const restarted = await state.tunnel.start();
   if (restarted?.url) {
-    console.log(`public URL  ${chalk.yellow(formatMcpPublicUrl(restarted.url))}`);
+    printPublicTunnelUrls(restarted.url);
   }
+}
+
+function printPublicTunnelUrls(publicUrl: string): void {
+  console.log(`dashboard   ${chalk.yellow(formatDashboardPublicUrl(publicUrl))}`);
+  console.log(`MCP         ${chalk.dim(formatMcpPublicUrl(publicUrl))}`);
 }
 
 async function handleTunnelStop(state: InteractivePromptState): Promise<void> {

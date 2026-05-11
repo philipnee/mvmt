@@ -14,6 +14,11 @@ export interface PrivilegedUser {
   createdAt: string;
   lastLoginAt?: string;
   disabled?: boolean;
+  // Admins can manage mounts and browse the local filesystem through the
+  // dashboard. Non-admins can only browse already-mounted folders and
+  // create/revoke their own leases. Default false: existing users stay
+  // non-admin after a code upgrade until explicitly granted.
+  admin?: boolean;
 }
 
 interface PrivilegedUserStoreFile {
@@ -32,7 +37,7 @@ export function listPrivilegedUsers(storePath: string): PrivilegedUser[] {
 
 export function createPrivilegedUser(
   storePath: string,
-  input: { username: string; password: string },
+  input: { username: string; password: string; admin?: boolean },
 ): PrivilegedUser {
   const username = normalizeUsername(input.username);
   validatePassword(input.password);
@@ -45,10 +50,28 @@ export function createPrivilegedUser(
     username,
     passwordHash: hashApiToken(input.password),
     createdAt: new Date().toISOString(),
+    ...(input.admin ? { admin: true } : {}),
   };
   store.users.push(user);
   writePrivilegedUserStore(storePath, store);
   return user;
+}
+
+export function setPrivilegedUserAdmin(
+  storePath: string,
+  usernameInput: string,
+  admin: boolean,
+): PrivilegedUser {
+  const username = normalizeUsername(usernameInput);
+  const store = readPrivilegedUserStore(storePath);
+  const index = store.users.findIndex((user) => user.username.toLowerCase() === username.toLowerCase());
+  if (index < 0) throw new Error(`Unknown privileged user: ${username}`);
+  const updated: PrivilegedUser = { ...store.users[index] };
+  if (admin) updated.admin = true;
+  else delete updated.admin;
+  store.users[index] = updated;
+  writePrivilegedUserStore(storePath, store);
+  return updated;
 }
 
 export function verifyPrivilegedUserPassword(
