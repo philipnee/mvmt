@@ -150,7 +150,7 @@ describe('lease CLI helpers', () => {
     const config = readConfig(configPath);
     expect(config.mounts).toHaveLength(1);
     expect(config.mounts[0]).toMatchObject({
-      name: 'lease-upload-phone-drop',
+      name: 'lease-write-phone-drop',
       path: '/Phone-Drop',
       root: folder,
       writeAccess: true,
