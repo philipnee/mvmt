@@ -9,17 +9,20 @@ import { isExpired } from '../utils/token-ttl.js';
 export const LEASES_PATH = path.join(os.homedir(), '.mvmt', '.leases.json');
 export const DEFAULT_LEASE_TTL = '24h';
 
+export type LeasePermission = 'read' | 'upload';
+
 export interface LeaseRecord {
   id: string;
   label: string;
   path: string;
-  permissions: ['read'];
+  permissions: LeasePermission[];
   tokenHash: string;
   createdAt: string;
   expiresAt?: string;
   lastUsedAt?: string;
   revokedAt?: string;
   downloadCount: number;
+  uploadCount: number;
 }
 
 interface LeaseStoreFile {
@@ -37,18 +40,22 @@ export function defaultLeasesPath(tokenPath: string | undefined = TOKEN_PATH): s
   return path.join(path.dirname(tokenPath), '.leases.json');
 }
 
-export function createLease(storePath: string, input: { label: string; path: string; expiresAt?: string }): CreatedLease {
+export function createLease(
+  storePath: string,
+  input: { label: string; path: string; expiresAt?: string; permissions?: LeasePermission[] },
+): CreatedLease {
   const store = readLeaseStore(storePath);
   const token = `mvmt_l_${crypto.randomBytes(32).toString('base64url')}`;
   const record: LeaseRecord = {
     id: uniqueLeaseId(store),
     label: input.label,
     path: input.path,
-    permissions: ['read'],
+    permissions: input.permissions ?? ['read'],
     tokenHash: hashApiToken(token),
     createdAt: new Date().toISOString(),
     ...(input.expiresAt ? { expiresAt: input.expiresAt } : {}),
     downloadCount: 0,
+    uploadCount: 0,
   };
   store.leases.push(record);
   writeLeaseStore(storePath, store);
@@ -75,14 +82,16 @@ export function revokeLease(storePath: string, id: string): boolean {
   return true;
 }
 
-export function recordLeaseUse(storePath: string, id: string, options: { downloaded?: boolean } = {}): void {
+export function recordLeaseUse(storePath: string, id: string, options: { downloaded?: boolean; uploaded?: boolean } = {}): void {
   const store = readLeaseStore(storePath);
   const index = store.leases.findIndex((lease) => lease.id === id);
   if (index < 0) return;
+  const lease = store.leases[index];
   store.leases[index] = {
-    ...store.leases[index],
+    ...lease,
     lastUsedAt: new Date().toISOString(),
-    downloadCount: store.leases[index].downloadCount + (options.downloaded ? 1 : 0),
+    downloadCount: (lease.downloadCount ?? 0) + (options.downloaded ? 1 : 0),
+    uploadCount: (lease.uploadCount ?? 0) + (options.uploaded ? 1 : 0),
   };
   writeLeaseStore(storePath, store);
 }
@@ -97,11 +106,23 @@ export function leaseUnavailableReason(lease: LeaseRecord, now = Date.now()): 'e
   return undefined;
 }
 
+export function leaseAllows(lease: LeaseRecord, permission: LeasePermission): boolean {
+  return lease.permissions.includes(permission);
+}
+
 function readLeaseStore(storePath: string): LeaseStoreFile {
   try {
     const parsed = JSON.parse(fs.readFileSync(storePath, 'utf-8')) as LeaseStoreFile;
     if (parsed.version !== 1 || !Array.isArray(parsed.leases)) return emptyStore();
-    return parsed;
+    return {
+      version: 1,
+      leases: parsed.leases.map((lease) => ({
+        ...lease,
+        permissions: lease.permissions?.filter(isLeasePermission) ?? ['read'],
+        downloadCount: lease.downloadCount ?? 0,
+        uploadCount: lease.uploadCount ?? 0,
+      })),
+    };
   } catch {
     return emptyStore();
   }
@@ -123,4 +144,8 @@ function uniqueLeaseId(store: LeaseStoreFile): string {
     const id = crypto.randomBytes(12).toString('base64url');
     if (!existing.has(id)) return id;
   }
+}
+
+function isLeasePermission(value: unknown): value is LeasePermission {
+  return value === 'read' || value === 'upload';
 }

@@ -3,7 +3,7 @@
 V1 makes folder leases the product surface.
 
 ```text
-one lease = one folder = one read-only token
+one lease = one folder = one scoped token
 ```
 
 The durable abstraction is not MCP or AI permissions. It is scoped, expiring,
@@ -11,7 +11,9 @@ audited access to one folder on the user's own machine.
 
 ## V1 Contract
 
-- A lease is read-only.
+- A lease is read-only by default.
+- Upload mode is upload-only: recipients can add files but cannot browse,
+  download, delete, or overwrite files.
 - A lease points at one local folder.
 - A lease has a required human label.
 - A lease defaults to 24 hours.
@@ -24,8 +26,7 @@ audited access to one folder on the user's own machine.
 
 ## Out Of Scope
 
-- Write access.
-- Uploads.
+- General write/edit access.
 - Deletes.
 - Multi-folder leases.
 - Team ACLs.
@@ -42,3 +43,10 @@ mvmt lease create ~/Documents/Taxes --label "Sarah - tax docs"
 
 The generated link opens a scoped folder view. The recipient can browse and
 download files from that folder until the lease expires or is revoked.
+
+```bash
+mvmt lease create ~/Uploads --label "Sarah uploads" --mode upload
+```
+
+Upload leases open a drop page. The recipient can add new files, but cannot
+browse, download, overwrite, edit, or delete anything in that folder.

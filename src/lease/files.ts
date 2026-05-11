@@ -3,7 +3,7 @@ import type { Stats } from 'fs';
 import path from 'path';
 import { LocalFolderMountConfig } from '../config/schema.js';
 import { MountRegistry, normalizePathSeparators, toVirtualRelative } from '../context/mount-registry.js';
-import { isGloballyDeniedPath, matchesConfiguredOrGlobalPattern } from '../context/path-policy.js';
+import { isGloballyDeniedPath, matchesConfiguredOrGlobalPattern, matchesPathPatterns } from '../context/path-policy.js';
 import { LeaseRecord } from './store.js';
 
 export interface LeaseFileTarget {
@@ -15,6 +15,16 @@ export interface LeaseFileTarget {
   filename: string;
   size: number;
   mtimeMs: number;
+}
+
+export interface LeaseUploadTarget {
+  mountName: string;
+  leasePath: string;
+  virtualPath: string;
+  leaseRelativePath: string;
+  realPath: string;
+  parentRealPath: string;
+  filename: string;
 }
 
 export interface LeaseDirectoryEntry {
@@ -88,6 +98,62 @@ export async function listLeaseDirectory(
     path: target.leaseRelativePath ? `/${target.leaseRelativePath}` : '/',
     ...(lease.expiresAt ? { expiresAt: lease.expiresAt } : {}),
     entries,
+  };
+}
+
+export async function resolveLeaseUploadTarget(
+  mounts: readonly LocalFolderMountConfig[],
+  lease: LeaseRecord,
+  requestPath: string,
+): Promise<LeaseUploadTarget> {
+  const registry = new MountRegistry([...mounts]);
+  const leaseRoot = registry.resolve(lease.path);
+  const leaseRootStat = await fsp.stat(leaseRoot.realPath);
+  if (!leaseRootStat.isDirectory()) throw new Error(`${lease.path} is not a directory`);
+  if (!leaseRoot.mount.config.writeAccess) throw new Error(`${lease.path} is read-only`);
+
+  const leaseRootRealPath = await fsp.realpath(leaseRoot.realPath);
+  const leaseRelativePath = normalizeLeaseRelativePath(requestPath);
+  if (!leaseRelativePath) throw new Error('upload path is required');
+  const virtualPath = `${stripTrailingSlash(lease.path)}/${leaseRelativePath}`;
+  const resolved = registry.resolve(virtualPath);
+  const filename = path.basename(resolved.realPath);
+  if (!filename || filename === '.' || filename === '..') throw new Error('upload filename is required');
+
+  const policyPath = resolved.relativePath || filename;
+  if (matchesConfiguredOrGlobalPattern(policyPath, resolved.mount.config.exclude)) {
+    throw new Error(`${resolved.virtualPath} is excluded`);
+  }
+  if (matchesPathPatterns(policyPath, resolved.mount.config.protect)) {
+    throw new Error(`${resolved.virtualPath} is protected`);
+  }
+
+  const parentRealPath = await fsp.realpath(path.dirname(resolved.realPath));
+  if (!isWithin(leaseRootRealPath, parentRealPath)) {
+    throw new Error(`${resolved.virtualPath} escapes lease root`);
+  }
+  const targetRealPath = path.resolve(parentRealPath, filename);
+  if (!isWithin(leaseRootRealPath, targetRealPath)) {
+    throw new Error(`${resolved.virtualPath} escapes lease root`);
+  }
+  if (isGloballyDeniedPath(policyPath, targetRealPath)) {
+    throw new Error(`${resolved.virtualPath} is globally denied`);
+  }
+  try {
+    await fsp.lstat(targetRealPath);
+    throw new Error(`${resolved.virtualPath} already exists`);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+
+  return {
+    mountName: resolved.mount.config.name,
+    leasePath: lease.path,
+    virtualPath: resolved.virtualPath,
+    leaseRelativePath,
+    realPath: targetRealPath,
+    parentRealPath,
+    filename,
   };
 }
 

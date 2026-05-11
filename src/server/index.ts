@@ -1,6 +1,10 @@
 import { createHash, randomUUID } from 'crypto';
-import { createReadStream } from 'fs';
+import { createReadStream, createWriteStream } from 'fs';
+import fsp from 'fs/promises';
 import { Server as HttpServer } from 'node:http';
+import path from 'path';
+import { Transform } from 'stream';
+import { pipeline } from 'stream/promises';
 import express, { Request, Response } from 'express';
 import type { AccessToken } from './oauth.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -24,10 +28,11 @@ import {
 } from './oauth.js';
 import { rateLimit } from './rate-limit.js';
 import { ClientConfig, LocalFolderMountConfig } from '../config/schema.js';
-import { LeaseDirectoryListing, listLeaseDirectory, resolveLeaseFileTarget } from '../lease/files.js';
+import { LeaseDirectoryListing, listLeaseDirectory, resolveLeaseFileTarget, resolveLeaseUploadTarget } from '../lease/files.js';
 import {
   defaultLeasesPath,
   findLease,
+  leaseAllows,
   leaseUnavailableReason,
   recordLeaseUse,
   validateLeaseToken,
@@ -59,6 +64,7 @@ import {
 const DEFAULT_AUTH_RATE_LIMIT = { windowMs: 60_000, max: 30 };
 const DEFAULT_MCP_RATE_LIMIT = { windowMs: 60_000, max: 600 };
 const DEFAULT_HEALTH_RATE_LIMIT = { windowMs: 60_000, max: 120 };
+const DEFAULT_MAX_LEASE_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024;
 
 type McpSession = {
   transport: StreamableHTTPServerTransport;
@@ -750,6 +756,17 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   const leasePageHandler: express.RequestHandler = async (req, res) => {
     const lease = authorizeLeaseRequest(req, res);
     if (!lease) return;
+    if (!leaseAllows(lease, 'read')) {
+      if (leaseAllows(lease, 'upload')) {
+        recordLeaseUse(leaseStorePath, lease.id);
+        logHttpRequest(requestLog, req, 200, 'lease.request', 'upload_page', lease.id);
+        res.status(200).type('html').send(renderLeaseUploadPage(req, lease));
+        return;
+      }
+      logHttpRequest(requestLog, req, 403, 'lease.request', 'permission_denied', lease.id);
+      res.status(403).json({ error: 'lease_permission_denied' });
+      return;
+    }
     const requestPath = firstStringQuery(req.query.path) ?? '';
     try {
       const listing = await listLeaseDirectory(resolveLeaseMounts(options.leaseMounts), lease, requestPath);
@@ -766,6 +783,11 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   const leaseFilesHandler: express.RequestHandler = async (req, res) => {
     const lease = authorizeLeaseRequest(req, res);
     if (!lease) return;
+    if (!leaseAllows(lease, 'read')) {
+      logHttpRequest(requestLog, req, 403, 'lease.request', 'permission_denied', lease.id);
+      res.status(403).json({ error: 'lease_permission_denied' });
+      return;
+    }
     const requestPath = regexParam(req, 1) ?? firstStringQuery(req.query.path) ?? '';
 
     try {
@@ -834,10 +856,58 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       .pipe(res);
   };
 
+  const leaseUploadHandler: express.RequestHandler = async (req, res) => {
+    const lease = authorizeLeaseRequest(req, res);
+    if (!lease) return;
+    if (!leaseAllows(lease, 'upload')) {
+      logHttpRequest(requestLog, req, 403, 'lease.request', 'permission_denied', lease.id);
+      res.status(403).json({ error: 'lease_permission_denied' });
+      return;
+    }
+
+    const contentLength = parseContentLength(firstHeaderValue(req.headers['content-length']));
+    if (contentLength === 'invalid') {
+      logHttpRequest(requestLog, req, 400, 'lease.upload', 'invalid_content_length', lease.id);
+      res.status(400).json({ error: 'invalid_content_length' });
+      return;
+    }
+    if (contentLength !== undefined && contentLength > DEFAULT_MAX_LEASE_UPLOAD_BYTES) {
+      logHttpRequest(requestLog, req, 413, 'lease.upload', 'upload_too_large', lease.id);
+      res.status(413).json({ error: 'lease_upload_too_large' });
+      return;
+    }
+
+    const requestPath = regexParam(req, 1) ?? firstStringQuery(req.query.path) ?? '';
+    let target;
+    try {
+      target = await resolveLeaseUploadTarget(resolveLeaseMounts(options.leaseMounts), lease, requestPath);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'unavailable';
+      const exists = detail.includes('already exists');
+      logHttpRequest(requestLog, req, exists ? 409 : 404, 'lease.upload', detail, lease.id);
+      res.status(exists ? 409 : 404).json({ error: exists ? 'lease_upload_exists' : 'lease_target_unavailable' });
+      return;
+    }
+
+    try {
+      const bytes = await writeUploadWithoutOverwrite(req, target.parentRealPath, target.realPath, DEFAULT_MAX_LEASE_UPLOAD_BYTES);
+      recordLeaseUse(leaseStorePath, lease.id, { uploaded: true });
+      logHttpRequest(requestLog, req, 201, 'lease.upload', target.leaseRelativePath, lease.id);
+      res.status(201).json({ path: target.leaseRelativePath ? `/${target.leaseRelativePath}` : '/', bytes });
+    } catch (err) {
+      const status = err instanceof LeaseUploadTooLargeError ? 413 : isNodeErrorCode(err, 'EEXIST') ? 409 : 500;
+      const error = status === 413 ? 'lease_upload_too_large' : status === 409 ? 'lease_upload_exists' : 'lease_upload_failed';
+      const detail = err instanceof Error ? err.message : error;
+      logHttpRequest(requestLog, req, status, 'lease.upload', detail, lease.id);
+      res.status(status).json({ error });
+    }
+  };
+
   const leaseFilesRoute = /^\/lease\/([^/]+)\/files(?:\/(.*))?$/;
   app.get('/lease/:id', mcpLimiter, leasePageHandler);
   app.get(leaseFilesRoute, mcpLimiter, leaseFilesHandler);
   app.head(leaseFilesRoute, mcpLimiter, leaseFilesHandler);
+  app.put(leaseFilesRoute, mcpLimiter, leaseUploadHandler);
 
   app.post('/mcp', mcpLimiter, authMiddleware, async (req, res) => {
     await handleMcpRequest(req, res, router, sessions);
@@ -1229,6 +1299,51 @@ function escapeHeaderValue(value: string): string {
   return value.replace(/["\\\r\n]/g, '_');
 }
 
+function parseContentLength(value: string | undefined): number | 'invalid' | undefined {
+  if (!value) return undefined;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) return 'invalid';
+  return parsed;
+}
+
+class LeaseUploadTooLargeError extends Error {
+  constructor(maxBytes: number) {
+    super(`Lease upload exceeds ${maxBytes} bytes`);
+  }
+}
+
+async function writeUploadWithoutOverwrite(
+  req: Request,
+  parentRealPath: string,
+  targetRealPath: string,
+  maxBytes: number,
+): Promise<number> {
+  const tempPath = path.join(parentRealPath, `.mvmt-upload-${process.pid}-${randomUUID()}.tmp`);
+  let bytes = 0;
+  const meter = new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      bytes += chunk.length;
+      if (bytes > maxBytes) {
+        callback(new LeaseUploadTooLargeError(maxBytes));
+        return;
+      }
+      callback(null, chunk);
+    },
+  });
+
+  try {
+    await pipeline(req, meter, createWriteStream(tempPath, { flags: 'wx', mode: 0o600 }));
+    await fsp.link(tempPath, targetRealPath);
+    return bytes;
+  } finally {
+    await fsp.unlink(tempPath).catch(() => undefined);
+  }
+}
+
+function isNodeErrorCode(err: unknown, code: string): boolean {
+  return typeof err === 'object' && err !== null && (err as NodeJS.ErrnoException).code === code;
+}
+
 function renderLeasePage(req: Request, listing: LeaseDirectoryListing): string {
   const token = firstStringQuery(req.query.token) ?? firstStringQuery(req.query.t);
   const rows = listing.entries.map((entry) => {
@@ -1257,9 +1372,65 @@ a{color:#0f766e}
 </head>
 <body>
 <h1>${escapeHtml(listing.label)}</h1>
-<p class="meta">${escapeHtml(listing.path)}${listing.expiresAt ? ` · expires ${escapeHtml(listing.expiresAt)}` : ''}</p>
+<p class="meta">${escapeHtml(listing.path)}${listing.expiresAt ? ` - expires ${escapeHtml(listing.expiresAt)}` : ''}</p>
 ${parent}
 <table><thead><tr><th>Name</th><th>Type</th><th>Bytes</th></tr></thead><tbody>${rows}</tbody></table>
+</body>
+</html>`;
+}
+
+function renderLeaseUploadPage(req: Request, lease: { id: string; label: string; expiresAt?: string }): string {
+  const token = firstStringQuery(req.query.token) ?? firstStringQuery(req.query.t) ?? '';
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(lease.label)}</title>
+<style>
+body{font-family:ui-sans-serif,system-ui,sans-serif;margin:2rem;max-width:720px}
+.drop{border:2px dashed #bbb;border-radius:8px;padding:2rem;text-align:center}
+.meta,.status{color:#666}
+button{padding:.55rem .8rem}
+</style>
+</head>
+<body>
+<h1>${escapeHtml(lease.label)}</h1>
+<p class="meta">Upload-only lease${lease.expiresAt ? ` - expires ${escapeHtml(lease.expiresAt)}` : ''}</p>
+<div class="drop">
+  <input id="files" type="file" multiple>
+  <p class="status" id="status">Choose files or drop them here.</p>
+</div>
+<script>
+const token = ${JSON.stringify(token)};
+const leaseId = ${JSON.stringify(lease.id)};
+const drop = document.querySelector('.drop');
+const input = document.getElementById('files');
+const status = document.getElementById('status');
+function uploadPath(name) {
+  return '/lease/' + encodeURIComponent(leaseId) + '/files/' + encodeURIComponent(name) + '?token=' + encodeURIComponent(token);
+}
+async function uploadFiles(files) {
+  for (const file of files) {
+    status.textContent = 'Uploading ' + file.name + '...';
+    const response = await fetch(uploadPath(file.name), { method: 'PUT', body: file });
+    if (!response.ok) {
+      status.textContent = 'Upload failed: ' + file.name;
+      return;
+    }
+  }
+  status.textContent = 'Upload complete.';
+  input.value = '';
+}
+input.addEventListener('change', () => uploadFiles(input.files));
+drop.addEventListener('dragover', (event) => {
+  event.preventDefault();
+});
+drop.addEventListener('drop', (event) => {
+  event.preventDefault();
+  uploadFiles(event.dataTransfer.files);
+});
+</script>
 </body>
 </html>`;
 }

@@ -368,7 +368,7 @@ export function printInteractiveHelp(): void {
   console.log('');
   console.log(chalk.bold('Commands'));
   console.log('  lease               list folder leases');
-  console.log('  lease create        create a read-only folder lease');
+  console.log('  lease create        create a folder lease');
   console.log('  lease revoke        revoke a folder lease');
   console.log('  tunnel              show tunnel status');
   console.log('  tunnel config       choose a tunnel');
@@ -548,6 +548,13 @@ async function handleLeaseCreate(state: InteractivePromptState): Promise<void> {
     message: 'Lease label:',
     validate: (value) => value.trim().length > 0 ? true : 'Enter a label such as "Sarah - tax docs"',
   });
+  const mode = await select({
+    message: 'Lease mode:',
+    choices: [
+      { name: 'Browse/download', value: 'read' },
+      { name: 'Upload only', value: 'upload' },
+    ],
+  });
   const expires = await input({
     message: 'Expires after:',
     default: DEFAULT_LEASE_TTL,
@@ -555,6 +562,7 @@ async function handleLeaseCreate(state: InteractivePromptState): Promise<void> {
   await createFolderLease(folder.trim(), {
     config: state.configPath,
     label: label.trim(),
+    mode,
     expires: expires.trim() || DEFAULT_LEASE_TTL,
   });
   state.config = loadConfig(state.configPath);

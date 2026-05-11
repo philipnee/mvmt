@@ -49,6 +49,7 @@ describe('lease CLI helpers', () => {
       path: '/lease-taxes',
       permissions: ['read'],
       downloadCount: 0,
+      uploadCount: 0,
     });
     expect(leases[0].expiresAt).toBeTruthy();
     expect(logSpy.mock.calls.flat().join('\n')).toContain('(24h default)');
@@ -77,6 +78,35 @@ describe('lease CLI helpers', () => {
     expect(leases).toHaveLength(2);
     expect(new Set(leases.map((lease) => lease.path))).toEqual(new Set(['/lease-downloads']));
     expect(leases.map((lease) => lease.label)).toEqual(['Sarah downloads', 'Ben downloads']);
+  });
+
+  it('creates an upload-only folder lease with a writable internal mount', async () => {
+    const folder = path.join(tmp, 'Phone Drop');
+    await fs.mkdir(folder);
+
+    await createFolderLease(folder, {
+      config: configPath,
+      leaseStorePath,
+      label: 'Sarah uploads',
+      mode: 'upload',
+      expires: '1h',
+    });
+
+    const config = readConfig(configPath);
+    expect(config.mounts).toHaveLength(1);
+    expect(config.mounts[0]).toMatchObject({
+      name: 'lease-upload-phone-drop',
+      path: '/lease-upload-phone-drop',
+      root: folder,
+      writeAccess: true,
+    });
+    expect(listLeases(leaseStorePath)[0]).toMatchObject({
+      label: 'Sarah uploads',
+      path: '/lease-upload-phone-drop',
+      permissions: ['upload'],
+      uploadCount: 0,
+    });
+    expect(logSpy.mock.calls.flat().join('\n')).toContain('Mode: upload only');
   });
 
   it('lists and revokes folder leases', async () => {

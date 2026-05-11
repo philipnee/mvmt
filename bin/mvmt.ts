@@ -49,7 +49,7 @@ program.addHelpText('after', examples([
   ['mvmt serve -i', 'start locally with the interactive prompt'],
   ['mvmt serve --path ~/Documents', 'serve one read-only folder for this run'],
   ['mvmt mounts add notes ~/notes --mount-path /notes --read-only', 'add a read-only mount'],
-  ['mvmt lease create ~/Taxes --label "Sarah - tax docs"', 'create a 24h read-only folder lease'],
+  ['mvmt lease create ~/Taxes --label "Sarah - tax docs"', 'create a 24h folder lease'],
   ['mvmt share add /notes/report.pdf', 'create a 24h browser download link'],
   ['mvmt token add codex --scope notes:read', 'create a scoped API token'],
   ['mvmt doctor', 'validate config and mount roots'],
@@ -218,7 +218,7 @@ shareCommand
 
 const leaseCommand = program
   .command('lease')
-  .description('Create read-only folder leases')
+  .description('Create folder leases')
   .option('-c, --config <path>', 'Config file path')
   .option('--json', 'Output as JSON')
   .action(async (options: { config?: string; json?: boolean }) => {
@@ -237,17 +237,20 @@ leaseCommand
 leaseCommand
   .command('create <folder>')
   .alias('add')
-  .description('Create a read-only browser lease for one folder')
+  .description('Create a browser lease for one folder')
   .option('-c, --config <path>', 'Config file path')
   .requiredOption('--label <text>', 'Required lease label, such as "Sarah - tax docs"')
+  .option('--mode <mode>', 'Lease mode: read or upload', 'read')
+  .option('--upload', 'Shortcut for --mode upload')
   .option('--expires <duration>', 'Lease lifetime, such as 24h, 7d, or never')
   .option('--ttl <duration>', 'Alias for --expires')
   .option('--json', 'Output as JSON')
   .addHelpText('after', examples([
-    ['mvmt lease create ~/Documents/Taxes --label "Sarah - tax docs"', 'create a 24h read-only folder lease'],
+    ['mvmt lease create ~/Documents/Taxes --label "Sarah - tax docs"', 'create a 24h folder lease'],
+    ['mvmt lease create ~/DropBox --label "Sarah uploads" --mode upload', 'create an upload-only folder lease'],
     ['mvmt lease create ~/Photos --label "Family photos" --expires never', 'lease until revoked'],
   ]))
-  .action(async (folder: string, options: { config?: string; label?: string; expires?: string; ttl?: string; json?: boolean }, command: Command) => {
+  .action(async (folder: string, options: { config?: string; label?: string; mode?: string; upload?: boolean; expires?: string; ttl?: string; json?: boolean }, command: Command) => {
     await createFolderLease(folder, withInheritedConfig(options, command));
   });
 

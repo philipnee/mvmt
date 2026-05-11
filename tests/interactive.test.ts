@@ -106,7 +106,7 @@ describe('Interactive help', () => {
     const lines = captureConsole(() => printInteractiveHelp());
 
     expect(lines).toContain('  lease               list folder leases');
-    expect(lines).toContain('  lease create        create a read-only folder lease');
+    expect(lines).toContain('  lease create        create a folder lease');
     expect(lines).toContain('  lease revoke        revoke a folder lease');
     expect(lines).toContain('  advanced            show mount/token/MCP commands');
     expect(lines).not.toContain('  token               list scoped API tokens');

@@ -241,6 +241,75 @@ describe('folder lease access', () => {
     }
   });
 
+  it('supports upload-only leases without browse, download, or overwrite access', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-lease-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const leaseStorePath = path.join(tmp, '.leases.json');
+    const root = path.join(tmp, 'dropbox');
+    fs.mkdirSync(path.join(root, 'nested'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'existing.txt'), 'already here', 'utf-8');
+    const config = parseConfig({
+      version: 1,
+      mounts: [{ name: 'dropbox', type: 'local_folder', path: '/dropbox', root, writeAccess: true }],
+    });
+    const uploadLease = createLease(leaseStorePath, {
+      label: 'Phone uploads',
+      path: '/dropbox',
+      permissions: ['upload'],
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const readLease = createLease(leaseStorePath, {
+      label: 'Read only',
+      path: '/dropbox',
+      permissions: ['read'],
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: config.mounts,
+      leaseStorePath,
+    });
+    try {
+      const page = await fetch(`http://127.0.0.1:${server.port}/lease/${uploadLease.record.id}?token=${uploadLease.token}`);
+      expect(page.status).toBe(200);
+      expect(await page.text()).toContain('Upload-only lease');
+
+      const listing = await fetch(`http://127.0.0.1:${server.port}/lease/${uploadLease.record.id}/files?token=${uploadLease.token}`);
+      expect(listing.status).toBe(403);
+
+      const uploaded = await fetch(`http://127.0.0.1:${server.port}/lease/${uploadLease.record.id}/files/nested/phone.txt?token=${uploadLease.token}`, {
+        method: 'PUT',
+        body: 'from phone',
+      });
+      expect(uploaded.status).toBe(201);
+      expect(fs.readFileSync(path.join(root, 'nested', 'phone.txt'), 'utf-8')).toBe('from phone');
+      expect(listLeases(leaseStorePath)[0].uploadCount).toBe(1);
+
+      const overwrite = await fetch(`http://127.0.0.1:${server.port}/lease/${uploadLease.record.id}/files/existing.txt?token=${uploadLease.token}`, {
+        method: 'PUT',
+        body: 'replace',
+      });
+      expect(overwrite.status).toBe(409);
+      expect(fs.readFileSync(path.join(root, 'existing.txt'), 'utf-8')).toBe('already here');
+
+      const traversal = await fetch(`http://127.0.0.1:${server.port}/lease/${uploadLease.record.id}/files/%2e%2e/escape.txt?token=${uploadLease.token}`, {
+        method: 'PUT',
+        body: 'escape',
+      });
+      expect(traversal.status).toBe(404);
+
+      const readOnlyPut = await fetch(`http://127.0.0.1:${server.port}/lease/${readLease.record.id}/files/nope.txt?token=${readLease.token}`, {
+        method: 'PUT',
+        body: 'nope',
+      });
+      expect(readOnlyPut.status).toBe(403);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('enforces lease token, expiry, revocation, range, and path boundaries', async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-lease-test-'));
     const tokenPath = path.join(tmp, '.session-token');

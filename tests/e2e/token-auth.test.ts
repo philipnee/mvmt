@@ -201,4 +201,24 @@ describeIfDocker('mvmt e2e: token + auth', () => {
     const actualHash = createHash('sha256').update(downloaded.stdout).digest('hex');
     expect(actualHash).toBe(expectedHash);
   });
+
+  it('creates an upload-only folder lease and receives a file', async () => {
+    const lease = await container.exec(['lease', 'create', '/data/workspace', '--label', 'Phone uploads', '--mode', 'upload']);
+    expect(lease.exitCode, lease.stderr).toBe(0);
+    expect(lease.stdout).toContain('Mode: upload only');
+    const match = lease.stdout.match(/URL:\s+(http:\/\/127\.0\.0\.1:4141\/lease\/\S+)/);
+    if (!match) throw new Error(`could not parse lease URL from output:\n${lease.stdout}`);
+    const url = new URL(match[1]);
+    const uploadUrl = `${url.origin}${url.pathname}/files/e2e-upload.txt?token=${url.searchParams.get('token')}`;
+
+    const uploaded = await container.run([
+      'curl', '-fsSL', '-X', 'PUT', '-H', 'Content-Type: application/octet-stream',
+      '--data-binary', 'uploaded from docker e2e', uploadUrl,
+    ]);
+    expect(uploaded.exitCode, uploaded.stderr).toBe(0);
+
+    const expectedHash = createHash('sha256').update('uploaded from docker e2e').digest('hex');
+    const actualHash = createHash('sha256').update(fs.readFileSync(path.join(workspaceHost, 'e2e-upload.txt'))).digest('hex');
+    expect(actualHash).toBe(expectedHash);
+  });
 });
