@@ -1,4 +1,4 @@
-import { execFile } from 'child_process';
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
@@ -9,6 +9,7 @@ import { parseConfig, readConfig, saveConfig } from '../src/config/loader.js';
 const execFileAsync = promisify(execFile);
 const root = path.resolve(import.meta.dirname, '..');
 const cliArgs = ['--import', 'tsx', 'bin/mvmt.ts', '--no-update-check'];
+const serverOutput = new WeakMap<ChildProcessWithoutNullStreams, string>();
 
 describe('CLI usability', () => {
   it('shows examples in top-level help', async () => {
@@ -18,6 +19,8 @@ describe('CLI usability', () => {
     expect(stdout).toContain('Examples:');
     expect(stdout).toContain('mvmt serve --path ~/Documents');
     expect(stdout).toContain('serve one read-only folder for this run');
+    expect(stdout).toContain('mvmt lease create ~/Taxes ~/Receipts --label "Sarah - tax docs"');
+    expect(stdout).toContain('create one 24h lease for multiple paths');
   });
 
   it('suggests close command names for typos', async () => {
@@ -89,18 +92,35 @@ describe('CLI usability', () => {
     }
   });
 
-  it('gives non-interactive serve users mount setup commands when no mounts exist', async () => {
+  it('starts non-interactive HTTP serve with no mounts configured', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
     const configPath = path.join(tmp, 'config.yaml');
+    const port = String(45_000 + Math.floor(Math.random() * 1_000));
+    let child: ChildProcessWithoutNullStreams | undefined;
     try {
       await saveConfig(configPath, parseConfig({ version: 1 }));
 
-      const result = await runCliAllowFailure(['serve', '--config', configPath]);
-      expect(result.code).toBe(1);
-      expect(result.output).toContain('No mounts loaded. Nothing to serve.');
-      expect(result.output).toContain('mvmt mounts add <name> <folder>');
-      expect(result.output).toContain('mvmt serve --path <dir>');
+      child = await startCliServer(['serve', '--config', configPath, '--port', port]);
+      const response = await fetch(`http://127.0.0.1:${port}/.well-known/oauth-authorization-server`);
+      expect(response.status).toBe(200);
     } finally {
+      await stopCliServer(child);
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('creates an empty config instead of opening guided setup for non-interactive HTTP serve', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    const configPath = path.join(tmp, 'missing-config.yaml');
+    const port = String(46_000 + Math.floor(Math.random() * 1_000));
+    let child: ChildProcessWithoutNullStreams | undefined;
+    try {
+      child = await startCliServer(['serve', '--config', configPath, '--port', port]);
+
+      expect(readConfig(configPath)).toMatchObject({ version: 1, mounts: [] });
+      expect(readServerOutput(child)).not.toContain('ExitPromptError');
+    } finally {
+      await stopCliServer(child);
       await fs.rm(tmp, { recursive: true, force: true });
     }
   });
@@ -623,4 +643,50 @@ async function runCliAllowFailure(args: string[]): Promise<{ code: number; outpu
       output: `${failure.stdout ?? ''}${failure.stderr ?? ''}`,
     };
   }
+}
+
+async function startCliServer(args: string[]): Promise<ChildProcessWithoutNullStreams> {
+  const child = spawn(process.execPath, [...cliArgs, ...args], {
+    cwd: root,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  serverOutput.set(child, '');
+  const appendOutput = (chunk: Buffer) => {
+    serverOutput.set(child, `${serverOutput.get(child) ?? ''}${chunk.toString()}`);
+  };
+  child.stdout.on('data', appendOutput);
+  child.stderr.on('data', appendOutput);
+
+  const port = args[args.indexOf('--port') + 1];
+  if (!port) throw new Error('startCliServer requires --port');
+
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    if (child.exitCode !== null) {
+      throw new Error(readServerOutput(child) || `mvmt serve exited with ${child.exitCode}`);
+    }
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/.well-known/oauth-authorization-server`);
+      if (response.status === 200) return child;
+    } catch {
+      // Server is still starting.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  await stopCliServer(child);
+  throw new Error(`mvmt serve did not become reachable:\n${readServerOutput(child)}`);
+}
+
+function readServerOutput(child: ChildProcessWithoutNullStreams): string {
+  return serverOutput.get(child) ?? '';
+}
+
+async function stopCliServer(child: ChildProcessWithoutNullStreams | undefined): Promise<void> {
+  if (!child || child.exitCode !== null) return;
+  child.kill('SIGTERM');
+  await Promise.race([
+    new Promise<void>((resolve) => child.once('close', () => resolve())),
+    new Promise((resolve) => setTimeout(resolve, 2_000)),
+  ]);
+  if (child.exitCode === null) child.kill('SIGKILL');
 }

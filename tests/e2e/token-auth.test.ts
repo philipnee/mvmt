@@ -161,22 +161,62 @@ describeIfDocker('mvmt e2e: token + auth', () => {
     expect(res.status).toBe(401);
   });
 
-  it('mounts one file, creates a share link, and downloads it by checksum', async () => {
-    const addFileMount = await container.exec([
-      'mounts', 'add', 'shared', '/data/shared.bin', '--mount-path', '/shared.bin', '--read-only',
+  it('creates a file lease and downloads it by checksum', async () => {
+    const lease = await container.exec(['lease', 'create', '/data/shared.bin', '--label', 'Shared file']);
+    expect(lease.exitCode, lease.stderr).toBe(0);
+    expect(lease.stdout).toContain('(24h default)');
+    const match = lease.stdout.match(/URL:\s+(http:\/\/127\.0\.0\.1:4141\/lease\/\S+)/);
+    if (!match) throw new Error(`could not parse lease URL from output:\n${lease.stdout}`);
+    const url = new URL(match[1]);
+
+    const downloaded = await container.run([
+      'curl', '-fsSL', `${url.origin}${url.pathname}/files/shared.bin?token=${url.searchParams.get('token')}`,
     ]);
-    expect(addFileMount.exitCode, addFileMount.stderr).toBe(0);
-
-    const share = await container.exec(['share', 'add', '/shared.bin']);
-    expect(share.exitCode, share.stderr).toBe(0);
-    expect(share.stdout).toContain('(24h default)');
-    const match = share.stdout.match(/URL:\s+(http:\/\/127\.0\.0\.1:4141\/share\/\S+)/);
-    if (!match) throw new Error(`could not parse share URL from output:\n${share.stdout}`);
-
-    const downloaded = await container.run(['curl', '-fsSL', match[1]]);
     expect(downloaded.exitCode, downloaded.stderr).toBe(0);
     const expectedHash = createHash('sha256').update(fs.readFileSync(sharedFileHost)).digest('hex');
     const actualHash = createHash('sha256').update(downloaded.stdout).digest('hex');
+    expect(actualHash).toBe(expectedHash);
+  });
+
+  it('creates a folder lease and downloads a file by checksum', async () => {
+    const lease = await container.exec(['lease', 'create', '/data/notes', '--label', 'E2E notes']);
+    expect(lease.exitCode, lease.stderr).toBe(0);
+    expect(lease.stdout).toContain('(24h default)');
+    const match = lease.stdout.match(/URL:\s+(http:\/\/127\.0\.0\.1:4141\/lease\/\S+)/);
+    if (!match) throw new Error(`could not parse lease URL from output:\n${lease.stdout}`);
+    const url = new URL(match[1]);
+
+    const listing = await container.run(['curl', '-fsSL', match[1]]);
+    expect(listing.exitCode, listing.stderr).toBe(0);
+    expect(listing.stdout).toContain('E2E notes');
+    expect(listing.stdout).toContain('launch.md');
+
+    const downloaded = await container.run([
+      'curl', '-fsSL', `${url.origin}${url.pathname}/files/launch.md?token=${url.searchParams.get('token')}`,
+    ]);
+    expect(downloaded.exitCode, downloaded.stderr).toBe(0);
+    const expectedHash = createHash('sha256').update(fs.readFileSync(path.join(notesHost, 'launch.md'))).digest('hex');
+    const actualHash = createHash('sha256').update(downloaded.stdout).digest('hex');
+    expect(actualHash).toBe(expectedHash);
+  });
+
+  it('creates an upload-only folder lease and receives a file', async () => {
+    const lease = await container.exec(['lease', 'create', '/data/workspace', '--label', 'Phone uploads', '--mode', 'upload']);
+    expect(lease.exitCode, lease.stderr).toBe(0);
+    expect(lease.stdout).toContain('Mode: upload only');
+    const match = lease.stdout.match(/URL:\s+(http:\/\/127\.0\.0\.1:4141\/lease\/\S+)/);
+    if (!match) throw new Error(`could not parse lease URL from output:\n${lease.stdout}`);
+    const url = new URL(match[1]);
+    const uploadUrl = `${url.origin}${url.pathname}/files/e2e-upload.txt?token=${url.searchParams.get('token')}`;
+
+    const uploaded = await container.run([
+      'curl', '-fsSL', '-X', 'PUT', '-H', 'Content-Type: application/octet-stream',
+      '--data-binary', 'uploaded from docker e2e', uploadUrl,
+    ]);
+    expect(uploaded.exitCode, uploaded.stderr).toBe(0);
+
+    const expectedHash = createHash('sha256').update('uploaded from docker e2e').digest('hex');
+    const actualHash = createHash('sha256').update(fs.readFileSync(path.join(workspaceHost, 'e2e-upload.txt'))).digest('hex');
     expect(actualHash).toBe(expectedHash);
   });
 });

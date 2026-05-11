@@ -8,6 +8,7 @@ import {
   renderTunnelCommand,
   startTunnel,
 } from '../src/utils/tunnel.js';
+import { inferCloudflareConfigPublicUrl } from '../src/cli/tunnel.js';
 
 describe('tunnel utilities', () => {
   it('renders port placeholders in tunnel commands', () => {
@@ -62,6 +63,17 @@ describe('tunnel utilities', () => {
   it('normalizes user-entered public tunnel URLs', () => {
     expect(normalizeTunnelBaseUrl('https://pnee.gofrieda.org/mcp')).toBe('https://pnee.gofrieda.org');
     expect(normalizeTunnelBaseUrl('https://pnee.gofrieda.org/')).toBe('https://pnee.gofrieda.org');
+  });
+
+  it('infers a public URL from a cloudflared named tunnel config', () => {
+    expect(inferCloudflareConfigPublicUrl(`
+tunnel: mvmt
+credentials-file: /Users/me/.cloudflared/mvmt.json
+ingress:
+  - hostname: files.example.com
+    service: http://127.0.0.1:4141
+  - service: http_status:404
+`)).toBe('https://files.example.com');
   });
 
   it('builds a Cloudflare named tunnel command from a config file path', () => {

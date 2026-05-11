@@ -1,5 +1,7 @@
 import { input, select } from '@inquirer/prompts';
 import chalk from 'chalk';
+import fsp from 'fs/promises';
+import yaml from 'yaml';
 import { configExists, expandHome, getConfigPath, readConfig, resolveConfigPath, saveConfig } from '../config/loader.js';
 import { MvmtConfig, TunnelConfig } from '../config/schema.js';
 import {
@@ -22,6 +24,8 @@ import { promptForExistingFile } from './folder-prompt.js';
 
 export interface TunnelCommandOptions {
   config?: string;
+  quick?: boolean;
+  cloudflareConfig?: string;
 }
 
 export interface TunnelRuntimeStatus {
@@ -60,7 +64,20 @@ export async function configureTunnel(options: TunnelCommandOptions = {}): Promi
   const loaded = loadConfigSummary(options.config);
   if (!loaded) return;
 
-  const tunnel = await promptForTunnelConfig(loaded.config.server.port);
+  if (options.quick && options.cloudflareConfig) {
+    throw new Error('Use either --quick or --cloudflare-config, not both.');
+  }
+  const tunnel = options.quick
+    ? { provider: 'cloudflare-quick' as const, command: defaultTunnelCommand('cloudflare-quick') }
+    : options.cloudflareConfig
+      ? await cloudflareConfigTunnel(options.cloudflareConfig)
+      : await promptForTunnelConfig(loaded.config.server.port);
+  const missingDependency = missingTunnelDependency(tunnel);
+  if (missingDependency) {
+    printMissingTunnelDependencyWarning(missingDependency, (line) => console.log(chalk.yellow(line)));
+    process.exitCode = 1;
+    return;
+  }
   const applied = applyTunnelConfig(loaded.config, tunnel);
   await saveConfig(loaded.configPath, applied.config);
 
@@ -68,9 +85,16 @@ export async function configureTunnel(options: TunnelCommandOptions = {}): Promi
   if (applied.warning) {
     printTunnelEnabledWithNoTokens(applied.warning);
   }
+  if (tunnel.url) {
+    console.log(`public URL  ${chalk.yellow(formatMcpPublicUrl(tunnel.url))}`);
+  }
 
   try {
-    const token = requireControlToken();
+    const token = readSessionToken();
+    if (!token) {
+      console.log(chalk.dim('Config saved. Start mvmt with `mvmt serve` to launch the tunnel.'));
+      return;
+    }
     const runtime = await sendJsonControlRequest<TunnelRuntimeStatus>(
       getControlSocketPath(loaded.configPath),
       { type: 'tunnel.config', tunnel },
@@ -279,6 +303,38 @@ export function printMissingTunnelDependencyWarning(command: string, write: (lin
     return;
   }
   write(`Tunnel dependency is missing: ${command}`);
+}
+
+async function cloudflareConfigTunnel(configPathInput: string): Promise<TunnelConfig> {
+  const configPath = expandHome(configPathInput.trim());
+  if (!configPath) throw new Error('Cloudflare config path is required.');
+  const raw = await fsp.readFile(configPath, 'utf-8');
+  const publicUrl = inferCloudflareConfigPublicUrl(raw);
+  return {
+    provider: 'custom',
+    command: cloudflareNamedTunnelCommand(configPath),
+    ...(publicUrl ? { url: publicUrl } : {}),
+  };
+}
+
+export function inferCloudflareConfigPublicUrl(rawConfig: string): string | undefined {
+  const parsed = yaml.parse(rawConfig) as unknown;
+  const hostname = firstCloudflareHostname(parsed);
+  return hostname ? normalizeTunnelBaseUrl(`https://${hostname}`) : undefined;
+}
+
+function firstCloudflareHostname(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const record = value as Record<string, unknown>;
+  if (typeof record.hostname === 'string' && record.hostname.trim()) return record.hostname.trim();
+  if (Array.isArray(record.ingress)) {
+    for (const entry of record.ingress) {
+      if (!entry || typeof entry !== 'object') continue;
+      const hostname = (entry as Record<string, unknown>).hostname;
+      if (typeof hostname === 'string' && hostname.trim()) return hostname.trim();
+    }
+  }
+  return undefined;
 }
 
 async function promptForTunnelDetails(

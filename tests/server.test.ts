@@ -17,7 +17,7 @@ import { parseConfig } from '../src/config/loader.js';
 import { TextContextIndex } from '../src/context/text-index.js';
 import { OAuthStore } from '../src/server/oauth.js';
 import { ToolRouter } from '../src/server/router.js';
-import { createShare, listShares } from '../src/share/store.js';
+import { addLeaseResources, createLease, listLeases, revokeLease } from '../src/lease/store.js';
 import { hashApiToken } from '../src/utils/api-token-hash.js';
 import { ensureSigningKey, generateSessionToken, rotateSigningKey } from '../src/utils/token.js';
 
@@ -81,11 +81,11 @@ describe('SSE request helpers', () => {
   });
 });
 
-describe('share downloads', () => {
-  it('streams a single-file mount through a query-token share URL', async () => {
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-share-test-'));
+describe('file lease downloads', () => {
+  it('streams a single-file lease through a query-token URL', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-lease-test-'));
     const tokenPath = path.join(tmp, '.session-token');
-    const shareStorePath = path.join(tmp, '.shares.json');
+    const leaseStorePath = path.join(tmp, '.leases.json');
     const filePath = path.join(tmp, 'payload.bin');
     const payload = Buffer.from([0, 1, 2, 3, 4, 255]);
     fs.writeFileSync(filePath, payload);
@@ -93,52 +93,56 @@ describe('share downloads', () => {
       version: 1,
       mounts: [{ name: 'payload', type: 'local_folder', path: '/payload.bin', root: filePath }],
     });
-    const share = createShare(shareStorePath, {
+    const lease = createLease(leaseStorePath, {
+      label: 'Payload',
       path: '/payload.bin',
+      resources: [{ path: '/payload.bin', sourcePath: '/payload.bin', type: 'file' }],
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     });
     const server = await startHttpServer(new ToolRouter(), {
       port: 0,
       tokenPath,
-      shareMounts: config.mounts,
-      shareStorePath,
+      leaseMounts: config.mounts,
+      leaseStorePath,
     });
     try {
-      const response = await fetch(`http://127.0.0.1:${server.port}/share/${share.record.id}?token=${share.token}`);
+      const response = await fetch(`http://127.0.0.1:${server.port}/lease/${lease.record.id}/files/payload.bin?token=${lease.token}`);
       expect(response.status).toBe(200);
       expect(response.headers.get('content-disposition')).toContain('payload.bin');
       expect(response.headers.get('accept-ranges')).toBe('bytes');
       const downloaded = Buffer.from(await response.arrayBuffer());
       expect(createHash('sha256').update(downloaded).digest('hex')).toBe(createHash('sha256').update(payload).digest('hex'));
-      expect(listShares(shareStorePath)[0].downloadCount).toBe(1);
+      expect(listLeases(leaseStorePath)[0].downloadCount).toBe(1);
     } finally {
       await server.close();
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   });
 
-  it('supports byte ranges for share downloads', async () => {
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-share-test-'));
+  it('supports byte ranges for file lease downloads', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-lease-test-'));
     const tokenPath = path.join(tmp, '.session-token');
-    const shareStorePath = path.join(tmp, '.shares.json');
+    const leaseStorePath = path.join(tmp, '.leases.json');
     const filePath = path.join(tmp, 'payload.bin');
     fs.writeFileSync(filePath, Buffer.from([10, 11, 12, 13, 14]));
     const config = parseConfig({
       version: 1,
       mounts: [{ name: 'payload', type: 'local_folder', path: '/payload.bin', root: filePath }],
     });
-    const share = createShare(shareStorePath, {
+    const lease = createLease(leaseStorePath, {
+      label: 'Payload',
       path: '/payload.bin',
+      resources: [{ path: '/payload.bin', sourcePath: '/payload.bin', type: 'file' }],
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     });
     const server = await startHttpServer(new ToolRouter(), {
       port: 0,
       tokenPath,
-      shareMounts: config.mounts,
-      shareStorePath,
+      leaseMounts: config.mounts,
+      leaseStorePath,
     });
     try {
-      const response = await fetch(`http://127.0.0.1:${server.port}/share/${share.record.id}?token=${share.token}`, {
+      const response = await fetch(`http://127.0.0.1:${server.port}/lease/${lease.record.id}/files/payload.bin?token=${lease.token}`, {
         headers: { Range: 'bytes=1-3' },
       });
       expect(response.status).toBe(206);
@@ -150,35 +154,375 @@ describe('share downloads', () => {
     }
   });
 
-  it('rejects invalid and expired share tokens', async () => {
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-share-test-'));
+  it('rejects invalid and expired lease tokens', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-lease-test-'));
     const tokenPath = path.join(tmp, '.session-token');
-    const shareStorePath = path.join(tmp, '.shares.json');
+    const leaseStorePath = path.join(tmp, '.leases.json');
     const filePath = path.join(tmp, 'payload.bin');
     fs.writeFileSync(filePath, 'payload', 'utf-8');
     const config = parseConfig({
       version: 1,
       mounts: [{ name: 'payload', type: 'local_folder', path: '/payload.bin', root: filePath }],
     });
-    const active = createShare(shareStorePath, {
+    const active = createLease(leaseStorePath, {
+      label: 'Active',
       path: '/payload.bin',
+      resources: [{ path: '/payload.bin', sourcePath: '/payload.bin', type: 'file' }],
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     });
-    const expired = createShare(shareStorePath, {
+    const expired = createLease(leaseStorePath, {
+      label: 'Expired',
       path: '/payload.bin',
+      resources: [{ path: '/payload.bin', sourcePath: '/payload.bin', type: 'file' }],
       expiresAt: new Date(Date.now() - 60_000).toISOString(),
     });
     const server = await startHttpServer(new ToolRouter(), {
       port: 0,
       tokenPath,
-      shareMounts: config.mounts,
-      shareStorePath,
+      leaseMounts: config.mounts,
+      leaseStorePath,
     });
     try {
-      const invalid = await fetch(`http://127.0.0.1:${server.port}/share/${active.record.id}?token=wrong`);
+      const invalid = await fetch(`http://127.0.0.1:${server.port}/lease/${active.record.id}/files/payload.bin?token=wrong`);
       expect(invalid.status).toBe(401);
-      const gone = await fetch(`http://127.0.0.1:${server.port}/share/${expired.record.id}?token=${expired.token}`);
+      const gone = await fetch(`http://127.0.0.1:${server.port}/lease/${expired.record.id}/files/payload.bin?token=${expired.token}`);
       expect(gone.status).toBe(410);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('folder lease access', () => {
+  it('lists a leased folder and streams arbitrary files by checksum', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-lease-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const leaseStorePath = path.join(tmp, '.leases.json');
+    const root = path.join(tmp, 'taxes');
+    fs.mkdirSync(path.join(root, 'nested'), { recursive: true });
+    fs.mkdirSync(path.join(root, '.ssh'), { recursive: true });
+    const payload = Buffer.from([0, 1, 2, 3, 4, 255]);
+    fs.writeFileSync(path.join(root, 'w2.pdf'), payload);
+    fs.writeFileSync(path.join(root, 'nested', 'note.txt'), 'nested note', 'utf-8');
+    fs.writeFileSync(path.join(root, '.ssh', 'id_ed25519'), 'secret', 'utf-8');
+    const config = parseConfig({
+      version: 1,
+      mounts: [{ name: 'taxes', type: 'local_folder', path: '/taxes', root }],
+    });
+    const lease = createLease(leaseStorePath, {
+      label: 'Sarah - tax docs',
+      path: '/taxes',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: config.mounts,
+      leaseStorePath,
+    });
+    try {
+      const listing = await fetch(`http://127.0.0.1:${server.port}/lease/${lease.record.id}/files?token=${lease.token}`);
+      expect(listing.status).toBe(200);
+      const body = await listing.json() as { entries: { name: string; type: string }[] };
+      expect(body.entries).toEqual([
+        expect.objectContaining({ name: 'nested', type: 'directory' }),
+        expect.objectContaining({ name: 'w2.pdf', type: 'file' }),
+      ]);
+      expect(body.entries.some((entry) => entry.name === '.ssh')).toBe(false);
+
+      const html = await fetch(`http://127.0.0.1:${server.port}/lease/${lease.record.id}?token=${lease.token}`);
+      expect(html.status).toBe(200);
+      expect(await html.text()).toContain('Folder lease');
+
+      const download = await fetch(`http://127.0.0.1:${server.port}/lease/${lease.record.id}/files/w2.pdf?token=${lease.token}`);
+      expect(download.status).toBe(200);
+      expect(download.headers.get('content-disposition')).toContain('w2.pdf');
+      const downloaded = Buffer.from(await download.arrayBuffer());
+      expect(createHash('sha256').update(downloaded).digest('hex')).toBe(createHash('sha256').update(payload).digest('hex'));
+      expect(listLeases(leaseStorePath)[0].downloadCount).toBe(1);
+      expect(listLeases(leaseStorePath)[0].lastUsedAt).toBeTruthy();
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('escapes browser lease pages and does not reflect unsafe query tokens', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-lease-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const leaseStorePath = path.join(tmp, '.leases.json');
+    const readRoot = path.join(tmp, 'read');
+    const uploadRoot = path.join(tmp, 'upload');
+    fs.mkdirSync(readRoot, { recursive: true });
+    fs.mkdirSync(uploadRoot, { recursive: true });
+    fs.writeFileSync(path.join(readRoot, 'report & <draft>.txt'), 'draft', 'utf-8');
+    const config = parseConfig({
+      version: 1,
+      mounts: [
+        { name: 'read', type: 'local_folder', path: '/read', root: readRoot },
+        { name: 'upload', type: 'local_folder', path: '/upload', root: uploadRoot, writeAccess: true },
+      ],
+    });
+    const label = '<img src=x onerror=alert(1)> Sarah';
+    const readLease = createLease(leaseStorePath, {
+      label,
+      path: '/read',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const uploadLease = createLease(leaseStorePath, {
+      label,
+      path: '/upload',
+      permissions: ['upload'],
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: config.mounts,
+      leaseStorePath,
+    });
+    try {
+      const unsafeQuery = encodeURIComponent('</script><img src=x onerror=alert(1)>');
+      const readPage = await fetch(`http://127.0.0.1:${server.port}/lease/${readLease.record.id}?token=${unsafeQuery}`, {
+        headers: { Authorization: `Bearer     ${readLease.token}` },
+      });
+      expect(readPage.status).toBe(200);
+      const readHtml = await readPage.text();
+      expect(readHtml).toContain('Folder lease');
+      expect(readHtml).not.toContain('&lt;img src=x onerror=alert(1)&gt; Sarah');
+      expect(readHtml).not.toContain('report &amp; &lt;draft&gt;.txt');
+      expect(readHtml).not.toContain('<img src=x onerror=alert(1)>');
+      expect(readHtml).not.toContain('</script><img');
+
+      const uploadPage = await fetch(`http://127.0.0.1:${server.port}/lease/${uploadLease.record.id}?token=${unsafeQuery}`, {
+        headers: { Authorization: `Bearer     ${uploadLease.token}` },
+      });
+      expect(uploadPage.status).toBe(200);
+      const uploadHtml = await uploadPage.text();
+      expect(uploadHtml).toContain('Upload-only lease');
+      expect(uploadHtml).not.toContain('&lt;img src=x onerror=alert(1)&gt; Sarah');
+      expect(uploadHtml).not.toContain('</script><img');
+      expect(uploadHtml).not.toContain('token = "</script>');
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('serves multiple lease resources through one browser link and one MCP token', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-lease-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const leaseStorePath = path.join(tmp, '.leases.json');
+    const taxesRoot = path.join(tmp, 'taxes');
+    const receiptsRoot = path.join(tmp, 'receipts');
+    const privateRoot = path.join(tmp, 'private');
+    fs.mkdirSync(taxesRoot, { recursive: true });
+    fs.mkdirSync(receiptsRoot, { recursive: true });
+    fs.mkdirSync(privateRoot, { recursive: true });
+    fs.writeFileSync(path.join(taxesRoot, 'w2.md'), '# W2\nalpha taxes', 'utf-8');
+    fs.writeFileSync(path.join(receiptsRoot, 'meal.md'), '# Meal\nalpha receipt', 'utf-8');
+    fs.writeFileSync(path.join(privateRoot, 'secret.md'), '# Secret\nalpha private', 'utf-8');
+    const config = parseConfig({
+      version: 1,
+      mounts: [
+        { name: 'taxes', type: 'local_folder', path: '/taxes', root: taxesRoot },
+        { name: 'receipts', type: 'local_folder', path: '/receipts', root: receiptsRoot },
+        { name: 'private', type: 'local_folder', path: '/private', root: privateRoot },
+      ],
+    });
+    const lease = createLease(leaseStorePath, {
+      label: 'Sarah files',
+      resources: [
+        { path: '/taxes', sourcePath: '/taxes', type: 'folder' },
+      ],
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const index = new TextContextIndex({ mounts: config.mounts, indexPath: path.join(tmp, 'index.json') });
+    await index.rebuild();
+    const router = new ToolRouter(undefined, [], { contextIndex: index });
+    await router.initialize();
+    const server = await startHttpServer(router, {
+      port: 0,
+      tokenPath,
+      leaseMounts: config.mounts,
+      leaseStorePath,
+    });
+    try {
+      const rootListing = await fetch(`http://127.0.0.1:${server.port}/lease/${lease.record.id}/files?token=${lease.token}`);
+      expect(rootListing.status).toBe(200);
+      const rootBody = await rootListing.json() as { entries: { path: string; type: string }[] };
+      expect(rootBody.entries).toEqual([expect.objectContaining({ path: '/w2.md', type: 'file' })]);
+
+      const download = await fetch(`http://127.0.0.1:${server.port}/lease/${lease.record.id}/files/w2.md?token=${lease.token}`);
+      expect(download.status).toBe(200);
+      expect(await download.text()).toContain('alpha taxes');
+
+      const sessionId = await initializeMcpSession(server.port, lease.token);
+      const deniedBeforeAdd = await mcpJsonRequest(server.port, lease.token, sessionId, 2, 'tools/call', {
+        name: 'read',
+        arguments: { path: '/receipts/meal.md' },
+      });
+      expect(deniedBeforeAdd.result.isError).toBe(true);
+
+      const updated = addLeaseResources(leaseStorePath, lease.record.id, [
+        { path: '/receipts', sourcePath: '/receipts', type: 'folder' },
+      ]);
+      expect(updated?.tokenHash).toBe(lease.record.tokenHash);
+
+      const updatedListing = await fetch(`http://127.0.0.1:${server.port}/lease/${lease.record.id}/files?token=${lease.token}`);
+      expect(updatedListing.status).toBe(200);
+      const updatedBody = await updatedListing.json() as { entries: { path: string; type: string }[] };
+      expect(updatedBody.entries).toEqual([
+        expect.objectContaining({ path: '/receipts', type: 'directory' }),
+        expect.objectContaining({ path: '/taxes', type: 'directory' }),
+      ]);
+
+      const listRoot = await mcpJsonRequest(server.port, lease.token, sessionId, 3, 'tools/call', {
+        name: 'list',
+        arguments: {},
+      });
+      const listPayload = JSON.parse(listRoot.result.content[0].text);
+      expect(listPayload.entries.map((entry: { path: string }) => entry.path).sort()).toEqual(['/receipts', '/taxes']);
+
+      const allowedAfterAdd = await mcpJsonRequest(server.port, lease.token, sessionId, 4, 'tools/call', {
+        name: 'read',
+        arguments: { path: '/receipts/meal.md' },
+      });
+      expect(allowedAfterAdd.result.isError).not.toBe(true);
+
+      const denied = await mcpJsonRequest(server.port, lease.token, sessionId, 5, 'tools/call', {
+        name: 'read',
+        arguments: { path: '/private/secret.md' },
+      });
+      expect(denied.result.isError).toBe(true);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('supports upload-only leases without browse, download, or overwrite access', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-lease-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const leaseStorePath = path.join(tmp, '.leases.json');
+    const root = path.join(tmp, 'dropbox');
+    fs.mkdirSync(path.join(root, 'nested'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'existing.txt'), 'already here', 'utf-8');
+    const config = parseConfig({
+      version: 1,
+      mounts: [{ name: 'dropbox', type: 'local_folder', path: '/dropbox', root, writeAccess: true }],
+    });
+    const uploadLease = createLease(leaseStorePath, {
+      label: 'Phone uploads',
+      path: '/dropbox',
+      permissions: ['upload'],
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const readLease = createLease(leaseStorePath, {
+      label: 'Read only',
+      path: '/dropbox',
+      permissions: ['read'],
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: config.mounts,
+      leaseStorePath,
+    });
+    try {
+      const page = await fetch(`http://127.0.0.1:${server.port}/lease/${uploadLease.record.id}?token=${uploadLease.token}`);
+      expect(page.status).toBe(200);
+      expect(await page.text()).toContain('Upload-only lease');
+
+      const listing = await fetch(`http://127.0.0.1:${server.port}/lease/${uploadLease.record.id}/files?token=${uploadLease.token}`);
+      expect(listing.status).toBe(403);
+
+      const uploaded = await fetch(`http://127.0.0.1:${server.port}/lease/${uploadLease.record.id}/files/nested/phone.txt?token=${uploadLease.token}`, {
+        method: 'PUT',
+        body: 'from phone',
+      });
+      expect(uploaded.status).toBe(201);
+      expect(fs.readFileSync(path.join(root, 'nested', 'phone.txt'), 'utf-8')).toBe('from phone');
+      expect(listLeases(leaseStorePath)[0].uploadCount).toBe(1);
+
+      const overwrite = await fetch(`http://127.0.0.1:${server.port}/lease/${uploadLease.record.id}/files/existing.txt?token=${uploadLease.token}`, {
+        method: 'PUT',
+        body: 'replace',
+      });
+      expect(overwrite.status).toBe(409);
+      expect(fs.readFileSync(path.join(root, 'existing.txt'), 'utf-8')).toBe('already here');
+
+      const traversal = await fetch(`http://127.0.0.1:${server.port}/lease/${uploadLease.record.id}/files/%2e%2e/escape.txt?token=${uploadLease.token}`, {
+        method: 'PUT',
+        body: 'escape',
+      });
+      expect(traversal.status).toBe(404);
+
+      const readOnlyPut = await fetch(`http://127.0.0.1:${server.port}/lease/${readLease.record.id}/files/nope.txt?token=${readLease.token}`, {
+        method: 'PUT',
+        body: 'nope',
+      });
+      expect(readOnlyPut.status).toBe(403);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('enforces lease token, expiry, revocation, range, and path boundaries', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-lease-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const leaseStorePath = path.join(tmp, '.leases.json');
+    const root = path.join(tmp, 'leased');
+    fs.mkdirSync(root, { recursive: true });
+    fs.writeFileSync(path.join(root, 'payload.bin'), Buffer.from([10, 11, 12, 13, 14]));
+    const config = parseConfig({
+      version: 1,
+      mounts: [{ name: 'leased', type: 'local_folder', path: '/leased', root }],
+    });
+    const active = createLease(leaseStorePath, {
+      label: 'Active',
+      path: '/leased',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const expired = createLease(leaseStorePath, {
+      label: 'Expired',
+      path: '/leased',
+      expiresAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+    const revoked = createLease(leaseStorePath, {
+      label: 'Revoked',
+      path: '/leased',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    revokeLease(leaseStorePath, revoked.record.id);
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: config.mounts,
+      leaseStorePath,
+    });
+    try {
+      const invalid = await fetch(`http://127.0.0.1:${server.port}/lease/${active.record.id}/files?token=wrong`);
+      expect(invalid.status).toBe(401);
+
+      const gone = await fetch(`http://127.0.0.1:${server.port}/lease/${expired.record.id}/files?token=${expired.token}`);
+      expect(gone.status).toBe(410);
+
+      const revokedResponse = await fetch(`http://127.0.0.1:${server.port}/lease/${revoked.record.id}/files?token=${revoked.token}`);
+      expect(revokedResponse.status).toBe(410);
+
+      const range = await fetch(`http://127.0.0.1:${server.port}/lease/${active.record.id}/files/payload.bin?token=${active.token}`, {
+        headers: { Range: 'bytes=1-3' },
+      });
+      expect(range.status).toBe(206);
+      expect(range.headers.get('content-range')).toBe('bytes 1-3/5');
+      expect([...Buffer.from(await range.arrayBuffer())]).toEqual([11, 12, 13]);
+
+      const traversal = await fetch(`http://127.0.0.1:${server.port}/lease/${active.record.id}/files/%2e%2e/payload.bin?token=${active.token}`);
+      expect(traversal.status).toBe(404);
     } finally {
       await server.close();
       fs.rmSync(tmp, { recursive: true, force: true });

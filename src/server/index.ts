@@ -1,6 +1,10 @@
 import { createHash, randomUUID } from 'crypto';
-import { createReadStream } from 'fs';
+import { createReadStream, createWriteStream } from 'fs';
+import fsp from 'fs/promises';
 import { Server as HttpServer } from 'node:http';
+import path from 'path';
+import { Transform } from 'stream';
+import { pipeline } from 'stream/promises';
 import express, { Request, Response } from 'express';
 import type { AccessToken } from './oauth.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -24,14 +28,18 @@ import {
 } from './oauth.js';
 import { rateLimit } from './rate-limit.js';
 import { ClientConfig, LocalFolderMountConfig } from '../config/schema.js';
-import { resolveShareFileTarget } from '../share/files.js';
+import { listLeaseDirectory, resolveLeaseFileTarget, resolveLeaseUploadTarget } from '../lease/files.js';
 import {
-  defaultSharesPath,
-  findShare,
-  recordShareDownload,
-  shareUnavailableReason,
-  validateShareToken,
-} from '../share/store.js';
+  defaultLeasesPath,
+  findLease,
+  findLeaseByToken,
+  leaseAllows,
+  LeaseRecord,
+  leaseResources,
+  leaseUnavailableReason,
+  recordLeaseUse,
+  validateLeaseToken,
+} from '../lease/store.js';
 import {
   attachClientIdentity,
   ClientIdentity,
@@ -51,6 +59,7 @@ import {
 const DEFAULT_AUTH_RATE_LIMIT = { windowMs: 60_000, max: 30 };
 const DEFAULT_MCP_RATE_LIMIT = { windowMs: 60_000, max: 600 };
 const DEFAULT_HEALTH_RATE_LIMIT = { windowMs: 60_000, max: 120 };
+const DEFAULT_MAX_LEASE_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024;
 
 type McpSession = {
   transport: StreamableHTTPServerTransport;
@@ -89,8 +98,8 @@ export interface HttpServerOptions {
   // synthesized default identity that preserves pre-PR single-token
   // behavior. Pass an array to enable per-client identity resolution.
   clients?: readonly ClientConfig[] | (() => readonly ClientConfig[] | undefined);
-  shareMounts?: readonly LocalFolderMountConfig[] | (() => readonly LocalFolderMountConfig[] | undefined);
-  shareStorePath?: string;
+  leaseMounts?: readonly LocalFolderMountConfig[] | (() => readonly LocalFolderMountConfig[] | undefined);
+  leaseStorePath?: string;
   // Defaults to true for local backward compatibility. Tunnel mode passes
   // false unless MVMT_ALLOW_LEGACY_TUNNEL is set, so a public endpoint can
   // start with no API tokens while exposing no data.
@@ -191,7 +200,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
 
   ensureSessionToken(tokenPath);
   const signingKeyPath = options.signingKeyPath ?? defaultSigningKeyPath(tokenPath ?? TOKEN_PATH);
-  const shareStorePath = options.shareStorePath ?? defaultSharesPath(tokenPath ?? TOKEN_PATH);
+  const leaseStorePath = options.leaseStorePath ?? defaultLeasesPath(tokenPath ?? TOKEN_PATH);
   // Create the signing key file on first boot, then re-read it on every
   // HMAC op. This way internal session-token rotation (which rewrites the file)
   // invalidates outstanding OAuth access tokens immediately, without
@@ -273,7 +282,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       expectedAudience,
       allowLegacyNoAudience: true,
     });
-    const identity = resolveClientIdentity({
+    let identity = resolveClientIdentity({
       authHeader,
       clients: resolveClients(options.clients),
       oauthAccessToken,
@@ -281,6 +290,10 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       allowLegacyDefault: resolveAllowLegacyDefaultClient(options.allowLegacyDefaultClient),
       clientHint: requestClientHint(req, oauthAccessToken?.clientId),
     });
+    if (!identity) {
+      const lease = findLeaseByToken(leaseStorePath, bearerToken(req));
+      if (lease && !leaseUnavailableReason(lease)) identity = identityFromLease(lease);
+    }
     if (identity && isQuarantined(identity)) {
       // Quarantined identities are authenticated (the OAuth access token
       // is valid) but the OAuth client_id has no mapping to a configured
@@ -630,43 +643,84 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     }
   });
 
-  const shareHandler: express.RequestHandler = async (req, res) => {
-    const id = firstStringQuery(req.params.id);
-    const share = id ? findShare(shareStorePath, id) : undefined;
-    if (!share) {
-      logHttpRequest(requestLog, req, 404, 'share.request', 'unknown_share');
-      res.status(404).json({ error: 'share_not_found' });
-      return;
+  const authorizeLeaseRequest = (req: Request, res: Response): ReturnType<typeof findLease> => {
+    const id = regexParam(req, 0) ?? firstStringQuery(req.params.id);
+    const lease = id ? findLease(leaseStorePath, id) : undefined;
+    if (!lease) {
+      logHttpRequest(requestLog, req, 404, 'lease.request', 'unknown_lease');
+      res.status(404).json({ error: 'lease_not_found' });
+      return undefined;
     }
 
-    const token = firstStringQuery(req.query.token) ?? firstStringQuery(req.query.t);
-    if (!validateShareToken(share, token)) {
-      logHttpRequest(requestLog, req, 401, 'share.request', 'invalid_token', share.id);
-      res.status(401).json({ error: 'invalid_share_token' });
-      return;
+    const token = bearerToken(req) ?? firstStringQuery(req.query.token) ?? firstStringQuery(req.query.t);
+    if (!validateLeaseToken(lease, token)) {
+      logHttpRequest(requestLog, req, 401, 'lease.request', 'invalid_token', lease.id);
+      res.status(401).json({ error: 'invalid_lease_token' });
+      return undefined;
     }
 
-    const unavailable = shareUnavailableReason(share);
+    const unavailable = leaseUnavailableReason(lease);
     if (unavailable) {
-      logHttpRequest(requestLog, req, 410, 'share.request', unavailable, share.id);
-      res.status(410).json({ error: `share_${unavailable}` });
+      logHttpRequest(requestLog, req, 410, 'lease.request', unavailable, lease.id);
+      res.status(410).json({ error: `lease_${unavailable}` });
+      return undefined;
+    }
+    return lease;
+  };
+
+  const leasePageHandler: express.RequestHandler = async (req, res) => {
+    const lease = authorizeLeaseRequest(req, res);
+    if (!lease) return;
+    if (!leaseAllows(lease, 'read')) {
+      if (leaseAllows(lease, 'upload')) {
+        recordLeaseUse(leaseStorePath, lease.id);
+        logHttpRequest(requestLog, req, 200, 'lease.request', 'upload_page', lease.id);
+        res.status(200).type('html').send(LEASE_UPLOAD_PAGE_HTML);
+        return;
+      }
+      logHttpRequest(requestLog, req, 403, 'lease.request', 'permission_denied', lease.id);
+      res.status(403).json({ error: 'lease_permission_denied' });
       return;
+    }
+    recordLeaseUse(leaseStorePath, lease.id);
+    logHttpRequest(requestLog, req, 200, 'lease.request', 'browser_page', lease.id);
+    res.status(200).type('html').send(LEASE_BROWSER_PAGE_HTML);
+  };
+
+  const leaseFilesHandler: express.RequestHandler = async (req, res) => {
+    const lease = authorizeLeaseRequest(req, res);
+    if (!lease) return;
+    if (!leaseAllows(lease, 'read')) {
+      logHttpRequest(requestLog, req, 403, 'lease.request', 'permission_denied', lease.id);
+      res.status(403).json({ error: 'lease_permission_denied' });
+      return;
+    }
+    const requestPath = regexParam(req, 1) ?? firstStringQuery(req.query.path) ?? '';
+
+    try {
+      const listing = await listLeaseDirectory(resolveLeaseMounts(options.leaseMounts), lease, requestPath);
+      recordLeaseUse(leaseStorePath, lease.id);
+      logHttpRequest(requestLog, req, 200, 'lease.request', listing.path, lease.id);
+      res.status(200).json(listing);
+      return;
+    } catch {
+      // If it is not a directory, try serving it as a file below.
     }
 
     let target;
     try {
-      target = await resolveShareFileTarget(resolveShareMounts(options.shareMounts), share.path);
+      target = await resolveLeaseFileTarget(resolveLeaseMounts(options.leaseMounts), lease, requestPath);
     } catch (err) {
       const detail = err instanceof Error ? err.message : 'unavailable';
-      logHttpRequest(requestLog, req, 404, 'share.request', detail, share.id);
-      res.status(404).json({ error: 'share_target_unavailable' });
+      logHttpRequest(requestLog, req, 404, 'lease.request', detail, lease.id);
+      res.status(404).json({ error: 'lease_target_unavailable' });
       return;
     }
 
     const range = parseRangeHeader(firstHeaderValue(req.headers.range), target.size);
     if (range === 'invalid') {
       res.setHeader('Content-Range', `bytes */${target.size}`);
-      logHttpRequest(requestLog, req, 416, 'share.request', 'invalid_range', share.id);
+      logHttpRequest(requestLog, req, 416, 'lease.request', 'invalid_range', lease.id);
       res.status(416).end();
       return;
     }
@@ -685,8 +739,9 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     res.setHeader('X-Content-Type-Options', 'nosniff');
     if (range) res.setHeader('Content-Range', `bytes ${start}-${end}/${target.size}`);
 
-    logHttpRequest(requestLog, req, status, 'share.request', target.virtualPath, share.id);
+    logHttpRequest(requestLog, req, status, 'lease.request', target.leaseRelativePath || '/', lease.id);
     if (req.method === 'HEAD') {
+      recordLeaseUse(leaseStorePath, lease.id);
       res.end();
       return;
     }
@@ -694,9 +749,9 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     res.on('finish', () => {
       if (res.statusCode < 400) {
         try {
-          recordShareDownload(shareStorePath, share.id);
+          recordLeaseUse(leaseStorePath, lease.id, { downloaded: true });
         } catch {
-          // Never let share accounting break a download.
+          // Never let lease accounting break a download.
         }
       }
     });
@@ -708,8 +763,58 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       .pipe(res);
   };
 
-  app.get('/share/:id', mcpLimiter, shareHandler);
-  app.head('/share/:id', mcpLimiter, shareHandler);
+  const leaseUploadHandler: express.RequestHandler = async (req, res) => {
+    const lease = authorizeLeaseRequest(req, res);
+    if (!lease) return;
+    if (!leaseAllows(lease, 'upload')) {
+      logHttpRequest(requestLog, req, 403, 'lease.request', 'permission_denied', lease.id);
+      res.status(403).json({ error: 'lease_permission_denied' });
+      return;
+    }
+
+    const contentLength = parseContentLength(firstHeaderValue(req.headers['content-length']));
+    if (contentLength === 'invalid') {
+      logHttpRequest(requestLog, req, 400, 'lease.upload', 'invalid_content_length', lease.id);
+      res.status(400).json({ error: 'invalid_content_length' });
+      return;
+    }
+    if (contentLength !== undefined && contentLength > DEFAULT_MAX_LEASE_UPLOAD_BYTES) {
+      logHttpRequest(requestLog, req, 413, 'lease.upload', 'upload_too_large', lease.id);
+      res.status(413).json({ error: 'lease_upload_too_large' });
+      return;
+    }
+
+    const requestPath = regexParam(req, 1) ?? firstStringQuery(req.query.path) ?? '';
+    let target;
+    try {
+      target = await resolveLeaseUploadTarget(resolveLeaseMounts(options.leaseMounts), lease, requestPath);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'unavailable';
+      const exists = detail.includes('already exists');
+      logHttpRequest(requestLog, req, exists ? 409 : 404, 'lease.upload', detail, lease.id);
+      res.status(exists ? 409 : 404).json({ error: exists ? 'lease_upload_exists' : 'lease_target_unavailable' });
+      return;
+    }
+
+    try {
+      const bytes = await writeUploadWithoutOverwrite(req, target.parentRealPath, target.realPath, DEFAULT_MAX_LEASE_UPLOAD_BYTES);
+      recordLeaseUse(leaseStorePath, lease.id, { uploaded: true });
+      logHttpRequest(requestLog, req, 201, 'lease.upload', target.leaseRelativePath, lease.id);
+      res.status(201).json({ path: target.leaseRelativePath ? `/${target.leaseRelativePath}` : '/', bytes });
+    } catch (err) {
+      const status = err instanceof LeaseUploadTooLargeError ? 413 : isNodeErrorCode(err, 'EEXIST') ? 409 : 500;
+      const error = status === 413 ? 'lease_upload_too_large' : status === 409 ? 'lease_upload_exists' : 'lease_upload_failed';
+      const detail = err instanceof Error ? err.message : error;
+      logHttpRequest(requestLog, req, status, 'lease.upload', detail, lease.id);
+      res.status(status).json({ error });
+    }
+  };
+
+  const leaseFilesRoute = /^\/lease\/([^/]+)\/files(?:\/(.*))?$/;
+  app.get('/lease/:id', mcpLimiter, leasePageHandler);
+  app.get(leaseFilesRoute, mcpLimiter, leaseFilesHandler);
+  app.head(leaseFilesRoute, mcpLimiter, leaseFilesHandler);
+  app.put(leaseFilesRoute, mcpLimiter, leaseUploadHandler);
 
   app.post('/mcp', mcpLimiter, authMiddleware, async (req, res) => {
     await handleMcpRequest(req, res, router, sessions);
@@ -880,8 +985,23 @@ function resolveClients(value: HttpServerOptions['clients']): readonly ClientCon
   return (typeof value === 'function' ? value() : value) ?? [];
 }
 
-function resolveShareMounts(value: HttpServerOptions['shareMounts']): readonly LocalFolderMountConfig[] {
+function resolveLeaseMounts(value: HttpServerOptions['leaseMounts']): readonly LocalFolderMountConfig[] {
   return (typeof value === 'function' ? value() : value) ?? [];
+}
+
+function identityFromLease(lease: LeaseRecord): ClientIdentity {
+  return {
+    id: `lease:${lease.id}`,
+    name: `Lease: ${lease.label}`,
+    source: 'lease',
+    rawToolsEnabled: false,
+    permissions: leaseAllows(lease, 'read')
+      ? leaseResources(lease).map((resource) => ({
+          path: resource.type === 'folder' ? `${stripTrailingSlashes(resource.sourcePath)}/**` : resource.sourcePath,
+          actions: ['search' as const, 'read' as const],
+        }))
+      : [],
+  };
 }
 
 function logHttpRequest(
@@ -1062,6 +1182,27 @@ function firstStringQuery(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
+function regexParam(req: Request, index: number): string | undefined {
+  const value = (req.params as Record<string, string | undefined>)[String(index)];
+  return value && value.length > 0 ? value : undefined;
+}
+
+function bearerToken(req: Request): string | undefined {
+  const header = firstHeaderValue(req.headers.authorization);
+  if (!header) return undefined;
+  const scheme = 'bearer';
+  if (header.slice(0, scheme.length).toLowerCase() !== scheme) return undefined;
+  let index = scheme.length;
+  if (!isHttpWhitespace(header[index])) return undefined;
+  while (isHttpWhitespace(header[index])) index += 1;
+  const token = header.slice(index).trim();
+  return token.length > 0 ? token : undefined;
+}
+
+function isHttpWhitespace(value: string | undefined): boolean {
+  return value === ' ' || value === '\t';
+}
+
 type ByteRange = { start: number; end: number };
 
 function parseRangeHeader(value: string | undefined, size: number): ByteRange | 'invalid' | undefined {
@@ -1085,6 +1226,199 @@ function parseRangeHeader(value: string | undefined, size: number): ByteRange | 
 function escapeHeaderValue(value: string): string {
   return value.replace(/["\\\r\n]/g, '_');
 }
+
+function parseContentLength(value: string | undefined): number | 'invalid' | undefined {
+  if (!value) return undefined;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) return 'invalid';
+  return parsed;
+}
+
+class LeaseUploadTooLargeError extends Error {
+  constructor(maxBytes: number) {
+    super(`Lease upload exceeds ${maxBytes} bytes`);
+  }
+}
+
+async function writeUploadWithoutOverwrite(
+  req: Request,
+  parentRealPath: string,
+  targetRealPath: string,
+  maxBytes: number,
+): Promise<number> {
+  const tempPath = path.join(parentRealPath, `.mvmt-upload-${process.pid}-${randomUUID()}.tmp`);
+  let bytes = 0;
+  const meter = new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      bytes += chunk.length;
+      if (bytes > maxBytes) {
+        callback(new LeaseUploadTooLargeError(maxBytes));
+        return;
+      }
+      callback(null, chunk);
+    },
+  });
+
+  try {
+    await pipeline(req, meter, createWriteStream(tempPath, { flags: 'wx', mode: 0o600 }));
+    await fsp.link(tempPath, targetRealPath);
+    return bytes;
+  } finally {
+    await fsp.unlink(tempPath).catch(() => undefined);
+  }
+}
+
+function isNodeErrorCode(err: unknown, code: string): boolean {
+  return typeof err === 'object' && err !== null && (err as NodeJS.ErrnoException).code === code;
+}
+
+const LEASE_BROWSER_PAGE_HTML = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mvmt folder lease</title>
+<style>
+body{font-family:ui-sans-serif,system-ui,sans-serif;margin:2rem;max-width:960px}
+table{border-collapse:collapse;width:100%}
+td,th{border-bottom:1px solid #ddd;padding:.5rem;text-align:left}
+a{color:#0f766e}
+.meta,.status{color:#666}
+</style>
+</head>
+<body>
+<h1 id="title">Folder lease</h1>
+<p class="meta" id="meta"></p>
+<p id="parent"></p>
+<p class="status" id="status"></p>
+<table><thead><tr><th>Name</th><th>Type</th><th>Bytes</th></tr></thead><tbody id="entries"></tbody></table>
+<script>
+const pathParts = location.pathname.split('/').filter(Boolean);
+const leaseId = decodeURIComponent(pathParts[1] || '');
+const params = new URLSearchParams(location.search);
+const token = params.get('token') || params.get('t') || '';
+const requestedPath = params.get('path') || '';
+const title = document.getElementById('title');
+const meta = document.getElementById('meta');
+const parent = document.getElementById('parent');
+const status = document.getElementById('status');
+const entries = document.getElementById('entries');
+
+function pageUrl(nextPath) {
+  const url = new URL('/lease/' + encodeURIComponent(leaseId), location.origin);
+  if (nextPath && nextPath !== '/') url.searchParams.set('path', nextPath);
+  if (token) url.searchParams.set('token', token);
+  return url.pathname + url.search;
+}
+
+function fileUrl(entryPath) {
+  const encodedPath = entryPath.split('/').filter(Boolean).map(encodeURIComponent).join('/');
+  const url = new URL('/lease/' + encodeURIComponent(leaseId) + '/files/' + encodedPath, location.origin);
+  if (token) url.searchParams.set('token', token);
+  return url.pathname + url.search;
+}
+
+function parentPath(inputPath) {
+  const parts = inputPath.split('/').filter(Boolean);
+  parts.pop();
+  return parts.length === 0 ? '/' : '/' + parts.join('/');
+}
+
+async function loadListing() {
+  const url = new URL('/lease/' + encodeURIComponent(leaseId) + '/files', location.origin);
+  if (requestedPath) url.searchParams.set('path', requestedPath);
+  if (token) url.searchParams.set('token', token);
+  const response = await fetch(url);
+  if (!response.ok) {
+    status.textContent = response.status === 401 ? 'Invalid or missing lease token.' : 'Folder is unavailable.';
+    return;
+  }
+  const listing = await response.json();
+  title.textContent = listing.label || 'Folder lease';
+  meta.textContent = (listing.path || '/') + (listing.expiresAt ? ' - expires ' + listing.expiresAt : '');
+  if (listing.path && listing.path !== '/') {
+    const link = document.createElement('a');
+    link.href = pageUrl(parentPath(listing.path));
+    link.textContent = '..';
+    parent.replaceChildren(link);
+  }
+  entries.replaceChildren(...listing.entries.map((entry) => {
+    const row = document.createElement('tr');
+    const nameCell = document.createElement('td');
+    const link = document.createElement('a');
+    link.href = entry.type === 'directory' ? pageUrl(entry.path) : fileUrl(entry.path);
+    link.textContent = entry.name;
+    nameCell.append(link);
+    const typeCell = document.createElement('td');
+    typeCell.textContent = entry.type;
+    const sizeCell = document.createElement('td');
+    sizeCell.textContent = entry.type === 'directory' ? '' : String(entry.size);
+    row.append(nameCell, typeCell, sizeCell);
+    return row;
+  }));
+}
+
+loadListing().catch(() => {
+  status.textContent = 'Folder is unavailable.';
+});
+</script>
+</body>
+</html>`;
+
+const LEASE_UPLOAD_PAGE_HTML = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mvmt upload lease</title>
+<style>
+body{font-family:ui-sans-serif,system-ui,sans-serif;margin:2rem;max-width:720px}
+.drop{border:2px dashed #bbb;border-radius:8px;padding:2rem;text-align:center}
+.meta,.status{color:#666}
+button{padding:.55rem .8rem}
+</style>
+</head>
+<body>
+<h1>Upload files</h1>
+<p class="meta">Upload-only lease</p>
+<div class="drop">
+  <input id="files" type="file" multiple>
+  <p class="status" id="status">Choose files or drop them here.</p>
+</div>
+<script>
+const pathParts = location.pathname.split('/').filter(Boolean);
+const leaseId = decodeURIComponent(pathParts[1] || '');
+const params = new URLSearchParams(location.search);
+const token = params.get('token') || params.get('t') || '';
+const drop = document.querySelector('.drop');
+const input = document.getElementById('files');
+const status = document.getElementById('status');
+function uploadPath(name) {
+  return '/lease/' + encodeURIComponent(leaseId) + '/files/' + encodeURIComponent(name) + '?token=' + encodeURIComponent(token);
+}
+async function uploadFiles(files) {
+  for (const file of files) {
+    status.textContent = 'Uploading ' + file.name + '...';
+    const response = await fetch(uploadPath(file.name), { method: 'PUT', body: file });
+    if (!response.ok) {
+      status.textContent = 'Upload failed: ' + file.name;
+      return;
+    }
+  }
+  status.textContent = 'Upload complete.';
+  input.value = '';
+}
+input.addEventListener('change', () => uploadFiles(input.files));
+drop.addEventListener('dragover', (event) => {
+  event.preventDefault();
+});
+drop.addEventListener('drop', (event) => {
+  event.preventDefault();
+  uploadFiles(event.dataTransfer.files);
+});
+</script>
+</body>
+</html>`;
 
 function requestClientHint(req: Request, oauthClientId?: string): string | undefined {
   const values = [

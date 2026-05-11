@@ -1,7 +1,7 @@
 import chalk from 'chalk';
 import { confirm } from '@inquirer/prompts';
 import { TextContextIndex, defaultTextIndexPath } from '../context/text-index.js';
-import { configExists, loadConfig, readConfig, resolveConfigPath, saveConfig } from '../config/loader.js';
+import { configExists, loadConfig, parseConfig, readConfig, resolveConfigPath, saveConfig } from '../config/loader.js';
 import { MvmtConfig, TunnelSchema } from '../config/schema.js';
 import { createTemporaryFilesystemConfig } from './config.js';
 import { setupConfig } from './init.js';
@@ -73,11 +73,16 @@ export async function start(options: StartOptions = {}): Promise<void> {
       process.exit(1);
     }
 
-    await setupConfig({
-      config: configPath,
-      promptOnOverwrite: false,
-      printNextStep: false,
-    });
+    if (process.stdin.isTTY && process.stdout.isTTY) {
+      await setupConfig({
+        config: configPath,
+        promptOnOverwrite: false,
+        printNextStep: false,
+      });
+    } else {
+      await saveConfig(configPath, parseConfig({ version: 1 }));
+      logger.info(`Created empty mvmt config at ${configPath}`);
+    }
   }
   let config = loadConfig(configPath);
   if (!stdioMode) {
@@ -92,7 +97,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
   }
   const port = parsePort(options.port) ?? config.server.port;
   const loaded = await initializeConnectors(config, stdioMode, logger);
-  const textIndex = config.mounts.some((mount) => mount.enabled !== false)
+  const textIndex = !stdioMode || config.mounts.some((mount) => mount.enabled !== false)
     ? new TextContextIndex({ mounts: config.mounts, indexPath: defaultTextIndexPath(configPath) })
     : undefined;
   const plugins = createPlugins(config.plugins);
@@ -100,7 +105,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
     emit(`Loaded plugin:${plugin.id}`, stdioMode, logger);
   }
 
-  if (loaded.length === 0 && !textIndex) {
+  if (stdioMode && loaded.length === 0 && !textIndex) {
     emitNoMountsGuidance(stdioMode, logger);
     process.exit(1);
   }
@@ -139,7 +144,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
       allowedOrigins: config.server.allowedOrigins,
       resolvePublicBaseUrl: () => tunnelController.publicUrl,
       clients: createLiveClientsResolver(configPath, config, textIndex),
-      shareMounts: createLiveMountsResolver(configPath, config, textIndex),
+      leaseMounts: createLiveMountsResolver(configPath, config, textIndex),
       allowLegacyDefaultClient: () => config.server.access !== 'tunnel' || legacyTunnelOverrideEnabled(),
       requestLog: interactiveMode
         ? (entry) => (audit as InteractiveAuditLogger).recordHttp(entry)
@@ -440,9 +445,9 @@ function printStartupBanner(
     console.log('');
   }
   if (interactiveMode) {
-    console.log(`${chalk.bold('Tokens')}       type ${chalk.cyan('token')} to list scoped API tokens`);
+    console.log(`${chalk.bold('Leases')}       type ${chalk.cyan('lease')} to list or ${chalk.cyan('lease create')} to share paths`);
     console.log(`${chalk.bold('Tool-call log')} ${AUDIT_LOG_PATH}`);
-    console.log(`${chalk.bold('Live events')}   OAuth, MCP auth, and tool-call attempts`);
+    console.log(`${chalk.bold('Live events')}   lease, OAuth, MCP auth, and tool-call attempts`);
     console.log(`\n${chalk.dim('Interactive mode: type "help" for commands.')}`);
   } else {
     console.log(`${chalk.bold('Session')}      ${TOKEN_PATH}`);

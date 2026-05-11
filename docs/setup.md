@@ -24,6 +24,34 @@ mvmt --version
 The `mvmt` package name is already taken on npm, so the first public beta uses
 the source checkout path above.
 
+## Desktop App From Source
+
+`mvmt-desktop` is an Electron shell over the mvmt engine. For local testing,
+keep both repos beside each other and build the engine first:
+
+```bash
+cd ~/code
+git clone https://github.com/philipnee/mvmt.git
+git clone https://github.com/philipnee/mvmt-desktop.git
+
+cd mvmt
+npm install
+npm run build
+
+cd ../mvmt-desktop
+npm install
+npm run dev
+```
+
+To make a standalone pre-alpha desktop bundle, vendor the built engine into the
+desktop app before packaging:
+
+```bash
+cd ~/code/mvmt-desktop
+npm run vendor
+npm run dist:mac
+```
+
 ## First 10 Minutes
 
 Use this path for a local smoke test:
