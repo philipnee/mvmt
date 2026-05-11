@@ -701,10 +701,9 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     next();
   };
 
-  // Admin-only endpoints (mount mutation, local filesystem browse). Non-admin
+  // Admin-only endpoints (mount mutation). Non-admin
   // dashboard users can still log in, browse the configured mounts, and
-  // create/revoke leases — they just can't change the mount config or list
-  // arbitrary local directories.
+  // create/revoke leases — they just can't change the mount config.
   const dashboardAdminMiddleware: express.RequestHandler = (req, res, next) => {
     const session = res.locals.dashboardSession as DashboardSession | undefined;
     if (!session || !session.admin) {
@@ -2004,6 +2003,51 @@ table.t{border-collapse:collapse;width:100%}
   .form-grid label{margin-bottom:-.25rem}
   main{padding:1rem}
 }
+@media (max-width:640px){
+  body{font-size:15px}
+  header.top{padding:.75rem 1rem;align-items:flex-start;flex-direction:column;gap:.65rem}
+  .brand{width:100%;font-size:1rem}
+  .brand-sub{font-size:.78rem}
+  .user-strip{width:100%;justify-content:space-between;gap:.5rem}
+  .user-strip .who{min-width:0;max-width:calc(100vw - 7rem)}
+  .user-strip .who #who{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  main{padding:.75rem}
+  .panel{padding:.85rem;margin-bottom:.75rem;border-radius:8px}
+  .panel-head{align-items:stretch}
+  .panel-head .btn{min-height:2.4rem}
+  .crumbs{overflow-x:auto;flex-wrap:nowrap;white-space:nowrap;-webkit-overflow-scrolling:touch}
+  .tabs{display:grid;grid-template-columns:1fr 1fr;gap:0}
+  .tab{padding:.7rem .5rem}
+  .tablewrap{border:0;background:transparent;overflow:visible}
+  table.t,.t thead,.t tbody,.t tr,.t td{display:block;width:100%}
+  .t thead{display:none}
+  .t tbody{display:flex;flex-direction:column;gap:.65rem}
+  .t tbody tr{background:#fff;border:1px solid var(--border);border-radius:var(--radius-sm);padding:.75rem;box-shadow:var(--shadow)}
+  .t tbody tr:hover{background:#fff}
+  .t tbody tr.selected{background:#fff;border-color:var(--accent)}
+  .t td{border-bottom:0;padding:.35rem 0;font-size:.88rem}
+  .t td:first-child{padding-bottom:.6rem;margin-bottom:.25rem;border-bottom:1px solid var(--border)}
+  .t td:not(:first-child){display:grid;grid-template-columns:6.5rem minmax(0,1fr);gap:.5rem;align-items:center}
+  .t td:not(:first-child)::before{content:attr(data-label);color:var(--text-2);font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+  .cell-name .name-text{white-space:normal;overflow:visible;text-overflow:clip;word-break:break-word}
+  .cell-path{word-break:break-all}
+  .cell-num{text-align:left}
+  .t .actions{justify-content:stretch;white-space:normal;flex-wrap:wrap;gap:.5rem}
+  .t .actions .btn{flex:1 1 auto;justify-content:center;min-height:2.4rem;font-size:.86rem}
+  .t .actions .btn-icon{width:auto;min-width:2.6rem}
+  .badge{white-space:normal;text-align:center}
+  .modal{align-items:flex-end;padding:0}
+  .modal-card{border-radius:16px 16px 0 0;max-height:92vh;overflow:auto}
+  .modal-head,.modal-body,.modal-foot{padding-left:1rem;padding-right:1rem}
+  .modal-foot{position:sticky;bottom:0;display:grid;grid-template-columns:1fr 1fr}
+  .modal-foot .btn{justify-content:center;min-height:2.7rem}
+  .target-chip{align-items:flex-start;flex-wrap:wrap}
+  .target-chip .target-path{flex-basis:100%}
+  .share-url{flex-direction:column;align-items:stretch}
+  .share-url .btn{justify-content:center}
+  .toast-stack{left:.75rem;right:.75rem;top:.75rem;max-width:none}
+  .login-card{margin:2rem auto 0}
+}
 </style>
 </head>
 <body>
@@ -2374,6 +2418,7 @@ table.t{border-collapse:collapse;width:100%}
     row.setAttribute('data-path', entry.path);
 
     var nameCell = document.createElement('td');
+    nameCell.setAttribute('data-label', 'Name');
     var nameWrap = document.createElement('div');
     nameWrap.className = 'cell-name';
     var iconSpan = document.createElement('span');
@@ -2392,16 +2437,19 @@ table.t{border-collapse:collapse;width:100%}
     nameCell.append(nameWrap);
 
     var permCell = document.createElement('td');
+    permCell.setAttribute('data-label', 'Permission');
     var permBadge = document.createElement('span');
     permBadge.className = 'badge ' + (entry.writeAccess ? 'write' : 'readonly');
     permBadge.textContent = entry.writeAccess ? 'Writable' : 'Read-only';
     permCell.append(permBadge);
 
     var modCell = document.createElement('td');
+    modCell.setAttribute('data-label', 'Modified');
     modCell.className = 'cell-num';
     if (entry.mtimeMs) { modCell.title = formatDate(new Date(entry.mtimeMs).toISOString()); modCell.textContent = relativeTime(new Date(entry.mtimeMs).toISOString()); }
 
     var actionCell = document.createElement('td');
+    actionCell.setAttribute('data-label', 'Actions');
     var actions = document.createElement('div');
     actions.className = 'actions';
     if (entry.type === 'directory') {
@@ -2479,16 +2527,19 @@ table.t{border-collapse:collapse;width:100%}
     var row = document.createElement('tr');
 
     var labelCell = document.createElement('td');
+    labelCell.setAttribute('data-label', 'Label');
     labelCell.textContent = lease.label || '(unlabeled)';
     labelCell.style.fontWeight = '500';
 
     var pathCell = document.createElement('td');
+    pathCell.setAttribute('data-label', 'Path');
     pathCell.className = 'cell-path';
     var paths = (lease.resources || []).map(function (r) { return r.path; });
     pathCell.textContent = paths.join(', ') || lease.path || '';
     pathCell.title = pathCell.textContent;
 
     var permCell = document.createElement('td');
+    permCell.setAttribute('data-label', 'Permission');
     var permBadge = document.createElement('span');
     var hasUpload = (lease.permissions || []).indexOf('upload') !== -1;
     var hasWrite = (lease.permissions || []).indexOf('write') !== -1;
@@ -2497,6 +2548,7 @@ table.t{border-collapse:collapse;width:100%}
     permCell.append(permBadge);
 
     var statusCell = document.createElement('td');
+    statusCell.setAttribute('data-label', 'Status');
     var statusBadge = document.createElement('span');
     statusBadge.className = 'badge ' + s.state;
     statusBadge.textContent = s.label;
@@ -2504,11 +2556,13 @@ table.t{border-collapse:collapse;width:100%}
     statusCell.append(statusBadge);
 
     var usedCell = document.createElement('td');
+    usedCell.setAttribute('data-label', 'Last used');
     usedCell.className = 'cell-num';
     if (lease.lastUsedAt) { usedCell.textContent = relativeTime(lease.lastUsedAt); usedCell.title = formatDate(lease.lastUsedAt); }
     else { usedCell.textContent = '—'; }
 
     var actionCell = document.createElement('td');
+    actionCell.setAttribute('data-label', 'Actions');
     var actions = document.createElement('div');
     actions.className = 'actions';
     if (s.state === 'active') {
@@ -2673,6 +2727,7 @@ table.t{border-collapse:collapse;width:100%}
   function renderMountRow(mount) {
     var row = document.createElement('tr');
     var nameCell = document.createElement('td');
+    nameCell.setAttribute('data-label', 'Name');
     var nameWrap = document.createElement('div');
     nameWrap.className = 'cell-name';
     var iconSpan = document.createElement('span');
@@ -2686,22 +2741,26 @@ table.t{border-collapse:collapse;width:100%}
     nameCell.append(nameWrap);
 
     var pathCell = document.createElement('td');
+    pathCell.setAttribute('data-label', 'Shared as');
     pathCell.className = 'cell-path';
     pathCell.textContent = mount.path;
     pathCell.title = mount.path;
 
     var rootCell = document.createElement('td');
+    rootCell.setAttribute('data-label', 'Local path');
     rootCell.className = 'cell-path';
     rootCell.textContent = mount.root;
     rootCell.title = mount.root;
 
     var permCell = document.createElement('td');
+    permCell.setAttribute('data-label', 'Permission');
     var permBadge = document.createElement('span');
     permBadge.className = 'badge ' + (mount.writeAccess ? 'write' : 'readonly');
     permBadge.textContent = mount.writeAccess ? 'Writable' : 'Read-only';
     permCell.append(permBadge);
 
     var stateCell = document.createElement('td');
+    stateCell.setAttribute('data-label', 'State');
     var stateBadge = document.createElement('span');
     var enabled = mount.enabled !== false;
     stateBadge.className = 'badge ' + (enabled ? 'active' : 'readonly');
@@ -2709,6 +2768,7 @@ table.t{border-collapse:collapse;width:100%}
     stateCell.append(stateBadge);
 
     var actionCell = document.createElement('td');
+    actionCell.setAttribute('data-label', 'Actions');
     var actions = document.createElement('div');
     actions.className = 'actions';
     if (state.canManageMounts) {

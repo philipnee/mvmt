@@ -1065,6 +1065,8 @@ describe('dashboard access', () => {
       expect(html).toContain('id="lease-modal"');
       expect(html).toContain('id="lease-tiles"');
       expect(html).toContain('id="copy-url"');
+      expect(html).toContain('@media (max-width:640px)');
+      expect(html).toContain("setAttribute('data-label', 'Actions')");
       expect(html).toContain('data-mode="upload"');
       expect(html).toContain('data-mode="two-way"');
     } finally {
