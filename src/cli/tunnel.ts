@@ -1,4 +1,4 @@
-import { input, select } from '@inquirer/prompts';
+import { input, password, select } from '@inquirer/prompts';
 import chalk from 'chalk';
 import fsp from 'fs/promises';
 import yaml from 'yaml';
@@ -27,6 +27,11 @@ export interface TunnelCommandOptions {
   config?: string;
   quick?: boolean;
   cloudflareConfig?: string;
+  relay?: boolean;
+  relayUrl?: string;
+  relayWorkspace?: string;
+  relayToken?: string;
+  publicUrl?: string;
 }
 
 export interface TunnelRuntimeStatus {
@@ -42,6 +47,8 @@ export interface ApplyTunnelConfigResult {
   enabled: boolean;
   warning?: string;
 }
+
+const DEFAULT_RELAY_URL = 'wss://relay.mvmt.net/connect';
 
 export async function showTunnel(options: TunnelCommandOptions = {}): Promise<void> {
   const loaded = loadConfigSummary(options.config);
@@ -65,13 +72,17 @@ export async function configureTunnel(options: TunnelCommandOptions = {}): Promi
   const loaded = loadConfigSummary(options.config);
   if (!loaded) return;
 
-  if (options.quick && options.cloudflareConfig) {
-    throw new Error('Use either --quick or --cloudflare-config, not both.');
+  const usesRelay = Boolean(options.relay || options.relayUrl || options.relayWorkspace || options.relayToken);
+  const configuredModes = [options.quick, options.cloudflareConfig, usesRelay].filter(Boolean).length;
+  if (configuredModes > 1) {
+    throw new Error('Use only one tunnel config mode.');
   }
   const tunnel = options.quick
     ? { provider: 'cloudflare-quick' as const, command: defaultTunnelCommand('cloudflare-quick') }
     : options.cloudflareConfig
       ? await cloudflareConfigTunnel(options.cloudflareConfig)
+      : usesRelay
+        ? relayTunnelFromOptions(options)
       : await promptForTunnelConfig(loaded.config.server.port);
   const missingDependency = missingTunnelDependency(tunnel);
   if (missingDependency) {
@@ -225,7 +236,12 @@ export function printTunnelSummary(config: MvmtConfig, runtime?: TunnelRuntimeSt
   }
 
   console.log(`  provider: ${config.server.tunnel.provider}`);
-  console.log(`  command: ${config.server.tunnel.command}`);
+  if (config.server.tunnel.provider === 'relay') {
+    console.log(`  relay: ${config.server.tunnel.relayUrl}`);
+    console.log(`  workspace: ${config.server.tunnel.workspaceSlug}`);
+  } else {
+    console.log(`  command: ${config.server.tunnel.command}`);
+  }
   if (config.server.tunnel.url) {
     console.log(`  dashboard: ${formatDashboardPublicUrl(config.server.tunnel.url)}`);
     console.log(`  MCP: ${formatMcpPublicUrl(config.server.tunnel.url)}`);
@@ -276,9 +292,11 @@ export function printTunnelEnabledWithNoTokens(warning: string): void {
 
 export async function promptForTunnelConfig(port: number): Promise<TunnelConfig> {
   while (true) {
-    const provider = await select<'cloudflare-quick' | 'cloudflare-named' | 'localhost-run' | 'custom'>({
+    const provider = await select<'relay' | 'custom-relay' | 'cloudflare-quick' | 'cloudflare-named' | 'localhost-run' | 'custom'>({
       message: 'Which tunnel?',
       choices: [
+        { name: 'MVMT Relay (stable URL, no cloudflared)', value: 'relay' },
+        { name: 'Custom MVMT Relay (self-hosted relay URL)', value: 'custom-relay' },
         { name: 'Cloudflare Quick Tunnel (temporary URL, requires cloudflared)', value: 'cloudflare-quick' },
         { name: 'Cloudflare Named Tunnel (stable domain, requires existing cloudflared config)', value: 'cloudflare-named' },
         { name: 'localhost.run (fallback, less stable)', value: 'localhost-run' },
@@ -293,7 +311,7 @@ export async function promptForTunnelConfig(port: number): Promise<TunnelConfig>
       console.log(chalk.dim('Choose another tunnel provider, or press Ctrl+C and install the missing command first.'));
       continue;
     }
-    if (!tunnel.command.includes('{port}') && provider !== 'cloudflare-named') {
+    if (tunnel.provider !== 'relay' && !tunnel.command.includes('{port}') && provider !== 'cloudflare-named') {
       console.log(chalk.yellow(`The configured tunnel command does not include ${chalk.cyan('{port}')}.`));
       console.log(chalk.dim(`mvmt expects tunnel commands to reference the local port ${port}.`));
     }
@@ -322,6 +340,22 @@ async function cloudflareConfigTunnel(configPathInput: string): Promise<TunnelCo
   };
 }
 
+function relayTunnelFromOptions(options: TunnelCommandOptions): TunnelConfig {
+  const relayUrl = normalizeRelayUrlInput(options.relayUrl ?? DEFAULT_RELAY_URL);
+  const workspaceSlug = options.relayWorkspace?.trim();
+  const agentToken = options.relayToken?.trim();
+  if (!workspaceSlug || !agentToken) {
+    throw new Error('Relay tunnel config requires --relay-workspace and --relay-token.');
+  }
+  return {
+    provider: 'relay',
+    relayUrl,
+    workspaceSlug,
+    agentToken,
+    ...(options.publicUrl ? { url: normalizeTunnelBaseUrl(options.publicUrl) } : {}),
+  };
+}
+
 export function inferCloudflareConfigPublicUrl(rawConfig: string): string | undefined {
   const parsed = yaml.parse(rawConfig) as unknown;
   const hostname = firstCloudflareHostname(parsed);
@@ -343,8 +377,36 @@ function firstCloudflareHostname(value: unknown): string | undefined {
 }
 
 async function promptForTunnelDetails(
-  provider: 'cloudflare-quick' | 'cloudflare-named' | 'localhost-run' | 'custom',
+  provider: 'relay' | 'custom-relay' | 'cloudflare-quick' | 'cloudflare-named' | 'localhost-run' | 'custom',
 ): Promise<TunnelConfig> {
+  if (provider === 'relay' || provider === 'custom-relay') {
+    const relayUrl = await input({
+      message: 'Relay WebSocket URL',
+      default: provider === 'relay' ? DEFAULT_RELAY_URL : '',
+      validate: validateRelayUrlInput,
+    });
+    const workspaceSlug = await input({
+      message: 'Workspace slug',
+      validate: validateWorkspaceSlugInput,
+    });
+    const agentToken = await password({
+      message: 'Relay agent token/secret',
+      validate: (value) => (value.trim().length > 0 ? true : 'Enter the relay agent token/secret'),
+    });
+    const publicUrl = await input({
+      message: 'Public base URL (optional, for printed lease/dashboard links)',
+      default: '',
+      validate: (value) => (value.trim().length === 0 ? true : validatePublicUrlInput(value)),
+    });
+    return {
+      provider: 'relay',
+      relayUrl: normalizeRelayUrlInput(relayUrl),
+      workspaceSlug: workspaceSlug.trim(),
+      agentToken: agentToken.trim(),
+      ...(publicUrl.trim().length > 0 ? { url: normalizeTunnelBaseUrl(publicUrl) } : {}),
+    };
+  }
+
   if (provider === 'cloudflare-named') {
     console.log(chalk.dim('Use this after creating a Cloudflare named tunnel and DNS route.'));
     const configPath = await promptForExistingFile('Cloudflared config file:', {
@@ -481,4 +543,26 @@ function validatePublicUrlInput(value: string): true | string {
   } catch {
     return 'Enter a valid public URL, for example https://pnee.gofrieda.org';
   }
+}
+
+function validateRelayUrlInput(value: string): true | string {
+  try {
+    normalizeRelayUrlInput(value);
+    return true;
+  } catch {
+    return 'Enter a valid ws:// or wss:// relay URL';
+  }
+}
+
+function validateWorkspaceSlugInput(value: string): true | string {
+  return /^[a-z0-9][a-z0-9-]{0,62}$/.test(value.trim())
+    ? true
+    : 'Use lowercase letters, numbers, and dashes';
+}
+
+function normalizeRelayUrlInput(value: string): string {
+  const url = new URL(value.trim());
+  if (url.protocol !== 'ws:' && url.protocol !== 'wss:') throw new Error('Relay URL must use ws:// or wss://');
+  url.hash = '';
+  return url.toString();
 }

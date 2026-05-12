@@ -10,13 +10,7 @@ import {
 } from '../config/schema.js';
 import { getSetupRegistry } from '../connectors/setup-registry.js';
 import { pathExists, resolveSetupPath } from '../connectors/setup-paths.js';
-import {
-  cloudflareNamedTunnelCommand,
-  defaultTunnelCommand,
-  missingTunnelDependency,
-  normalizeTunnelBaseUrl,
-} from '../utils/tunnel.js';
-import { promptForExistingFile } from './folder-prompt.js';
+import { promptForTunnelConfig } from './tunnel.js';
 
 export interface SetupConfigOptions {
   config?: string;
@@ -186,91 +180,11 @@ async function promptForAccess(port: number): Promise<{ access: 'local' | 'tunne
 
   if (access === 'local') return { access: 'local' };
 
-  while (true) {
-    const provider = await select<'cloudflare-quick' | 'cloudflare-named' | 'localhost-run' | 'custom'>({
-      message: 'Which tunnel?',
-      choices: [
-        { name: 'Cloudflare Quick Tunnel (temporary URL, requires cloudflared)', value: 'cloudflare-quick' },
-        { name: 'Cloudflare Named Tunnel (stable domain, requires existing cloudflared config)', value: 'cloudflare-named' },
-        { name: 'localhost.run (fallback, less stable)', value: 'localhost-run' },
-        { name: 'Custom tunnel command', value: 'custom' },
-      ],
-    });
-
-    const tunnel = await promptForTunnelDetails(provider);
-    const missingDependency = missingTunnelDependency(tunnel);
-    if (missingDependency) {
-      printMissingTunnelDependencyWarning(missingDependency);
-      console.log(chalk.dim('Choose another tunnel provider, or press Ctrl+C and install the missing command first.'));
-      continue;
-    }
-
-    return {
-      access: 'tunnel',
-      tunnel,
-    };
-  }
-}
-
-async function promptForTunnelDetails(
-  provider: 'cloudflare-quick' | 'cloudflare-named' | 'localhost-run' | 'custom',
-): Promise<TunnelConfig> {
-  if (provider === 'cloudflare-named') {
-    console.log(chalk.dim('Use this after creating a Cloudflare named tunnel and DNS route.'));
-    const configPath = await promptForExistingFile('Cloudflared config file:', {
-      defaultValue: '~/.cloudflared/config.yml',
-    });
-    const publicUrl = await input({
-      message: 'Public base URL',
-      default: 'https://example.com',
-      validate: validatePublicUrlInput,
-    });
-    return {
-      provider: 'custom',
-      command: cloudflareNamedTunnelCommand(resolveSetupPath(configPath.trim())),
-      url: normalizeTunnelBaseUrl(publicUrl),
-    };
-  }
-
-  if (provider === 'custom') {
-    const command = await input({
-      message: 'Tunnel command (use {port} where mvmt should insert the local port)',
-      validate: (value) => (value.trim().length > 0 ? true : 'Enter a tunnel command'),
-    });
-    const publicUrl = await input({
-      message: 'Public base URL (optional, recommended if the command does not print one)',
-      default: '',
-      validate: (value) => (value.trim().length === 0 ? true : validatePublicUrlInput(value)),
-    });
-    return {
-      provider: 'custom',
-      command: command.trim(),
-      ...(publicUrl.trim().length > 0 ? { url: normalizeTunnelBaseUrl(publicUrl) } : {}),
-    };
-  }
-
+  const tunnel = await promptForTunnelConfig(port);
   return {
-    provider,
-    command: defaultTunnelCommand(provider),
+    access: 'tunnel',
+    tunnel,
   };
-}
-
-function validatePublicUrlInput(value: string): true | string {
-  try {
-    const url = new URL(normalizeTunnelBaseUrl(value));
-    return url.protocol === 'https:' ? true : 'Enter an https:// URL';
-  } catch {
-    return 'Enter a valid public URL, for example https://pnee.gofrieda.org';
-  }
-}
-
-function printMissingTunnelDependencyWarning(command: string): void {
-  if (command === 'cloudflared') {
-    console.log(chalk.yellow('Cloudflare Quick Tunnel requires `cloudflared`, but it is not installed or not on PATH.'));
-    console.log(chalk.yellow('Install it with `brew install cloudflared`, or choose another tunnel provider.'));
-    return;
-  }
-  console.log(chalk.yellow(`Tunnel dependency is missing: ${command}`));
 }
 
 function printBanner(): void {

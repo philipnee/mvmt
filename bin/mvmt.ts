@@ -75,13 +75,16 @@ program
   .option('--path <dir>', 'Temporarily expose a filesystem folder as read-only for this run only (repeatable)', collectValues)
   .option('--stdio', 'Use stdio transport')
   .option('-i, --interactive', 'Start an interactive control prompt')
+  .option('--relay-url <url>', 'Connect to an mvmt relay WebSocket, such as ws://localhost:8080/connect')
+  .option('--relay-workspace <slug>', 'Workspace slug to claim on the relay')
+  .option('--relay-token <token>', 'Agent token for the relay workspace')
   .option('-v, --verbose', 'Verbose logging')
   .addHelpText('after', examples([
     ['mvmt serve -i', 'start HTTP mode with the interactive prompt'],
     ['mvmt serve --stdio', 'start stdio mode for a client that launches mvmt'],
     ['mvmt serve --path ~/Documents', 'temporarily serve one folder as read-only'],
   ]))
-  .action(async (options: { port?: string; config?: string; path?: string[]; stdio?: boolean; interactive?: boolean; verbose?: boolean }) => {
+  .action(async (options: { port?: string; config?: string; path?: string[]; stdio?: boolean; interactive?: boolean; verbose?: boolean; relayUrl?: string; relayWorkspace?: string; relayToken?: string }) => {
     await start(options);
   });
 
@@ -507,7 +510,24 @@ tunnelCommand
   .option('-c, --config <path>', 'Config file path')
   .option('--quick', 'Configure Cloudflare Quick Tunnel without prompting')
   .option('--cloudflare-config <path>', 'Configure a Cloudflare named tunnel from a cloudflared config file')
-  .action(async (options: { config?: string; quick?: boolean; cloudflareConfig?: string }, command: Command) => {
+  .option('--relay', 'Configure the default MVMT relay without prompting')
+  .option('--relay-url <url>', 'Configure a custom relay WebSocket URL')
+  .option('--relay-workspace <slug>', 'Relay workspace slug')
+  .option('--relay-token <token>', 'Relay agent token/secret')
+  .option('--public-url <url>', 'Public base URL for generated dashboard and lease links')
+  .action(async (
+    options: {
+      config?: string;
+      quick?: boolean;
+      cloudflareConfig?: string;
+      relay?: boolean;
+      relayUrl?: string;
+      relayWorkspace?: string;
+      relayToken?: string;
+      publicUrl?: string;
+    },
+    command: Command,
+  ) => {
     await configureTunnel(withInheritedConfig(options, command));
   });
 

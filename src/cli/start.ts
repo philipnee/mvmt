@@ -14,6 +14,7 @@ import { getControlSocketPath, startJsonControlServer } from '../utils/control.j
 import { createLogger, Logger } from '../utils/logger.js';
 import { TOKEN_PATH, verifySessionTokenValue } from '../utils/token.js';
 import { formatDashboardPublicUrl, formatMcpPublicUrl } from '../utils/tunnel.js';
+import { resolveRelayClientOptions, startRelayClient } from '../utils/relay-client.js';
 import { initializeConnectors, LoadedConnector } from './connector-loader.js';
 import { TunnelController } from './tunnel-controller.js';
 import { InteractiveAuditLogger, startInteractivePrompt, formatHttpRequestEntry } from './interactive.js';
@@ -28,6 +29,9 @@ export interface StartOptions {
   stdio?: boolean;
   verbose?: boolean;
   interactive?: boolean;
+  relayUrl?: string;
+  relayWorkspace?: string;
+  relayToken?: string;
 }
 
 type CleanupTask = () => Promise<void>;
@@ -161,6 +165,17 @@ export async function start(options: StartOptions = {}): Promise<void> {
     cleanupTasks.push(() => httpServer.close());
     cleanupTasks.push(() => tunnelController.stop());
     const tunnel = await tunnelController.start();
+    const relayOptions = resolveRelayClientOptions({
+      relayUrl: options.relayUrl,
+      workspaceSlug: options.relayWorkspace,
+      agentToken: options.relayToken,
+      localPort: httpServer.port,
+      logger,
+    });
+    if (relayOptions) {
+      const relayClient = await startRelayClient(relayOptions);
+      cleanupTasks.push(() => relayClient.close());
+    }
     const controlServer = await startJsonControlServer(getControlSocketPath(configPath), async (message, connection) => {
       switch (message?.type) {
         case 'tunnel.status':

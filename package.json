@@ -39,6 +39,7 @@
     "verify:quick": "node scripts/verify.mjs --no-smoke",
     "verify:release": "node scripts/verify.mjs --audit",
     "bench:text-index": "npm run build && node scripts/bench-text-index.mjs",
+    "e2e:relay": "npm run build && node scripts/relay-e2e.mjs",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "e2e": "vitest run --config tests/e2e/vitest.config.ts"

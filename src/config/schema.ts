@@ -35,11 +35,24 @@ export const DEFAULT_MOUNT_PROTECT_PATTERNS = [
   ...GLOBAL_SECRET_PATH_PATTERNS,
 ] as const;
 
-export const TunnelSchema = z.object({
+export const CommandTunnelSchema = z.object({
   provider: z.enum(['cloudflare-quick', 'pinggy', 'localhost-run', 'custom']),
   command: z.string().min(1),
   url: z.string().url().optional(),
 });
+
+export const RelayTunnelSchema = z.object({
+  provider: z.literal('relay'),
+  relayUrl: z.string().url(),
+  workspaceSlug: z.string().min(1).regex(/^[a-z0-9][a-z0-9-]{0,62}$/, 'workspace slug must be lowercase alphanum/dash'),
+  agentToken: z.string().min(1),
+  url: z.string().url().optional(),
+});
+
+export const TunnelSchema = z.discriminatedUnion('provider', [
+  CommandTunnelSchema,
+  RelayTunnelSchema,
+]);
 
 export const ProxySchema = z
   .object({

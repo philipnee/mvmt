@@ -1,12 +1,17 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { TunnelController } from '../src/cli/tunnel-controller.js';
 import { Logger } from '../src/utils/logger.js';
+import * as relayClient from '../src/utils/relay-client.js';
 import * as tunnelUtils from '../src/utils/tunnel.js';
 
 vi.mock('../src/utils/tunnel.js', () => ({
   missingTunnelDependency: vi.fn(),
   startTunnel: vi.fn(),
   formatDashboardPublicUrl: (url: string) => url,
+}));
+
+vi.mock('../src/utils/relay-client.js', () => ({
+  startRelayClient: vi.fn(),
 }));
 
 vi.mock('../src/cli/tunnel.js', () => ({
@@ -90,6 +95,35 @@ describe('TunnelController', () => {
       publicUrl: 'https://test.localhost.run',
     });
     expect(logger.info).toHaveBeenCalledWith('Dashboard URL: https://test.localhost.run');
+  });
+
+  it('starts relay tunnel configs without spawning a tunnel command', async () => {
+    const controller = new TunnelController(serverConfig, 4141, logger);
+    controller.configure({
+      provider: 'relay',
+      relayUrl: 'ws://127.0.0.1:8080/connect',
+      workspaceSlug: 'demo',
+      agentToken: 'agent-secret',
+      url: 'https://demo.example.com',
+    });
+    const close = vi.fn();
+    vi.mocked(relayClient.startRelayClient).mockResolvedValue({ close });
+
+    await controller.start();
+
+    expect(relayClient.startRelayClient).toHaveBeenCalledWith(expect.objectContaining({
+      relayUrl: 'ws://127.0.0.1:8080/connect',
+      workspaceSlug: 'demo',
+      agentToken: 'agent-secret',
+      localPort: 4141,
+    }));
+    expect(tunnelUtils.startTunnel).not.toHaveBeenCalled();
+    expect(controller.snapshot()).toMatchObject({
+      configured: true,
+      running: true,
+      command: 'relay ws://127.0.0.1:8080/connect (demo)',
+      publicUrl: 'https://demo.example.com',
+    });
   });
 
   it('captures logs and notifies subscribers', async () => {

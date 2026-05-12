@@ -1,5 +1,6 @@
 import { MvmtConfig, TunnelConfig } from '../config/schema.js';
 import { Logger } from '../utils/logger.js';
+import { startRelayClient } from '../utils/relay-client.js';
 import { formatDashboardPublicUrl, missingTunnelDependency, RunningTunnel, startTunnel } from '../utils/tunnel.js';
 import { withTerminalProgress } from './progress.js';
 import { printMissingTunnelDependencyWarning } from './tunnel.js';
@@ -40,7 +41,10 @@ export class TunnelController {
   }
 
   get command(): string | undefined {
-    return this.serverConfig.tunnel?.command.replaceAll('{port}', String(this.port));
+    const tunnel = this.serverConfig.tunnel;
+    if (!tunnel) return undefined;
+    if (tunnel.provider === 'relay') return `relay ${tunnel.relayUrl} (${tunnel.workspaceSlug})`;
+    return tunnel.command.replaceAll('{port}', String(this.port));
   }
 
   configure(tunnel: TunnelConfig): void {
@@ -94,6 +98,33 @@ export class TunnelController {
     }
 
     const tunnelConfig = this.serverConfig.tunnel;
+    if (tunnelConfig.provider === 'relay') {
+      this.logger.info(`Starting relay: ${tunnelConfig.workspaceSlug} -> ${tunnelConfig.relayUrl}`);
+      try {
+        const relay = await startRelayClient({
+          relayUrl: tunnelConfig.relayUrl,
+          workspaceSlug: tunnelConfig.workspaceSlug,
+          agentToken: tunnelConfig.agentToken,
+          localPort: this.port,
+          logger: this.logger,
+        });
+        const running: RunningTunnel = {
+          command: this.command ?? 'relay',
+          url: tunnelConfig.url,
+          stop: () => relay.close(),
+        };
+        this.current = running;
+        this.lastError = undefined;
+        if (running.url) this.logger.info(`Dashboard URL: ${formatDashboardPublicUrl(running.url)}`);
+        return running;
+      } catch (err) {
+        this.lastError = err instanceof Error ? err.message : 'Unknown error';
+        this.logger.warn(`Relay failed to start: ${this.lastError}`);
+        this.logger.warn('mvmt is still running locally.');
+        return undefined;
+      }
+    }
+
     this.logger.info(`Starting tunnel: ${this.command}`);
     try {
       const tunnel = await withTerminalProgress('Waiting for tunnel URL', () =>

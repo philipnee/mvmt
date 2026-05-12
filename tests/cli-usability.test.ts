@@ -271,6 +271,42 @@ describe('CLI usability', () => {
     }
   });
 
+  it('configures relay tunnel access non-interactively', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    const configPath = path.join(tmp, 'config.yaml');
+    try {
+      await saveConfig(configPath, parseConfig({ version: 1 }));
+
+      const { stdout } = await runCli([
+        'tunnel',
+        'config',
+        '--config',
+        configPath,
+        '--relay-url',
+        'ws://127.0.0.1:8080/connect',
+        '--relay-workspace',
+        'demo',
+        '--relay-token',
+        'agent-secret',
+        '--public-url',
+        'https://demo.example.com',
+      ]);
+      expect(stdout).toContain('Tunnel config saved');
+
+      const updated = readConfig(configPath);
+      expect(updated.server.access).toBe('tunnel');
+      expect(updated.server.tunnel).toMatchObject({
+        provider: 'relay',
+        relayUrl: 'ws://127.0.0.1:8080/connect',
+        workspaceSlug: 'demo',
+        agentToken: 'agent-secret',
+        url: 'https://demo.example.com',
+      });
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('creates and lists scoped API tokens non-interactively', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
     const configPath = path.join(tmp, 'config.yaml');

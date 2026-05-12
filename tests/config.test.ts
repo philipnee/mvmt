@@ -191,6 +191,30 @@ describe('parseConfig', () => {
     });
   });
 
+  it('parses relay tunnel config', () => {
+    const config = parseConfig({
+      version: 1,
+      server: {
+        access: 'tunnel',
+        tunnel: {
+          provider: 'relay',
+          relayUrl: 'wss://relay.example.com/connect',
+          workspaceSlug: 'demo-workspace',
+          agentToken: 'agent-secret',
+          url: 'https://demo.example.com',
+        },
+      },
+    });
+
+    expect(config.server.tunnel).toMatchObject({
+      provider: 'relay',
+      relayUrl: 'wss://relay.example.com/connect',
+      workspaceSlug: 'demo-workspace',
+      agentToken: 'agent-secret',
+      url: 'https://demo.example.com',
+    });
+  });
+
   it('defaults stdio proxy transport', () => {
     const config = parseConfig({
       version: 1,
