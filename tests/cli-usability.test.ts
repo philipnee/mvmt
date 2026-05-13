@@ -87,6 +87,20 @@ describe('CLI usability', () => {
       expect(JSON.parse(rotated.stdout)).toMatchObject({
         user: { username: 'sarah' },
       });
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('removes privileged dashboard users non-interactively', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    try {
+      const env = { ...process.env, HOME: tmp };
+      await execFileAsync(
+        process.execPath,
+        [...cliArgs, 'users', 'add', 'sarah', '--password', 'correct horse battery staple', '--json'],
+        { cwd: root, env },
+      );
 
       const removed = await execFileAsync(
         process.execPath,
