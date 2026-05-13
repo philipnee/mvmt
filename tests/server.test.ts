@@ -1186,7 +1186,7 @@ describe('dashboard access', () => {
       // and forced the login form to submit natively without a working
       // bootstrap. Parse the served script to catch this whole class of
       // bug at the test boundary instead of in someone's browser.
-      const scripts = Array.from(html.matchAll(/<script>([\s\S]*?)<\/script>/g)).map((match) => match[1] ?? '');
+      const scripts = inlineScriptBodies(html);
       expect(scripts.length).toBeGreaterThan(0);
       for (const body of scripts) {
         expect(() => new Function(body)).not.toThrow();
@@ -3561,4 +3561,9 @@ function parseMcpResponse(text: string): any {
   const dataLine = text.split('\n').find((line) => line.startsWith('data: '));
   if (!dataLine) throw new Error(`Could not parse MCP response: ${text}`);
   return JSON.parse(dataLine.slice('data: '.length));
+}
+
+function inlineScriptBodies(html: string): string[] {
+  return Array.from(html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi))
+    .map((match) => match[1] ?? '');
 }
