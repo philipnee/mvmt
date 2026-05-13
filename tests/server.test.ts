@@ -3564,6 +3564,6 @@ function parseMcpResponse(text: string): any {
 }
 
 function inlineScriptBodies(html: string): string[] {
-  return Array.from(html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi))
+  return Array.from(html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script\s*>/gi))
     .map((match) => match[1] ?? '');
 }
