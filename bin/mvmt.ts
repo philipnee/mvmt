@@ -22,7 +22,7 @@ import {
   streamTunnelLogs,
 } from '../src/cli/tunnel.js';
 import { rotateToken, showToken, showTokenSummary } from '../src/cli/token.js';
-import { addPrivilegedUserCommand, listPrivilegedUsersCommand, setPrivilegedUserAdminCommand } from '../src/cli/users.js';
+import { addPrivilegedUserCommand, listPrivilegedUsersCommand, removePrivilegedUserCommand, setPrivilegedUserAdminCommand, setPrivilegedUserPasswordCommand } from '../src/cli/users.js';
 import { maybePrintUpdateNotice, readPackageInfo } from '../src/utils/version.js';
 
 const packageInfo = readPackageInfo();
@@ -272,6 +272,39 @@ usersCommand
     await addPrivilegedUserCommand(username, {
       password: command.getOptionValue('password') as string | undefined,
       admin: Boolean(command.getOptionValue('admin')),
+      json: Boolean(command.getOptionValue('json') || command.parent?.getOptionValue('json')),
+    });
+  });
+
+usersCommand
+  .command('password <username>')
+  .description('Rotate a dashboard user password')
+  .option('--password <password>', 'New password for non-interactive setup')
+  .option('--json', 'Output as JSON')
+  .addHelpText('after', examples([
+    ['mvmt users password sarah', 'prompt for a new password'],
+    ['mvmt users password sarah --password "new-long-password"', 'rotate non-interactively'],
+  ]))
+  .action(async (username: string | undefined, _options: { password?: string; json?: boolean }, command: Command) => {
+    await setPrivilegedUserPasswordCommand(username, {
+      password: command.getOptionValue('password') as string | undefined,
+      json: Boolean(command.getOptionValue('json') || command.parent?.getOptionValue('json')),
+    });
+  });
+
+usersCommand
+  .command('remove <username>')
+  .alias('delete')
+  .description('Remove a dashboard user')
+  .option('-y, --yes', 'Remove without prompting for confirmation')
+  .option('--json', 'Output as JSON')
+  .addHelpText('after', examples([
+    ['mvmt users remove sarah', 'prompt before removing sarah'],
+    ['mvmt users remove sarah --yes', 'remove without an interactive prompt'],
+  ]))
+  .action(async (username: string | undefined, _options: { yes?: boolean; json?: boolean }, command: Command) => {
+    await removePrivilegedUserCommand(username, {
+      yes: Boolean(command.getOptionValue('yes')),
       json: Boolean(command.getOptionValue('json') || command.parent?.getOptionValue('json')),
     });
   });

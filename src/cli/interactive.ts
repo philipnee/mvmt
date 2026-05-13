@@ -24,7 +24,7 @@ import { ToolResultPlugin } from '../plugins/types.js';
 import { addPathsToLease, createFolderLease, listFolderLeases, revokeFolderLease } from './lease.js';
 import { DEFAULT_LEASE_TTL, defaultLeasesPath, leaseUnavailableReason, listLeases } from '../lease/store.js';
 import { loadConfig } from '../config/loader.js';
-import { addPrivilegedUserCommand, listPrivilegedUsersCommand, setPrivilegedUserAdminCommand } from './users.js';
+import { addPrivilegedUserCommand, listPrivilegedUsersCommand, removePrivilegedUserCommand, setPrivilegedUserAdminCommand } from './users.js';
 
 const SIGINT_EXIT_WINDOW_MS = 2_000;
 
@@ -247,6 +247,11 @@ async function handleInteractiveCommand(
     case 'users revoke':
       await handleUsersAdmin(false);
       return;
+    case 'users remove':
+    case 'users delete':
+    case 'users rm':
+      await handleUsersRemove();
+      return;
     case 'advanced':
       printAdvancedHelp();
       return;
@@ -385,6 +390,7 @@ export function printInteractiveHelp(): void {
   console.log('  users               list dashboard users');
   console.log('  users add           create dashboard user');
   console.log('  users grant/revoke  manage source-admin access');
+  console.log('  users remove        delete dashboard user');
   console.log('  tunnel              show tunnel status');
   console.log('  tunnel config       choose a tunnel');
   console.log('  tunnel start        start the configured tunnel');
@@ -666,6 +672,14 @@ async function handleUsersAdmin(admin: boolean): Promise<void> {
     validate: (value) => value.trim().length > 0 ? true : 'Enter a username',
   });
   await setPrivilegedUserAdminCommand(username.trim(), admin);
+}
+
+async function handleUsersRemove(): Promise<void> {
+  const username = await input({
+    message: 'Remove dashboard user:',
+    validate: (value) => value.trim().length > 0 ? true : 'Enter a username',
+  });
+  await removePrivilegedUserCommand(username.trim());
 }
 
 async function handleMountsAdd(state: InteractivePromptState): Promise<void> {

@@ -36,10 +36,13 @@ export type RelayClientOptions = {
   agentToken: string;
   localPort: number;
   logger?: Logger;
+  reconnectDelayMs?: number;
+  pingIntervalMs?: number;
 };
 
 export type RelayClientHandle = {
   close(): Promise<void>;
+  isConnected(): boolean;
 };
 
 export function resolveRelayClientOptions(input: {
@@ -62,34 +65,97 @@ export function resolveRelayClientOptions(input: {
 }
 
 export async function startRelayClient(options: RelayClientOptions): Promise<RelayClientHandle> {
-  const ws = await connectWebSocket(options.relayUrl, {
-    Authorization: `Bearer ${options.agentToken}`,
-  });
-
   let closed = false;
-  ws.send(JSON.stringify({
+  let current: RelayWebSocket | undefined;
+  let reconnectTimer: NodeJS.Timeout | undefined;
+  let pingTimer: NodeJS.Timeout | undefined;
+  const reconnectDelayMs = options.reconnectDelayMs ?? 2_000;
+  const pingIntervalMs = options.pingIntervalMs ?? 25_000;
+
+  const hello = () => JSON.stringify({
     type: 'hello',
     workspaceId: `local-${options.workspaceSlug}`,
     workspaceSlug: options.workspaceSlug,
     protocolVersion: 'v1',
-  }));
+  });
 
-  ws.onMessage((message) => {
-    void handleRelayMessage(ws, message, options).catch((err) => {
-      options.logger?.warn(`Relay request failed: ${err instanceof Error ? err.message : 'unknown error'}`);
+  const clearReconnectTimer = () => {
+    if (!reconnectTimer) return;
+    clearTimeout(reconnectTimer);
+    reconnectTimer = undefined;
+  };
+
+  const clearPingTimer = () => {
+    if (!pingTimer) return;
+    clearInterval(pingTimer);
+    pingTimer = undefined;
+  };
+
+  const scheduleReconnect = () => {
+    if (closed || reconnectTimer) return;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = undefined;
+      void connect(false).catch((err) => {
+        if (closed) return;
+        options.logger?.warn(`Relay reconnect failed: ${err instanceof Error ? err.message : 'unknown error'}`);
+        scheduleReconnect();
+      });
+    }, reconnectDelayMs);
+    reconnectTimer.unref();
+  };
+
+  const connect = async (initial: boolean) => {
+    const ws = await connectWebSocket(options.relayUrl, {
+      Authorization: `Bearer ${options.agentToken}`,
     });
-  });
-  ws.onClose(() => {
-    if (!closed) options.logger?.warn('Relay connection closed.');
-  });
+    if (closed) {
+      ws.close();
+      return;
+    }
 
-  options.logger?.info(`Relay connected: ${options.workspaceSlug}`);
+    current = ws;
+    ws.send(hello());
+
+    ws.onMessage((message) => {
+      void handleRelayMessage(ws, message, options).catch((err) => {
+        options.logger?.warn(`Relay request failed: ${err instanceof Error ? err.message : 'unknown error'}`);
+      });
+    });
+    ws.onClose(() => {
+      if (current === ws) current = undefined;
+      clearPingTimer();
+      if (!closed) {
+        options.logger?.warn(`Relay connection closed; reconnecting in ${Math.round(reconnectDelayMs / 1000)}s.`);
+        scheduleReconnect();
+      }
+    });
+
+    if (pingIntervalMs > 0) {
+      clearPingTimer();
+      pingTimer = setInterval(() => {
+        try {
+          ws.send(JSON.stringify({ type: 'ping' }));
+        } catch {
+          // The close handler owns reconnect scheduling.
+        }
+      }, pingIntervalMs);
+      pingTimer.unref();
+    }
+
+    options.logger?.info(`${initial ? 'Relay connected' : 'Relay reconnected'}: ${options.workspaceSlug}`);
+  };
+
+  await connect(true);
 
   return {
     close: async () => {
       closed = true;
-      ws.close();
+      clearReconnectTimer();
+      clearPingTimer();
+      current?.close();
+      current = undefined;
     },
+    isConnected: () => Boolean(current),
   };
 }
 
@@ -128,6 +194,7 @@ async function connectWebSocket(rawUrl: string, headers: Record<string, string>)
     ? tls.connect({ host: url.hostname, port, servername: url.hostname })
     : net.connect({ host: url.hostname, port });
   await once(socket, 'connect');
+  socket.setKeepAlive(true, 30_000);
 
   const key = randomBytes(16).toString('base64');
   const path = `${url.pathname || '/'}${url.search}`;
@@ -179,6 +246,13 @@ function createRelayWebSocket(socket: net.Socket | tls.TLSSocket, initial: Buffe
   let buffer = initial;
   const messageListeners = new Set<(message: string) => void>();
   const closeListeners = new Set<() => void>();
+  let closeNotified = false;
+
+  const notifyClose = () => {
+    if (closeNotified) return;
+    closeNotified = true;
+    for (const listener of closeListeners) listener();
+  };
 
   const parseAvailableFrames = () => {
     while (true) {
@@ -190,7 +264,7 @@ function createRelayWebSocket(socket: net.Socket | tls.TLSSocket, initial: Buffe
         for (const listener of messageListeners) listener(message);
       } else if (parsed.opcode === 0x8) {
         socket.end();
-        for (const listener of closeListeners) listener();
+        notifyClose();
         return;
       } else if (parsed.opcode === 0x9) {
         socket.write(encodeWebSocketFrame(parsed.payload, 0xA));
@@ -203,10 +277,10 @@ function createRelayWebSocket(socket: net.Socket | tls.TLSSocket, initial: Buffe
     parseAvailableFrames();
   });
   socket.on('close', () => {
-    for (const listener of closeListeners) listener();
+    notifyClose();
   });
   socket.on('error', () => {
-    for (const listener of closeListeners) listener();
+    notifyClose();
   });
   parseAvailableFrames();
 
@@ -298,7 +372,7 @@ async function forwardToLocalMvmt(frame: RelayRequestFrame, port: number): Promi
   const body = method === 'GET' || method === 'HEAD'
     ? undefined
     : Buffer.from(frame.bodyBase64 ?? '', 'base64');
-  const response = await fetch(url, { method, headers, body });
+  const response = await fetch(url, { method, headers, body, redirect: 'manual' });
   const bytes = Buffer.from(await response.arrayBuffer());
   return {
     type: 'response',

@@ -78,6 +78,31 @@ describe('CLI usability', () => {
       expect(JSON.parse(listed.stdout)).toMatchObject({
         users: [expect.objectContaining({ username: 'sarah', disabled: false })],
       });
+
+      const rotated = await execFileAsync(
+        process.execPath,
+        [...cliArgs, 'users', 'password', 'sarah', '--password', 'new dashboard password', '--json'],
+        { cwd: root, env },
+      );
+      expect(JSON.parse(rotated.stdout)).toMatchObject({
+        user: { username: 'sarah' },
+      });
+
+      const removed = await execFileAsync(
+        process.execPath,
+        [...cliArgs, 'users', 'remove', 'sarah', '--yes', '--json'],
+        { cwd: root, env },
+      );
+      expect(JSON.parse(removed.stdout)).toMatchObject({
+        removed: { username: 'sarah' },
+      });
+
+      const empty = await execFileAsync(
+        process.execPath,
+        [...cliArgs, 'users', '--json'],
+        { cwd: root, env },
+      );
+      expect(JSON.parse(empty.stdout)).toEqual({ users: [] });
     } finally {
       await fs.rm(tmp, { recursive: true, force: true });
     }
