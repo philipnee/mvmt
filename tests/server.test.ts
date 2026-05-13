@@ -18,7 +18,7 @@ import { TextContextIndex } from '../src/context/text-index.js';
 import { OAuthStore } from '../src/server/oauth.js';
 import { ToolRouter } from '../src/server/router.js';
 import { addLeaseResources, createLease, listLeases, revokeLease } from '../src/lease/store.js';
-import { createPrivilegedUser } from '../src/dashboard/users.js';
+import { createPrivilegedUser, removePrivilegedUser } from '../src/dashboard/users.js';
 import { createAuditLogger } from '../src/utils/audit.js';
 import { hashApiToken } from '../src/utils/api-token-hash.js';
 import { ensureSigningKey, generateSessionToken, rotateSigningKey } from '../src/utils/token.js';
@@ -451,6 +451,8 @@ describe('folder lease access', () => {
       expect(readUploadPage.status).toBe(200);
       const readUploadHtml = await readUploadPage.text();
       expect(readUploadHtml).toContain('Upload to this folder');
+      expect(readUploadHtml.indexOf('function uploadUrl(fileName)')).toBeLessThan(readUploadHtml.indexOf('async function loadListing()'));
+      expect(readUploadHtml).toContain("uploadInput.addEventListener('change', () => uploadFiles(uploadInput.files).catch");
       const readUploadListing = await fetch(`http://127.0.0.1:${server.port}/lease/${readUploadLease.record.id}/files?token=${readUploadLease.token}`);
       expect(((await readUploadListing.json()) as { canUpload: boolean }).canUpload).toBe(true);
 
@@ -829,6 +831,104 @@ describe('dashboard access', () => {
     }
   });
 
+  // The relay routes /t/{slug}/** to the agent. If we built share URLs
+  // from baseUrlFor(req) we'd drop the workspace prefix and the public
+  // link would 404 on the relay's catch-all error page. Make sure both
+  // creation and rotation keep the configured public URL intact.
+  it('keeps the configured public URL prefix in lease share URLs', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-lease-share-prefix-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const leaseStorePath = path.join(tmp, '.leases.json');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    const root = path.join(tmp, 'docs');
+    fs.mkdirSync(root, { recursive: true });
+    fs.writeFileSync(path.join(root, 'note.txt'), 'hello');
+    createPrivilegedUser(usersPath, { username: 'admin', password: 'correct horse battery staple', admin: true });
+
+    const config = parseConfig({
+      version: 1,
+      mounts: [{ name: 'docs', type: 'local_folder', path: '/docs', root }],
+    });
+
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: config.mounts,
+      leaseStorePath,
+      privilegedUsersPath: usersPath,
+      resolvePublicBaseUrl: () => 'https://relay.example.com/t/demo',
+    });
+    try {
+      const cookie = await loginDashboard(server.port, 'admin', 'correct horse battery staple');
+      const create = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: '/docs/note.txt', label: 'Note', mode: 'read', expires: '1h' }),
+      });
+      expect(create.status).toBe(201);
+      const createdBody = await create.json() as { lease: { id: string; url: string } };
+      const createdUrl = new URL(createdBody.lease.url);
+      expect(createdUrl.origin).toBe('https://relay.example.com');
+      expect(createdUrl.pathname).toBe(`/t/demo/lease/${encodeURIComponent(createdBody.lease.id)}`);
+      expect(createdUrl.searchParams.get('token')).toBeTruthy();
+
+      const rotate = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases/${encodeURIComponent(createdBody.lease.id)}/rotate`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      expect(rotate.status).toBe(200);
+      const rotatedBody = await rotate.json() as { lease: { url: string } };
+      const rotatedUrl = new URL(rotatedBody.lease.url);
+      expect(rotatedUrl.pathname).toBe(`/t/demo/lease/${encodeURIComponent(createdBody.lease.id)}`);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  // The lease browser page extracts leaseId from location.pathname and
+  // builds /lease/{id}/files URLs from it. When the URL is served behind
+  // a relay prefix like /t/demo/lease/{id}, pathParts[1] is 'demo' (not
+  // the lease id) and fetches strip the prefix. Anchor on 'lease' so the
+  // page works in both shapes.
+  it('lease pages anchor leaseId and base prefix on the lease path segment', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-lease-page-prefix-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const leaseStorePath = path.join(tmp, '.leases.json');
+    const root = path.join(tmp, 'docs');
+    fs.mkdirSync(root, { recursive: true });
+    fs.writeFileSync(path.join(root, 'note.txt'), 'hi');
+    const config = parseConfig({
+      version: 1,
+      mounts: [{ name: 'docs', type: 'local_folder', path: '/docs', root }],
+    });
+    const lease = createLease(leaseStorePath, {
+      label: 'Docs',
+      path: '/docs',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: config.mounts,
+      leaseStorePath,
+    });
+    try {
+      const response = await fetch(`http://127.0.0.1:${server.port}/lease/${lease.record.id}?token=${lease.token}`);
+      expect(response.status).toBe(200);
+      const html = await response.text();
+      expect(html).toContain("const leaseIdx = pathParts.indexOf('lease');");
+      expect(html).toContain("const basePrefix = leaseIdx > 0 ? '/' + pathParts.slice(0, leaseIdx).join('/') : '';");
+      expect(html).toContain("new URL(basePrefix + '/lease/' + encodeURIComponent(leaseId)");
+      // No remaining absolute-path URL constructions that ignore the prefix.
+      expect(html).not.toContain("new URL('/lease/' + encodeURIComponent(leaseId)");
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('refuses mount mutation when no configPath is wired', async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-no-config-test-'));
     const tokenPath = path.join(tmp, '.session-token');
@@ -1065,10 +1165,205 @@ describe('dashboard access', () => {
       expect(html).toContain('id="lease-modal"');
       expect(html).toContain('id="lease-tiles"');
       expect(html).toContain('id="copy-url"');
+      expect(html).toContain('<section id="login" class="panel login-card">');
       expect(html).toContain('@media (max-width:640px)');
       expect(html).toContain("setAttribute('data-label', 'Actions')");
       expect(html).toContain('data-mode="upload"');
       expect(html).toContain('data-mode="two-way"');
+      expect(html).toContain('function scrubDashboardUrl()');
+      expect(html).toContain("history.replaceState(null, '', location.pathname)");
+      expect(html).toContain("var DASHBOARD_API_PREFIX = '/dashboard/api/'");
+      expect(html).toContain('function dashboardRequestUrl(url)');
+      expect(html).toContain("return dashboardBasePath() + '/api/' + url.slice(DASHBOARD_API_PREFIX.length)");
+      expect(html).not.toContain('...(opts.headers || {})');
+      expect(html).not.toContain('60_000');
+
+      // The dashboard's <script> body is built inside a backtick template
+      // literal, so any backslash that isn't doubled gets eaten before it
+      // reaches the browser. We previously shipped `replace(/\/+$/, '')`,
+      // which rendered as `replace(//+$/, '')` — a parse error that
+      // killed the entire inline script, broke the JS submit interceptor,
+      // and forced the login form to submit natively without a working
+      // bootstrap. Parse the served script to catch this whole class of
+      // bug at the test boundary instead of in someone's browser.
+      const scripts = inlineScriptBodies(html);
+      expect(scripts.length).toBeGreaterThan(0);
+      for (const body of scripts) {
+        expect(() => new Function(body)).not.toThrow();
+      }
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('redirects dashboard URLs with query params before serving the login UI', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-query-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: [],
+    });
+    try {
+      const response = await fetch(`http://127.0.0.1:${server.port}/dashboard?username=pnee&password=secret`, {
+        redirect: 'manual',
+      });
+      expect(response.status).toBe(303);
+      expect(response.headers.get('location')).toBe('dashboard');
+      expect(await response.text()).toBe('');
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts dashboard login posts forwarded by relay transport', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-relay-login-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    createPrivilegedUser(usersPath, { username: 'sarah', password: 'correct horse battery staple' });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: [],
+      privilegedUsersPath: usersPath,
+    });
+    try {
+      const blocked = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: 'https://mvmt-relay.fly.dev' },
+        body: JSON.stringify({ username: 'sarah', password: 'correct horse battery staple' }),
+      });
+      expect(blocked.status).toBe(403);
+
+      const allowed = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'https://mvmt-relay.fly.dev',
+          'X-MVMT-Transport': 'relay',
+        },
+        body: JSON.stringify({ username: 'sarah', password: 'correct horse battery staple' }),
+      });
+      expect(allowed.status).toBe(200);
+      expect(allowed.headers.get('set-cookie')).toContain('mvmt_dashboard=');
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('supports safe form POST fallback for dashboard login', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-form-login-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    createPrivilegedUser(usersPath, { username: 'sarah', password: 'correct horse battery staple' });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: [],
+      privilegedUsersPath: usersPath,
+    });
+    try {
+      const response = await fetch(`http://127.0.0.1:${server.port}/dashboard`, {
+        method: 'POST',
+        redirect: 'manual',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Origin: `http://127.0.0.1:${server.port}`,
+        },
+        body: new URLSearchParams({ username: 'sarah', password: 'correct horse battery staple' }),
+      });
+      expect(response.status).toBe(303);
+      expect(response.headers.get('location')).toBe('dashboard');
+      expect(response.headers.get('set-cookie')).toContain('mvmt_dashboard=');
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  // The mvmt agent is reachable both locally over HTTP and via the relay
+  // over HTTPS. Marking the session cookie Secure unconditionally (e.g.
+  // because the configured public URL is HTTPS) silently drops it on the
+  // local HTTP browser, which makes login look broken: the POST succeeds
+  // but every follow-up request comes in unauthenticated.
+  it('sets Secure on the session cookie based on the request Origin, not the configured public URL', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-secure-cookie-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    createPrivilegedUser(usersPath, { username: 'sarah', password: 'correct horse battery staple' });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: [],
+      privilegedUsersPath: usersPath,
+      resolvePublicBaseUrl: () => 'https://mvmt-relay.fly.dev/t/demo',
+    });
+    try {
+      const local = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: `http://127.0.0.1:${server.port}`,
+        },
+        body: JSON.stringify({ username: 'sarah', password: 'correct horse battery staple' }),
+      });
+      expect(local.status).toBe(200);
+      const localCookie = local.headers.get('set-cookie') ?? '';
+      expect(localCookie).toContain('mvmt_dashboard=');
+      expect(localCookie).not.toContain('Secure');
+
+      const relayed = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'https://mvmt-relay.fly.dev',
+          'X-MVMT-Transport': 'relay',
+        },
+        body: JSON.stringify({ username: 'sarah', password: 'correct horse battery staple' }),
+      });
+      expect(relayed.status).toBe(200);
+      expect(relayed.headers.get('set-cookie')).toContain('Secure');
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects existing dashboard sessions after the user is removed', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-remove-user-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    createPrivilegedUser(usersPath, { username: 'sarah', password: 'correct horse battery staple' });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: [],
+      privilegedUsersPath: usersPath,
+    });
+    try {
+      const cookie = await loginDashboard(server.port, 'sarah', 'correct horse battery staple');
+      const before = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/me`, {
+        headers: { Cookie: cookie },
+      });
+      expect(before.status).toBe(200);
+
+      removePrivilegedUser(usersPath, 'sarah');
+
+      const after = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/me`, {
+        headers: { Cookie: cookie },
+      });
+      expect(after.status).toBe(401);
+      expect(after.headers.get('set-cookie')).toContain('Max-Age=0');
+
+      const loginAgain = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: 'sarah', password: 'correct horse battery staple' }),
+      });
+      expect(loginAgain.status).toBe(401);
     } finally {
       await server.close();
       fs.rmSync(tmp, { recursive: true, force: true });
@@ -3231,7 +3526,9 @@ async function loginDashboard(port: number, username: string, password: string):
     body: JSON.stringify({ username, password }),
   });
   expect(response.status).toBe(200);
-  const cookie = response.headers.get('set-cookie')?.split(';')[0];
+  const setCookie = response.headers.get('set-cookie');
+  expect(setCookie).toContain('Path=/;');
+  const cookie = setCookie?.split(';')[0];
   expect(cookie).toBeTruthy();
   return cookie!;
 }
@@ -3264,4 +3561,66 @@ function parseMcpResponse(text: string): any {
   const dataLine = text.split('\n').find((line) => line.startsWith('data: '));
   if (!dataLine) throw new Error(`Could not parse MCP response: ${text}`);
   return JSON.parse(dataLine.slice('data: '.length));
+}
+
+function inlineScriptBodies(html: string): string[] {
+  const bodies: string[] = [];
+  const lowerHtml = html.toLowerCase();
+  let cursor = 0;
+
+  while (cursor < html.length) {
+    const openStart = findScriptOpenTag(lowerHtml, cursor);
+    if (openStart === -1) break;
+    const openEnd = html.indexOf('>', openStart);
+    if (openEnd === -1) break;
+
+    const closeStart = findScriptCloseTag(lowerHtml, openEnd + 1);
+    if (closeStart === -1) break;
+    bodies.push(html.slice(openEnd + 1, closeStart));
+
+    const closeEnd = html.indexOf('>', closeStart);
+    if (closeEnd === -1) break;
+    cursor = closeEnd + 1;
+  }
+
+  return bodies;
+}
+
+function findScriptOpenTag(lowerHtml: string, from: number): number {
+  let cursor = from;
+  while (cursor < lowerHtml.length) {
+    const candidate = lowerHtml.indexOf('<script', cursor);
+    if (candidate === -1) return -1;
+    if (isScriptNameBoundary(lowerHtml[candidate + '<script'.length])) return candidate;
+    cursor = candidate + 1;
+  }
+  return -1;
+}
+
+function findScriptCloseTag(lowerHtml: string, from: number): number {
+  let cursor = from;
+  while (cursor < lowerHtml.length) {
+    const candidate = lowerHtml.indexOf('</', cursor);
+    if (candidate === -1) return -1;
+
+    let nameStart = candidate + 2;
+    while (isHtmlSpace(lowerHtml[nameStart])) nameStart += 1;
+    if (
+      lowerHtml.slice(nameStart, nameStart + 'script'.length) === 'script' &&
+      isScriptNameBoundary(lowerHtml[nameStart + 'script'.length])
+    ) {
+      return candidate;
+    }
+
+    cursor = candidate + 2;
+  }
+  return -1;
+}
+
+function isScriptNameBoundary(char: string | undefined): boolean {
+  return char === undefined || char === '>' || char === '/' || isHtmlSpace(char);
+}
+
+function isHtmlSpace(char: string | undefined): boolean {
+  return char === ' ' || char === '\t' || char === '\n' || char === '\r' || char === '\f';
 }

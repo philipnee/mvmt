@@ -106,8 +106,13 @@ export function printConfigSummary(
     if (tunnelStatus) {
       console.log(`  tunnel: ${tunnelStatus.running ? 'running' : 'stopped'}`);
     }
-    if (tunnelStatus?.command ?? tunnel?.command) {
-      console.log(`  command: ${tunnelStatus?.command ?? tunnel?.command}`);
+    const configuredCommand = tunnel && tunnel.provider !== 'relay' ? tunnel.command : undefined;
+    if (tunnel?.provider === 'relay') {
+      console.log(`  relay: ${tunnel.relayUrl}`);
+      console.log(`  workspace: ${tunnel.workspaceSlug}`);
+    }
+    if (tunnelStatus?.command ?? configuredCommand) {
+      console.log(`  command: ${tunnelStatus?.command ?? configuredCommand}`);
     }
     if (tunnelStatus?.publicUrl ?? tunnel?.url) {
       const publicUrl = tunnelStatus?.publicUrl ?? tunnel?.url ?? '';

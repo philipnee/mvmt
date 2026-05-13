@@ -22,7 +22,7 @@ import {
   streamTunnelLogs,
 } from '../src/cli/tunnel.js';
 import { rotateToken, showToken, showTokenSummary } from '../src/cli/token.js';
-import { addPrivilegedUserCommand, listPrivilegedUsersCommand, setPrivilegedUserAdminCommand } from '../src/cli/users.js';
+import { addPrivilegedUserCommand, listPrivilegedUsersCommand, removePrivilegedUserCommand, setPrivilegedUserAdminCommand, setPrivilegedUserPasswordCommand } from '../src/cli/users.js';
 import { maybePrintUpdateNotice, readPackageInfo } from '../src/utils/version.js';
 
 const packageInfo = readPackageInfo();
@@ -75,13 +75,16 @@ program
   .option('--path <dir>', 'Temporarily expose a filesystem folder as read-only for this run only (repeatable)', collectValues)
   .option('--stdio', 'Use stdio transport')
   .option('-i, --interactive', 'Start an interactive control prompt')
+  .option('--relay-url <url>', 'Connect to an mvmt relay WebSocket, such as ws://localhost:8080/connect')
+  .option('--relay-workspace <slug>', 'Workspace slug to claim on the relay')
+  .option('--relay-token <token>', 'Agent token for the relay workspace')
   .option('-v, --verbose', 'Verbose logging')
   .addHelpText('after', examples([
     ['mvmt serve -i', 'start HTTP mode with the interactive prompt'],
     ['mvmt serve --stdio', 'start stdio mode for a client that launches mvmt'],
     ['mvmt serve --path ~/Documents', 'temporarily serve one folder as read-only'],
   ]))
-  .action(async (options: { port?: string; config?: string; path?: string[]; stdio?: boolean; interactive?: boolean; verbose?: boolean }) => {
+  .action(async (options: { port?: string; config?: string; path?: string[]; stdio?: boolean; interactive?: boolean; verbose?: boolean; relayUrl?: string; relayWorkspace?: string; relayToken?: string }) => {
     await start(options);
   });
 
@@ -269,6 +272,39 @@ usersCommand
     await addPrivilegedUserCommand(username, {
       password: command.getOptionValue('password') as string | undefined,
       admin: Boolean(command.getOptionValue('admin')),
+      json: Boolean(command.getOptionValue('json') || command.parent?.getOptionValue('json')),
+    });
+  });
+
+usersCommand
+  .command('password <username>')
+  .description('Rotate a dashboard user password')
+  .option('--password <password>', 'New password for non-interactive setup')
+  .option('--json', 'Output as JSON')
+  .addHelpText('after', examples([
+    ['mvmt users password sarah', 'prompt for a new password'],
+    ['mvmt users password sarah --password "new-long-password"', 'rotate non-interactively'],
+  ]))
+  .action(async (username: string | undefined, _options: { password?: string; json?: boolean }, command: Command) => {
+    await setPrivilegedUserPasswordCommand(username, {
+      password: command.getOptionValue('password') as string | undefined,
+      json: Boolean(command.getOptionValue('json') || command.parent?.getOptionValue('json')),
+    });
+  });
+
+usersCommand
+  .command('remove <username>')
+  .alias('delete')
+  .description('Remove a dashboard user')
+  .option('-y, --yes', 'Remove without prompting for confirmation')
+  .option('--json', 'Output as JSON')
+  .addHelpText('after', examples([
+    ['mvmt users remove sarah', 'prompt before removing sarah'],
+    ['mvmt users remove sarah --yes', 'remove without an interactive prompt'],
+  ]))
+  .action(async (username: string | undefined, _options: { yes?: boolean; json?: boolean }, command: Command) => {
+    await removePrivilegedUserCommand(username, {
+      yes: Boolean(command.getOptionValue('yes')),
       json: Boolean(command.getOptionValue('json') || command.parent?.getOptionValue('json')),
     });
   });
@@ -507,7 +543,24 @@ tunnelCommand
   .option('-c, --config <path>', 'Config file path')
   .option('--quick', 'Configure Cloudflare Quick Tunnel without prompting')
   .option('--cloudflare-config <path>', 'Configure a Cloudflare named tunnel from a cloudflared config file')
-  .action(async (options: { config?: string; quick?: boolean; cloudflareConfig?: string }, command: Command) => {
+  .option('--relay', 'Configure the default MVMT relay without prompting')
+  .option('--relay-url <url>', 'Configure a custom relay WebSocket URL')
+  .option('--relay-workspace <slug>', 'Relay workspace slug')
+  .option('--relay-token <token>', 'Relay agent token/secret')
+  .option('--public-url <url>', 'Public base URL for generated dashboard and lease links')
+  .action(async (
+    options: {
+      config?: string;
+      quick?: boolean;
+      cloudflareConfig?: string;
+      relay?: boolean;
+      relayUrl?: string;
+      relayWorkspace?: string;
+      relayToken?: string;
+      publicUrl?: string;
+    },
+    command: Command,
+  ) => {
     await configureTunnel(withInheritedConfig(options, command));
   });
 

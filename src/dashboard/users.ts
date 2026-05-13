@@ -35,6 +35,10 @@ export function listPrivilegedUsers(storePath: string): PrivilegedUser[] {
   return readPrivilegedUserStore(storePath).users;
 }
 
+export function findPrivilegedUser(storePath: string, userId: string): PrivilegedUser | undefined {
+  return readPrivilegedUserStore(storePath).users.find((user) => user.id === userId);
+}
+
 export function createPrivilegedUser(
   storePath: string,
   input: { username: string; password: string; admin?: boolean },
@@ -69,6 +73,39 @@ export function setPrivilegedUserAdmin(
   const updated: PrivilegedUser = { ...store.users[index] };
   if (admin) updated.admin = true;
   else delete updated.admin;
+  store.users[index] = updated;
+  writePrivilegedUserStore(storePath, store);
+  return updated;
+}
+
+export function removePrivilegedUser(
+  storePath: string,
+  usernameInput: string,
+): PrivilegedUser {
+  const username = normalizeUsername(usernameInput);
+  const store = readPrivilegedUserStore(storePath);
+  const index = store.users.findIndex((user) => user.username.toLowerCase() === username.toLowerCase());
+  if (index < 0) throw new Error(`Unknown privileged user: ${username}`);
+  const [removed] = store.users.splice(index, 1);
+  if (!removed) throw new Error(`Unknown privileged user: ${username}`);
+  writePrivilegedUserStore(storePath, store);
+  return removed;
+}
+
+export function setPrivilegedUserPassword(
+  storePath: string,
+  usernameInput: string,
+  password: string,
+): PrivilegedUser {
+  const username = normalizeUsername(usernameInput);
+  validatePassword(password);
+  const store = readPrivilegedUserStore(storePath);
+  const index = store.users.findIndex((user) => user.username.toLowerCase() === username.toLowerCase());
+  if (index < 0) throw new Error(`Unknown privileged user: ${username}`);
+  const updated: PrivilegedUser = {
+    ...store.users[index],
+    passwordHash: hashApiToken(password),
+  };
   store.users[index] = updated;
   writePrivilegedUserStore(storePath, store);
   return updated;

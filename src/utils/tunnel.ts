@@ -80,7 +80,7 @@ export function cloudflareNamedTunnelCommand(configPath: string): string {
   return `cloudflared tunnel --config ${shellQuote(configPath)} run`;
 }
 
-export function defaultTunnelCommand(provider: Exclude<TunnelConfig['provider'], 'custom'>): string {
+export function defaultTunnelCommand(provider: Exclude<TunnelConfig['provider'], 'custom' | 'relay'>): string {
   const sshFlags = [
     '-T',
     '-o StrictHostKeyChecking=accept-new',
@@ -103,6 +103,7 @@ export function missingTunnelDependency(
   tunnel: TunnelConfig | undefined,
   isAvailable: (command: string) => boolean = isCommandAvailable,
 ): string | undefined {
+  if (!tunnel || tunnel.provider === 'relay') return undefined;
   if (tunnel?.provider === 'cloudflare-quick' && !isAvailable('cloudflared')) {
     return 'cloudflared';
   }

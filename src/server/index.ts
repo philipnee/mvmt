@@ -33,6 +33,7 @@ import { addMountToConfig, editMountInConfig, MountInput, removeMountFromConfig 
 import { listDashboardFiles, normalizeDashboardPath, resolveDashboardFileTarget } from '../dashboard/files.js';
 import {
   defaultPrivilegedUsersPath,
+  findPrivilegedUser,
   PrivilegedUser,
   recordPrivilegedUserLogin,
   verifyPrivilegedUserPassword,
@@ -226,6 +227,12 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   // Proxied/tunneled deployments should set resolvePublicBaseUrl so OAuth
   // resource audience checks do not depend on the request Host header.
   const baseUrlFor = (req: Request): string => getBaseUrl(req, resolvePublicBaseUrl?.());
+  // baseUrlFor() strips the path because OAuth issuer/audience checks need
+  // just protocol+host. User-facing share links must keep the workspace
+  // prefix (e.g. https://relay.example.com/t/demo) so the relay can route
+  // /lease/... back to the right agent — without it the public URL hits
+  // the relay's catch-all "no explicit mapping for /error" 404.
+  const userFacingBaseUrlFor = (req: Request): string => resolvePublicBaseUrl?.() ?? baseUrlFor(req);
   const app = express();
   app.use(express.json({ limit: '10mb' }));
   app.use(express.urlencoded({ extended: false, limit: '64kb' }));
@@ -682,7 +689,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   });
 
   const dashboardOriginMiddleware: express.RequestHandler = (req, res, next) => {
-    if (originCheck(req) || originMatchesBaseUrl(req, baseUrlFor(req))) {
+    if (originCheck(req) || originMatchesBaseUrl(req, baseUrlFor(req)) || firstHeaderValue(req.headers['x-mvmt-transport']) === 'relay') {
       next();
       return;
     }
@@ -697,7 +704,17 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       res.status(401).json({ error: 'dashboard_login_required' });
       return;
     }
-    res.locals.dashboardSession = session;
+    const user = findPrivilegedUser(privilegedUsersPath, session.userId);
+    if (!user || user.disabled) {
+      dashboardSessions.delete(session.id);
+      res.setHeader('Set-Cookie', clearDashboardSessionCookie(req));
+      logHttpRequest(requestLog, req, 401, 'dashboard.auth', 'user_removed', session.username);
+      res.status(401).json({ error: 'dashboard_login_required' });
+      return;
+    }
+    const refreshedSession = { ...session, username: user.username, admin: Boolean(user.admin) };
+    dashboardSessions.set(session.id, refreshedSession);
+    res.locals.dashboardSession = refreshedSession;
     next();
   };
 
@@ -714,8 +731,32 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     next();
   };
 
-  app.get('/dashboard', (_req, res) => {
+  app.get('/dashboard', (req, res) => {
+    if (req.originalUrl.includes('?')) {
+      res.setHeader('Location', 'dashboard');
+      res.status(303).end();
+      return;
+    }
     res.status(200).type('html').send(DASHBOARD_PAGE_HTML);
+  });
+
+  app.post('/dashboard', authLimiter, dashboardOriginMiddleware, (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const username = typeof body.username === 'string' ? body.username : undefined;
+    const password = typeof body.password === 'string' ? body.password : undefined;
+    const user = verifyPrivilegedUserPassword(privilegedUsersPath, username, password);
+    if (!user) {
+      logHttpRequest(requestLog, req, 401, 'dashboard.login', 'invalid_credentials', username);
+      res.status(401).type('html').send('<!doctype html><meta charset="utf-8"><title>mvmt</title><p>Wrong username or password.</p><p><a href="dashboard">Back to sign in</a></p>');
+      return;
+    }
+    recordPrivilegedUserLogin(privilegedUsersPath, user.id);
+    const session = createDashboardSession(user.id, user.username, Boolean(user.admin));
+    dashboardSessions.set(session.id, session);
+    res.setHeader('Set-Cookie', dashboardSessionCookie(session, req));
+    res.setHeader('Location', 'dashboard');
+    logHttpRequest(requestLog, req, 303, 'dashboard.login', 'ok', user.username);
+    res.status(303).end();
   });
 
   app.post('/dashboard/api/login', authLimiter, dashboardOriginMiddleware, (req, res) => {
@@ -731,7 +772,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     recordPrivilegedUserLogin(privilegedUsersPath, user.id);
     const session = createDashboardSession(user.id, user.username, Boolean(user.admin));
     dashboardSessions.set(session.id, session);
-    res.setHeader('Set-Cookie', dashboardSessionCookie(session, baseUrlFor(req)));
+    res.setHeader('Set-Cookie', dashboardSessionCookie(session, req));
     logHttpRequest(requestLog, req, 200, 'dashboard.login', 'ok', user.username);
     res.json({ user: { ...publicDashboardUser(user), admin: Boolean(user.admin) } });
   });
@@ -739,7 +780,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   app.post('/dashboard/api/logout', dashboardOriginMiddleware, dashboardAuthMiddleware, (req, res) => {
     const session = res.locals.dashboardSession as DashboardSession;
     dashboardSessions.delete(session.id);
-    res.setHeader('Set-Cookie', clearDashboardSessionCookie(baseUrlFor(req)));
+    res.setHeader('Set-Cookie', clearDashboardSessionCookie(req));
     logHttpRequest(requestLog, req, 200, 'dashboard.logout', 'ok', session.username);
     res.json({ ok: true });
   });
@@ -828,7 +869,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
         expiresAt: ttl.expiresAt,
         permissions: [...permissions],
       });
-      const url = leasePublicUrl(baseUrlFor(req), created.record.id, created.token);
+      const url = leasePublicUrl(userFacingBaseUrlFor(req), created.record.id, created.token);
       logHttpRequest(requestLog, req, 201, 'dashboard.leases', `created ${created.record.id}`);
       res.status(201).json({ lease: { ...created.record, url } });
     } catch (err) {
@@ -875,7 +916,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       res.status(404).json({ error: 'lease_not_found' });
       return;
     }
-    const url = leasePublicUrl(baseUrlFor(req), rotated.record.id, rotated.token);
+    const url = leasePublicUrl(userFacingBaseUrlFor(req), rotated.record.id, rotated.token);
     logHttpRequest(requestLog, req, 200, 'dashboard.leases', `rotated ${id}`);
     res.json({ lease: { ...rotated.record, url } });
   });
@@ -1681,15 +1722,27 @@ function dashboardSessionForRequest(
   return session;
 }
 
-function dashboardSessionCookie(session: DashboardSession, baseUrl: string): string {
+function dashboardSessionCookie(session: DashboardSession, req: Request): string {
   const maxAge = Math.max(0, Math.floor((session.expiresAt - Date.now()) / 1000));
-  const secure = baseUrl.startsWith('https://') ? '; Secure' : '';
-  return `${DASHBOARD_SESSION_COOKIE}=${encodeURIComponent(session.id)}; Path=/dashboard; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure}`;
+  const secure = dashboardCookieSecureSuffix(req);
+  return `${DASHBOARD_SESSION_COOKIE}=${encodeURIComponent(session.id)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure}`;
 }
 
-function clearDashboardSessionCookie(baseUrl: string): string {
-  const secure = baseUrl.startsWith('https://') ? '; Secure' : '';
-  return `${DASHBOARD_SESSION_COOKIE}=; Path=/dashboard; HttpOnly; SameSite=Strict; Max-Age=0${secure}`;
+function clearDashboardSessionCookie(req: Request): string {
+  const secure = dashboardCookieSecureSuffix(req);
+  return `${DASHBOARD_SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure}`;
+}
+
+// The Secure attribute must reflect the *browser's* scheme, not the
+// configured publicBaseUrl. The same mvmt instance is reachable both
+// locally over http://127.0.0.1 and via the relay over https://. If we
+// always marked the cookie Secure based on the public URL, the local
+// browser would silently drop it on every subsequent request and the
+// dashboard would appear to log in then immediately bounce back to the
+// sign-in screen.
+function dashboardCookieSecureSuffix(req: Request): string {
+  const origin = firstHeaderValue(req.headers.origin);
+  return origin && origin.toLowerCase().startsWith('https://') ? '; Secure' : '';
 }
 
 function parseCookieHeader(header: string | undefined): Record<string, string> {
@@ -1840,7 +1893,11 @@ function uniqueDashboardLeaseResources(resources: LeaseResource[]): LeaseResourc
 }
 
 function leasePublicUrl(baseUrl: string, id: string, token: string): string {
-  const url = new URL(`/lease/${encodeURIComponent(id)}`, baseUrl);
+  // Concatenate paths instead of using `new URL('/lease/...', baseUrl)` —
+  // the URL constructor treats an absolute-path reference as resetting the
+  // path, which silently drops a relay workspace prefix like /t/demo.
+  const trimmed = baseUrl.replace(/\/+$/, '');
+  const url = new URL(`${trimmed}/lease/${encodeURIComponent(id)}`);
   url.searchParams.set('token', token);
   return url.toString();
 }
@@ -2061,13 +2118,14 @@ table.t{border-collapse:collapse;width:100%}
 <main>
   <div id="toast-stack" class="toast-stack"></div>
 
-  <section id="login" class="panel login-card hidden">
+  <section id="login" class="panel login-card">
     <h2>Sign in</h2>
     <p class="muted" style="margin:.25rem 0 1rem;font-size:.88rem;">Sign in to manage shared links for this device.</p>
-    <form id="login-form" autocomplete="on">
+    <form id="login-form" method="post" action="" autocomplete="on">
       <input id="username" name="username" autocomplete="username" placeholder="Username" required>
       <input id="password" name="password" type="password" autocomplete="current-password" placeholder="Password" required>
       <button class="btn btn-primary" type="submit" style="justify-content:center;margin-top:.25rem;">Sign in</button>
+      <p id="login-status" class="muted" role="status" style="min-height:1.2em;margin:.15rem 0 0;font-size:.84rem;"></p>
     </form>
   </section>
 
@@ -2241,6 +2299,15 @@ table.t{border-collapse:collapse;width:100%}
 <script>
 (function () {
   var $ = function (id) { return document.getElementById(id); };
+  var DASHBOARD_API_PREFIX = '/dashboard/api/';
+
+  function scrubDashboardUrl() {
+    if (!location.search && !location.hash) return;
+    history.replaceState(null, '', location.pathname);
+  }
+
+  scrubDashboardUrl();
+
   var ICONS = {
     folder: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>',
     file: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>',
@@ -2254,6 +2321,20 @@ table.t{border-collapse:collapse;width:100%}
     refresh: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M3 12a9 9 0 0 1 15.5-6.4L21 8M21 3v5h-5M21 12a9 9 0 0 1-15.5 6.4L3 16M3 21v-5h5"/></svg>',
     up: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M12 19V5M5 12l7-7 7 7"/></svg>',
   };
+
+  function dashboardBasePath() {
+    var path = location.pathname.replace(/\\/+$/, '');
+    var marker = '/dashboard';
+    var index = path.lastIndexOf(marker);
+    return index >= 0 ? path.slice(0, index + marker.length) : marker;
+  }
+
+  function dashboardRequestUrl(url) {
+    if (typeof url === 'string' && url.indexOf(DASHBOARD_API_PREFIX) === 0) {
+      return dashboardBasePath() + '/api/' + url.slice(DASHBOARD_API_PREFIX.length);
+    }
+    return url;
+  }
 
   var state = {
     currentPath: '/',
@@ -2269,10 +2350,18 @@ table.t{border-collapse:collapse;width:100%}
   // ---------- core helpers ----------
   async function api(url, options) {
     var opts = options || {};
-    var response = await fetch(url, {
-      ...opts,
-      headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
-    });
+    var fetchOptions = {};
+    for (var key in opts) {
+      if (Object.prototype.hasOwnProperty.call(opts, key)) fetchOptions[key] = opts[key];
+    }
+    var headers = { 'Content-Type': 'application/json' };
+    if (opts.headers) {
+      for (var headerName in opts.headers) {
+        if (Object.prototype.hasOwnProperty.call(opts.headers, headerName)) headers[headerName] = opts.headers[headerName];
+      }
+    }
+    fetchOptions.headers = headers;
+    var response = await fetch(dashboardRequestUrl(url), fetchOptions);
     var body = null;
     try { body = await response.json(); } catch (_) { /* no body */ }
     if (!response.ok) {
@@ -2349,7 +2438,7 @@ table.t{border-collapse:collapse;width:100%}
     if (isNaN(ms)) return iso;
     var abs = Math.abs(ms);
     var future = ms < 0;
-    var min = 60_000, hr = 3_600_000, day = 86_400_000;
+    var min = 60000, hr = 3600000, day = 86400000;
     var phrase;
     if (abs < min) phrase = 'just now';
     else if (abs < hr) phrase = Math.round(abs / min) + 'm';
@@ -2876,6 +2965,7 @@ table.t{border-collapse:collapse;width:100%}
   $('login-form').addEventListener('submit', async function (event) {
     event.preventDefault();
     var submit = event.target.querySelector('button[type=submit]');
+    $('login-status').textContent = 'Signing in...';
     if (submit) submit.disabled = true;
     try {
       var resp = await api('/dashboard/api/login', {
@@ -2885,9 +2975,13 @@ table.t{border-collapse:collapse;width:100%}
       $('who').textContent = (resp.user && resp.user.username) || '';
       $('who-role').classList.toggle('hidden', !(resp.user && resp.user.admin));
       $('password').value = '';
+      $('login-status').textContent = '';
       showApp(true);
       await refresh();
-    } catch (err) { showError(err); }
+    } catch (err) {
+      $('login-status').textContent = humanizeError((err && err.message) ? err.message : String(err));
+      showError(err);
+    }
     finally { if (submit) submit.disabled = false; }
   });
 
@@ -2982,7 +3076,12 @@ const LEASE_BROWSER_PAGE_HTML = `<!doctype html>
   <table><thead><tr><th>Name</th><th>Type</th><th>Bytes</th></tr></thead><tbody id="entries"></tbody></table>
   <script>
 const pathParts = location.pathname.split('/').filter(Boolean);
-const leaseId = decodeURIComponent(pathParts[1] || '');
+// When served through a relay the path is /t/{slug}/lease/{id}; locally
+// it is just /lease/{id}. Anchor on 'lease' so the id and the prefix
+// before it stay correct in both shapes.
+const leaseIdx = pathParts.indexOf('lease');
+const leaseId = leaseIdx >= 0 ? decodeURIComponent(pathParts[leaseIdx + 1] || '') : '';
+const basePrefix = leaseIdx > 0 ? '/' + pathParts.slice(0, leaseIdx).join('/') : '';
 const params = new URLSearchParams(location.search);
 const token = params.get('token') || params.get('t') || '';
 const requestedPath = params.get('path') || '';
@@ -2996,7 +3095,7 @@ const meta = document.getElementById('meta');
   let currentListingPath = '/';
 
 function pageUrl(nextPath) {
-  const url = new URL('/lease/' + encodeURIComponent(leaseId), location.origin);
+  const url = new URL(basePrefix + '/lease/' + encodeURIComponent(leaseId), location.origin);
   if (nextPath && nextPath !== '/') url.searchParams.set('path', nextPath);
   if (token) url.searchParams.set('token', token);
   return url.pathname + url.search;
@@ -3004,7 +3103,7 @@ function pageUrl(nextPath) {
 
   function fileUrl(entryPath) {
   const encodedPath = entryPath.split('/').filter(Boolean).map(encodeURIComponent).join('/');
-  const url = new URL('/lease/' + encodeURIComponent(leaseId) + '/files/' + encodedPath, location.origin);
+  const url = new URL(basePrefix + '/lease/' + encodeURIComponent(leaseId) + '/files/' + encodedPath, location.origin);
   if (token) url.searchParams.set('token', token);
   return url.pathname + url.search;
 }
@@ -3015,8 +3114,17 @@ function parentPath(inputPath) {
   return parts.length === 0 ? '/' : '/' + parts.join('/');
 }
 
+function uploadUrl(fileName) {
+  const parts = currentListingPath.split('/').filter(Boolean);
+  parts.push(fileName);
+  const encodedPath = parts.map(encodeURIComponent).join('/');
+  const url = new URL(basePrefix + '/lease/' + encodeURIComponent(leaseId) + '/files/' + encodedPath, location.origin);
+  if (token) url.searchParams.set('token', token);
+  return url.pathname + url.search;
+}
+
 async function loadListing() {
-  const url = new URL('/lease/' + encodeURIComponent(leaseId) + '/files', location.origin);
+  const url = new URL(basePrefix + '/lease/' + encodeURIComponent(leaseId) + '/files', location.origin);
   if (requestedPath) url.searchParams.set('path', requestedPath);
   if (token) url.searchParams.set('token', token);
   const response = await fetch(url);
@@ -3025,14 +3133,6 @@ async function loadListing() {
     return;
   }
 
-  function uploadUrl(fileName) {
-    const parts = currentListingPath.split('/').filter(Boolean);
-    parts.push(fileName);
-    const encodedPath = parts.map(encodeURIComponent).join('/');
-    const url = new URL('/lease/' + encodeURIComponent(leaseId) + '/files/' + encodedPath, location.origin);
-    if (token) url.searchParams.set('token', token);
-    return url.pathname + url.search;
-  }
 	  const listing = await response.json();
 	  currentListingPath = listing.path || '/';
 	  title.textContent = listing.label || 'Folder lease';
@@ -3076,7 +3176,9 @@ async function loadListing() {
 	  await loadListing();
 	}
 
-	uploadInput.addEventListener('change', () => uploadFiles(uploadInput.files));
+	uploadInput.addEventListener('change', () => uploadFiles(uploadInput.files).catch(() => {
+	  status.textContent = 'Upload failed.';
+	}));
 	upload.addEventListener('dragover', (event) => {
 	  event.preventDefault();
 	  upload.classList.add('drag');
@@ -3087,7 +3189,9 @@ async function loadListing() {
 	upload.addEventListener('drop', (event) => {
 	  event.preventDefault();
 	  upload.classList.remove('drag');
-	  uploadFiles(event.dataTransfer.files);
+	  uploadFiles(event.dataTransfer.files).catch(() => {
+	    status.textContent = 'Upload failed.';
+	  });
 	});
 
 loadListing().catch(() => {
@@ -3119,14 +3223,18 @@ button{padding:.55rem .8rem}
 </div>
 <script>
 const pathParts = location.pathname.split('/').filter(Boolean);
-const leaseId = decodeURIComponent(pathParts[1] || '');
+// Mirror the lease browser page: anchor on 'lease' so the id and any
+// relay prefix in front of it (/t/{slug}) are both captured correctly.
+const leaseIdx = pathParts.indexOf('lease');
+const leaseId = leaseIdx >= 0 ? decodeURIComponent(pathParts[leaseIdx + 1] || '') : '';
+const basePrefix = leaseIdx > 0 ? '/' + pathParts.slice(0, leaseIdx).join('/') : '';
 const params = new URLSearchParams(location.search);
 const token = params.get('token') || params.get('t') || '';
 const drop = document.querySelector('.drop');
 const input = document.getElementById('files');
 const status = document.getElementById('status');
 function uploadPath(name) {
-  return '/lease/' + encodeURIComponent(leaseId) + '/files/' + encodeURIComponent(name) + '?token=' + encodeURIComponent(token);
+  return basePrefix + '/lease/' + encodeURIComponent(leaseId) + '/files/' + encodeURIComponent(name) + '?token=' + encodeURIComponent(token);
 }
 async function uploadFiles(files) {
   for (const file of files) {
@@ -3140,13 +3248,17 @@ async function uploadFiles(files) {
   status.textContent = 'Upload complete.';
   input.value = '';
 }
-input.addEventListener('change', () => uploadFiles(input.files));
+input.addEventListener('change', () => uploadFiles(input.files).catch(() => {
+  status.textContent = 'Upload failed.';
+}));
 drop.addEventListener('dragover', (event) => {
   event.preventDefault();
 });
 drop.addEventListener('drop', (event) => {
   event.preventDefault();
-  uploadFiles(event.dataTransfer.files);
+  uploadFiles(event.dataTransfer.files).catch(() => {
+    status.textContent = 'Upload failed.';
+  });
 });
 </script>
 </body>

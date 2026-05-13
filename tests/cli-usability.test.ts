@@ -78,6 +78,45 @@ describe('CLI usability', () => {
       expect(JSON.parse(listed.stdout)).toMatchObject({
         users: [expect.objectContaining({ username: 'sarah', disabled: false })],
       });
+
+      const rotated = await execFileAsync(
+        process.execPath,
+        [...cliArgs, 'users', 'password', 'sarah', '--password', 'new dashboard password', '--json'],
+        { cwd: root, env },
+      );
+      expect(JSON.parse(rotated.stdout)).toMatchObject({
+        user: { username: 'sarah' },
+      });
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('removes privileged dashboard users non-interactively', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    try {
+      const env = { ...process.env, HOME: tmp };
+      await execFileAsync(
+        process.execPath,
+        [...cliArgs, 'users', 'add', 'sarah', '--password', 'correct horse battery staple', '--json'],
+        { cwd: root, env },
+      );
+
+      const removed = await execFileAsync(
+        process.execPath,
+        [...cliArgs, 'users', 'remove', 'sarah', '--yes', '--json'],
+        { cwd: root, env },
+      );
+      expect(JSON.parse(removed.stdout)).toMatchObject({
+        removed: { username: 'sarah' },
+      });
+
+      const empty = await execFileAsync(
+        process.execPath,
+        [...cliArgs, 'users', '--json'],
+        { cwd: root, env },
+      );
+      expect(JSON.parse(empty.stdout)).toEqual({ users: [] });
     } finally {
       await fs.rm(tmp, { recursive: true, force: true });
     }
@@ -266,6 +305,42 @@ describe('CLI usability', () => {
       const updated = readConfig(configPath);
       expect(updated.server.access).toBe('local');
       expect(updated.server.tunnel?.url).toBe('https://mvmt.example.com');
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('configures relay tunnel access non-interactively', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    const configPath = path.join(tmp, 'config.yaml');
+    try {
+      await saveConfig(configPath, parseConfig({ version: 1 }));
+
+      const { stdout } = await runCli([
+        'tunnel',
+        'config',
+        '--config',
+        configPath,
+        '--relay-url',
+        'ws://127.0.0.1:8080/connect',
+        '--relay-workspace',
+        'demo',
+        '--relay-token',
+        'agent-secret',
+        '--public-url',
+        'https://demo.example.com',
+      ]);
+      expect(stdout).toContain('Tunnel config saved');
+
+      const updated = readConfig(configPath);
+      expect(updated.server.access).toBe('tunnel');
+      expect(updated.server.tunnel).toMatchObject({
+        provider: 'relay',
+        relayUrl: 'ws://127.0.0.1:8080/connect',
+        workspaceSlug: 'demo',
+        agentToken: 'agent-secret',
+        url: 'https://demo.example.com',
+      });
     } finally {
       await fs.rm(tmp, { recursive: true, force: true });
     }
