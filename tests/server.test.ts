@@ -3564,6 +3564,63 @@ function parseMcpResponse(text: string): any {
 }
 
 function inlineScriptBodies(html: string): string[] {
-  return Array.from(html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script\s*>/gi))
-    .map((match) => match[1] ?? '');
+  const bodies: string[] = [];
+  const lowerHtml = html.toLowerCase();
+  let cursor = 0;
+
+  while (cursor < html.length) {
+    const openStart = findScriptOpenTag(lowerHtml, cursor);
+    if (openStart === -1) break;
+    const openEnd = html.indexOf('>', openStart);
+    if (openEnd === -1) break;
+
+    const closeStart = findScriptCloseTag(lowerHtml, openEnd + 1);
+    if (closeStart === -1) break;
+    bodies.push(html.slice(openEnd + 1, closeStart));
+
+    const closeEnd = html.indexOf('>', closeStart);
+    if (closeEnd === -1) break;
+    cursor = closeEnd + 1;
+  }
+
+  return bodies;
+}
+
+function findScriptOpenTag(lowerHtml: string, from: number): number {
+  let cursor = from;
+  while (cursor < lowerHtml.length) {
+    const candidate = lowerHtml.indexOf('<script', cursor);
+    if (candidate === -1) return -1;
+    if (isScriptNameBoundary(lowerHtml[candidate + '<script'.length])) return candidate;
+    cursor = candidate + 1;
+  }
+  return -1;
+}
+
+function findScriptCloseTag(lowerHtml: string, from: number): number {
+  let cursor = from;
+  while (cursor < lowerHtml.length) {
+    const candidate = lowerHtml.indexOf('</', cursor);
+    if (candidate === -1) return -1;
+
+    let nameStart = candidate + 2;
+    while (isHtmlSpace(lowerHtml[nameStart])) nameStart += 1;
+    if (
+      lowerHtml.slice(nameStart, nameStart + 'script'.length) === 'script' &&
+      isScriptNameBoundary(lowerHtml[nameStart + 'script'.length])
+    ) {
+      return candidate;
+    }
+
+    cursor = candidate + 2;
+  }
+  return -1;
+}
+
+function isScriptNameBoundary(char: string | undefined): boolean {
+  return char === undefined || char === '>' || char === '/' || isHtmlSpace(char);
+}
+
+function isHtmlSpace(char: string | undefined): boolean {
+  return char === ' ' || char === '\t' || char === '\n' || char === '\r' || char === '\f';
 }
