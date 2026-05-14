@@ -31,6 +31,10 @@ export interface LeaseRecord {
   revokedAt?: string;
   downloadCount: number;
   uploadCount: number;
+  // Exposure boundary for the capability/grant model. Absent means the
+  // lease predates the publish concept and is grandfathered as published
+  // so existing share links keep working — see isGrantPublished().
+  published?: boolean;
 }
 
 interface LeaseStoreFile {

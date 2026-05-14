@@ -216,6 +216,11 @@ export const ClientSchema = z.object({
   auth: ClientAuthSchema,
   rawToolsEnabled: z.boolean().default(false),
   permissions: z.array(PermissionSchema).default([]),
+  // Exposure boundary for the capability/grant model. A grant reachable
+  // over the relay must be explicitly published. Absent means "minted
+  // before the publish concept existed" and is grandfathered as
+  // published so existing tokens keep working — see isGrantPublished().
+  published: z.boolean().optional(),
 });
 
 export const SemanticToolEntrySchema = z.object({
