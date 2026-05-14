@@ -15,12 +15,16 @@ describe('CLI usability', () => {
   it('shows examples in top-level help', async () => {
     const { stdout } = await runCli(['--help']);
 
-    expect(stdout).toContain('Mount selected local folders and serve them over MCP');
+    expect(stdout).toContain('Share local files and folders through dashboard links, leases, and MCP');
     expect(stdout).toContain('Examples:');
+    expect(stdout).toContain('mvmt serve -i');
+    expect(stdout).toContain('start the local dashboard and control prompt');
     expect(stdout).toContain('mvmt serve --path ~/Documents');
-    expect(stdout).toContain('serve one read-only folder for this run');
+    expect(stdout).toContain('temporarily expose one read-only source for this run');
     expect(stdout).toContain('mvmt lease create ~/Taxes ~/Receipts --label "Sarah - tax docs"');
-    expect(stdout).toContain('create one 24h lease for multiple paths');
+    expect(stdout).toContain('create one 24h shared link for multiple paths');
+    expect(stdout).toContain('mvmt users add owner --admin');
+    expect(stdout).toContain('create a local dashboard login that can manage sources');
   });
 
   it('suggests close command names for typos', async () => {

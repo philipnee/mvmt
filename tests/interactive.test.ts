@@ -114,16 +114,16 @@ describe('Interactive help', () => {
   it('presents leases as the primary surface', () => {
     const lines = captureConsole(() => printInteractiveHelp());
 
-    expect(lines).toContain('  dashboard           show dashboard URLs');
-    expect(lines).toContain('  lease               list leases');
-    expect(lines).toContain('  lease create        create a path lease');
-    expect(lines).toContain('  lease add-path      add paths to a lease');
-    expect(lines).toContain('  lease revoke        revoke a lease');
+    expect(lines).toContain('  dashboard           show local/public dashboard URLs');
+    expect(lines).toContain('  lease               list shared links');
+    expect(lines).toContain('  lease create        create a shared link for a file or folder');
+    expect(lines).toContain('  lease add-path      add files/folders to a shared link');
+    expect(lines).toContain('  lease revoke        turn off a shared link');
     expect(lines).toContain('  users               list dashboard users');
     expect(lines).toContain('  users add           create dashboard user');
-    expect(lines).toContain('  users grant/revoke  manage source-admin access');
+    expect(lines).toContain('  users grant/revoke  allow local source management');
     expect(lines).toContain('  url                 show dashboard and MCP URLs');
-    expect(lines).toContain('  advanced            show mount/token/MCP commands');
+    expect(lines).toContain('  advanced            show source, token, and MCP commands');
     expect(lines).not.toContain('  token               list scoped API tokens');
     expect(lines).not.toContain('  mounts      list configured mounts');
     expect(lines).not.toContain('  share               list browser download links');
@@ -132,9 +132,9 @@ describe('Interactive help', () => {
   it('keeps implementation-level commands under advanced help', () => {
     const lines = captureConsole(() => printAdvancedHelp());
 
-    expect(lines).toContain('  advanced mounts              list internal mounts');
-    expect(lines).toContain('  advanced token               list scoped API tokens');
-    expect(lines).toContain('  advanced connectors          list loaded MCP connectors');
+    expect(lines).toContain('  advanced mounts              list local sources');
+    expect(lines).toContain('  advanced token               list scoped MCP/API tokens');
+    expect(lines).toContain('  advanced connectors          list compatibility MCP connectors');
   });
 });
 

@@ -382,25 +382,25 @@ async function handleInteractiveCommand(
 export function printInteractiveHelp(): void {
   console.log('');
   console.log(chalk.bold('Commands'));
-  console.log('  dashboard           show dashboard URLs');
-  console.log('  lease               list leases');
-  console.log('  lease create        create a path lease');
-  console.log('  lease add-path      add paths to a lease');
-  console.log('  lease revoke        revoke a lease');
+  console.log('  dashboard           show local/public dashboard URLs');
+  console.log('  lease               list shared links');
+  console.log('  lease create        create a shared link for a file or folder');
+  console.log('  lease add-path      add files/folders to a shared link');
+  console.log('  lease revoke        turn off a shared link');
   console.log('  users               list dashboard users');
   console.log('  users add           create dashboard user');
-  console.log('  users grant/revoke  manage source-admin access');
+  console.log('  users grant/revoke  allow local source management');
   console.log('  users remove        delete dashboard user');
-  console.log('  tunnel              show tunnel status');
-  console.log('  tunnel config       choose a tunnel');
-  console.log('  tunnel start        start the configured tunnel');
-  console.log('  tunnel refresh      restart the tunnel and print the new URL');
-  console.log('  tunnel stop         stop public tunnel exposure');
-  console.log('  logs                show live request/tool log state');
-  console.log('  logs on/off         toggle live request/tool logs');
-  console.log('  status              show server and lease access status');
+  console.log('  tunnel              show public access status');
+  console.log('  tunnel config       configure relay or Cloudflare');
+  console.log('  tunnel start        start public access');
+  console.log('  tunnel refresh      restart public access and print the new URL');
+  console.log('  tunnel stop         stop public access');
+  console.log('  logs                show live activity log state');
+  console.log('  logs on/off         toggle live activity logs');
+  console.log('  status              show server, tunnel, and sharing status');
   console.log('  url                 show dashboard and MCP URLs');
-  console.log('  advanced            show mount/token/MCP commands');
+  console.log('  advanced            show source, token, and MCP commands');
   console.log('  clear               clear the terminal');
   console.log('  quit                stop mvmt');
   console.log('');
@@ -411,12 +411,12 @@ export function printAdvancedHelp(): void {
   console.log(chalk.bold('Advanced commands'));
   console.log('  advanced config              show saved mvmt config');
   console.log('  advanced config setup        rerun guided setup in another shell');
-  console.log('  advanced mounts              list internal mounts');
+  console.log('  advanced mounts              list local sources');
   console.log('  advanced mounts add/edit/remove');
-  console.log('  advanced token               list scoped API tokens');
-  console.log('  advanced token add/edit      manage scoped API tokens');
+  console.log('  advanced token               list scoped MCP/API tokens');
+  console.log('  advanced token add/edit      manage scoped MCP/API tokens');
   console.log('  advanced token rotate/remove');
-  console.log('  advanced connectors          list loaded MCP connectors');
+  console.log('  advanced connectors          list compatibility MCP connectors');
   console.log('  tunnel logs                  show recent tunnel output');
   console.log('  tunnel logs stream           stream tunnel output from another shell');
   console.log('');
@@ -430,11 +430,11 @@ function printInteractiveStatus(state: InteractivePromptState): void {
   console.log('');
   console.log(chalk.bold('Status'));
   printInteractiveUrls(state);
-  console.log(`leases       ${chalk.cyan('lease')}`);
-  console.log(`tool-call log  ${AUDIT_LOG_PATH}`);
-  console.log(`live logs      ${state.audit.getLiveLogs() ? chalk.green('on') : chalk.dim('off')}`);
+  console.log(`shared links  ${chalk.cyan('lease')}`);
+  console.log(`activity log  ${AUDIT_LOG_PATH}`);
+  console.log(`live logs     ${state.audit.getLiveLogs() ? chalk.green('on') : chalk.dim('off')}`);
   printTunnelStatus(state);
-  console.log(chalk.dim('Type `advanced` for internal mounts, tokens, connectors, and MCP details.'));
+  console.log(chalk.dim('Type `advanced` for source, token, connector, and MCP commands.'));
 }
 
 function printInteractiveUrls(state: InteractivePromptState): void {
@@ -668,7 +668,7 @@ async function handleUsersAdd(): Promise<void> {
 
 async function handleUsersAdmin(admin: boolean): Promise<void> {
   const username = await input({
-    message: admin ? 'Grant source-admin access to:' : 'Revoke source-admin access from:',
+    message: admin ? 'Allow local source management for:' : 'Remove local source management from:',
     validate: (value) => value.trim().length > 0 ? true : 'Enter a username',
   });
   await setPrivilegedUserAdminCommand(username.trim(), admin);

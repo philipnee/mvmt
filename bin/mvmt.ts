@@ -40,19 +40,19 @@ const program = new Command();
 
 program
   .name('mvmt')
-  .description('Mount selected local folders and serve them over MCP')
+  .description('Share local files and folders through dashboard links, leases, and MCP')
   .option('-V, --version', 'Print mvmt version and check for updates')
   .option('--no-update-check', 'Skip automatic npm update checks');
 program.showHelpAfterError();
 program.showSuggestionAfterError();
 program.addHelpText('after', examples([
-  ['mvmt serve -i', 'start locally with the interactive prompt'],
-  ['mvmt serve --path ~/Documents', 'serve one read-only folder for this run'],
-  ['mvmt mounts add notes ~/notes --mount-path /notes --read-only', 'add a read-only mount'],
-  ['mvmt lease create ~/Taxes ~/Receipts --label "Sarah - tax docs"', 'create one 24h lease for multiple paths'],
-  ['mvmt users add sarah', 'create a privileged dashboard user'],
-  ['mvmt token add codex --scope notes:read', 'create a scoped API token'],
-  ['mvmt doctor', 'validate config and mount roots'],
+  ['mvmt serve -i', 'start the local dashboard and control prompt'],
+  ['mvmt users add owner --admin', 'create a local dashboard login that can manage sources'],
+  ['mvmt lease create ~/Taxes ~/Receipts --label "Sarah - tax docs"', 'create one 24h shared link for multiple paths'],
+  ['mvmt tunnel config', 'configure public access for dashboard and shared links'],
+  ['mvmt serve --path ~/Documents', 'temporarily expose one read-only source for this run'],
+  ['mvmt token add codex --scope notes:read', 'advanced: create a scoped MCP/API token'],
+  ['mvmt doctor', 'validate config, sources, and runtime health'],
 ]));
 
 program.hook('preAction', async (thisCommand, actionCommand) => {
@@ -69,7 +69,7 @@ program.hook('preAction', async (thisCommand, actionCommand) => {
 
 program
   .command('serve')
-  .description('Configure mvmt if needed, then start the MCP server')
+  .description('Start mvmt with the dashboard, shared links, and MCP endpoint')
   .option('-p, --port <number>', 'Override port')
   .option('-c, --config <path>', 'Config file path')
   .option('--path <dir>', 'Temporarily expose a filesystem folder as read-only for this run only (repeatable)', collectValues)
@@ -80,9 +80,9 @@ program
   .option('--relay-token <token>', 'Agent token for the relay workspace')
   .option('-v, --verbose', 'Verbose logging')
   .addHelpText('after', examples([
-    ['mvmt serve -i', 'start HTTP mode with the interactive prompt'],
-    ['mvmt serve --stdio', 'start stdio mode for a client that launches mvmt'],
-    ['mvmt serve --path ~/Documents', 'temporarily serve one folder as read-only'],
+    ['mvmt serve -i', 'start the dashboard with the interactive control prompt'],
+    ['mvmt serve --path ~/Documents -i', 'temporarily expose one read-only source and open the prompt'],
+    ['mvmt serve --stdio', 'advanced: start stdio MCP mode for a client that launches mvmt'],
   ]))
   .action(async (options: { port?: string; config?: string; path?: string[]; stdio?: boolean; interactive?: boolean; verbose?: boolean; relayUrl?: string; relayWorkspace?: string; relayToken?: string }) => {
     await start(options);
@@ -90,7 +90,7 @@ program
 
 program
   .command('doctor')
-  .description('Validate config and check connector health')
+  .description('Validate config, sources, and runtime health')
   .option('-c, --config <path>', 'Config file path')
   .option('--json', 'Output as JSON')
   .option('--timeout-ms <number>', 'Per-connector health-check timeout in milliseconds')
@@ -101,7 +101,7 @@ program
 
 program
   .command('reindex')
-  .description('Rebuild the prototype text context index')
+  .description('Rebuild the local text search index')
   .option('-c, --config <path>', 'Config file path')
   .action(async (options: { config?: string }) => {
     await reindex(options);
@@ -109,7 +109,7 @@ program
 
 const mountsCommand = program
   .command('mounts')
-  .description('Manage local folder mounts')
+  .description('Manage local sources (advanced)')
   .option('-c, --config <path>', 'Config file path')
   .option('--json', 'Output as JSON')
   .action(async (options: { config?: string; json?: boolean }) => {
@@ -118,7 +118,7 @@ const mountsCommand = program
 
 mountsCommand
   .command('list')
-  .description('List configured mounts')
+  .description('List configured local sources')
   .option('-c, --config <path>', 'Config file path')
   .option('--json', 'Output as JSON')
   .action(async (options: { config?: string; json?: boolean }, command: Command) => {
@@ -127,7 +127,7 @@ mountsCommand
 
 mountsCommand
   .command('add [name] [root]')
-  .description('Add a local file or folder mount')
+  .description('Add a local file or folder source')
   .option('-c, --config <path>', 'Config file path')
   .option('--mount-path <path>', 'Virtual mount path, such as /notes')
   .option('--write', 'Allow write/remove tools for this mount')
@@ -148,7 +148,7 @@ mountsCommand
 
 mountsCommand
   .command('edit [name]')
-  .description('Edit a local folder mount')
+  .description('Edit a local source')
   .option('-c, --config <path>', 'Config file path')
   .option('--root <path>', 'New local folder root')
   .option('--mount-path <path>', 'New virtual mount path, such as /notes')
@@ -166,7 +166,7 @@ mountsCommand
 
 mountsCommand
   .command('remove [name]')
-  .description('Remove a mount')
+  .description('Remove a local source')
   .option('-c, --config <path>', 'Config file path')
   .option('-y, --yes', 'Remove without prompting for confirmation')
   .addHelpText('after', examples([
@@ -179,7 +179,7 @@ mountsCommand
 
 const leaseCommand = program
   .command('lease')
-  .description('Create path leases')
+  .description('Create and manage shared links')
   .option('-c, --config <path>', 'Config file path')
   .option('--json', 'Output as JSON')
   .action(async (options: { config?: string; json?: boolean }) => {
@@ -188,7 +188,7 @@ const leaseCommand = program
 
 leaseCommand
   .command('list')
-  .description('List leases')
+  .description('List shared links')
   .option('-c, --config <path>', 'Config file path')
   .option('--json', 'Output as JSON')
   .action(async (options: { config?: string; json?: boolean }, command: Command) => {
@@ -198,7 +198,7 @@ leaseCommand
 leaseCommand
   .command('create <paths...>')
   .alias('add')
-  .description('Create one browser/MCP lease for one or more paths')
+  .description('Create one shared link for one or more files/folders')
   .option('-c, --config <path>', 'Config file path')
   .requiredOption('--label <text>', 'Required lease label, such as "Sarah - tax docs"')
   .option('--mode <mode>', 'Lease mode: read, upload, two-way, or write', 'read')
@@ -207,12 +207,12 @@ leaseCommand
   .option('--ttl <duration>', 'Alias for --expires')
   .option('--json', 'Output as JSON')
   .addHelpText('after', examples([
-    ['mvmt lease create ~/Documents/Taxes ~/Receipts --label "Sarah - tax docs"', 'create a 24h lease for multiple paths'],
-    ['mvmt lease create ~/Downloads/report.pdf --label "Report"', 'create a 24h lease for one file'],
-    ['mvmt lease create ~/Documents/Shared --label "Writable folder" --mode write', 'create a writable lease'],
-    ['mvmt lease create ~/DropBox --label "Sarah uploads" --mode upload', 'create an upload-only folder lease'],
-    ['mvmt lease create ~/DropBox --label "Sarah exchange" --mode two-way', 'create a browse + upload folder lease'],
-    ['mvmt lease create ~/Photos --label "Family photos" --expires never', 'lease until revoked'],
+    ['mvmt lease create ~/Documents/Taxes ~/Receipts --label "Sarah - tax docs"', 'create a 24h shared link for multiple paths'],
+    ['mvmt lease create ~/Downloads/report.pdf --label "Report"', 'create a 24h shared link for one file'],
+    ['mvmt lease create ~/Documents/Shared --label "Writable folder" --mode write', 'create a writable shared link'],
+    ['mvmt lease create ~/DropBox --label "Sarah uploads" --mode upload', 'create an upload-only folder link'],
+    ['mvmt lease create ~/DropBox --label "Sarah exchange" --mode two-way', 'create a browse + upload folder link'],
+    ['mvmt lease create ~/Photos --label "Family photos" --expires never', 'share until revoked'],
   ]))
   .action(async (paths: string[], options: { config?: string; label?: string; mode?: string; upload?: boolean; expires?: string; ttl?: string; json?: boolean }, command: Command) => {
     await createFolderLease(paths, withInheritedConfig(options, command));
@@ -221,7 +221,7 @@ leaseCommand
 leaseCommand
   .command('add-path <id> <paths...>')
   .alias('add-paths')
-  .description('Add paths to an existing read lease')
+  .description('Add files/folders to an existing read link')
   .option('-c, --config <path>', 'Config file path')
   .option('--json', 'Output as JSON')
   .addHelpText('after', examples([
@@ -235,7 +235,7 @@ leaseCommand
   .command('revoke <id>')
   .alias('remove')
   .alias('rm')
-  .description('Revoke a lease')
+  .description('Revoke a shared link')
   .option('-c, --config <path>', 'Config file path')
   .action(async (id: string, options: { config?: string }, command: Command) => {
     await revokeFolderLease(id, withInheritedConfig(options, command));
@@ -243,7 +243,7 @@ leaseCommand
 
 const usersCommand = program
   .command('users')
-  .description('Manage privileged dashboard users')
+  .description('Manage dashboard users')
   .option('--json', 'Output as JSON')
   .action(async (options: { json?: boolean }) => {
     await listPrivilegedUsersCommand(options);
@@ -251,7 +251,7 @@ const usersCommand = program
 
 usersCommand
   .command('list')
-  .description('List privileged dashboard users')
+  .description('List dashboard users')
   .option('--json', 'Output as JSON')
   .action(async (options: { json?: boolean }) => {
     await listPrivilegedUsersCommand(options);
@@ -259,7 +259,7 @@ usersCommand
 
 usersCommand
   .command('add <username>')
-  .description('Create a privileged dashboard user')
+  .description('Create a dashboard user')
   .option('--password <password>', 'Password for non-interactive setup')
   .option('--admin', 'Grant admin (can manage sources from dashboard)')
   .option('--json', 'Output as JSON')
@@ -311,7 +311,7 @@ usersCommand
 
 usersCommand
   .command('grant <username>')
-  .description('Grant admin to an existing dashboard user')
+  .description('Allow a dashboard user to manage local sources')
   .option('--json', 'Output as JSON')
   .action(async (username: string | undefined, _options: { json?: boolean }, command: Command) => {
     await setPrivilegedUserAdminCommand(username, true, {
@@ -321,7 +321,7 @@ usersCommand
 
 usersCommand
   .command('revoke <username>')
-  .description('Revoke admin from a dashboard user (keeps the account)')
+  .description('Remove local source management from a dashboard user')
   .option('--json', 'Output as JSON')
   .action(async (username: string | undefined, _options: { json?: boolean }, command: Command) => {
     await setPrivilegedUserAdminCommand(username, false, {
@@ -331,7 +331,7 @@ usersCommand
 
 const configCommand = program
   .command('config')
-  .description('Show the saved mvmt config')
+  .description('Show saved mvmt config (advanced)')
   .option('-c, --config <path>', 'Config file path')
   .action(async (options: { config?: string }) => {
     await showConfig(options);
@@ -347,7 +347,7 @@ configCommand
 
 const tokenCommand = program
   .command('token')
-  .description('Manage scoped API tokens')
+  .description('Manage scoped MCP/API tokens (advanced)')
   .option('-c, --config <path>', 'Config file path')
   .option('--json', 'Output as JSON')
   .action(async (options: { config?: string; json?: boolean }) => {
@@ -356,7 +356,7 @@ const tokenCommand = program
 
 tokenCommand
   .command('list')
-  .description('List scoped API tokens')
+  .description('List scoped MCP/API tokens')
   .option('-c, --config <path>', 'Config file path')
   .option('--json', 'Output as JSON')
   .action(async (options: { config?: string; json?: boolean }, command: Command) => {
@@ -365,7 +365,7 @@ tokenCommand
 
 tokenCommand
   .command('show')
-  .description('List scoped API tokens')
+  .description('List scoped MCP/API tokens')
   .option('-c, --config <path>', 'Config file path')
   .option('--json', 'Output as JSON')
   .action(async (options: { config?: string; json?: boolean }, command: Command) => {
@@ -375,7 +375,7 @@ tokenCommand
 tokenCommand
   .command('add [id]')
   .alias('create')
-  .description('Create a scoped API token and print it once')
+  .description('Create a scoped MCP/API token and print it once')
   .option('-c, --config <path>', 'Config file path')
   .option('--name <text>', 'Display name')
   .option('--description <text>', 'Optional description')
@@ -396,7 +396,7 @@ tokenCommand
 
 tokenCommand
   .command('edit [id]')
-  .description('Edit a scoped API token')
+  .description('Edit a scoped MCP/API token')
   .option('-c, --config <path>', 'Config file path')
   .option('--name <text>', 'Display name')
   .option('--description <text>', 'Optional description')
@@ -413,7 +413,7 @@ tokenCommand
 
 tokenCommand
   .command('rotate [id]')
-  .description('Rotate a scoped API token and print the replacement once')
+  .description('Rotate a scoped MCP/API token and print the replacement once')
   .option('-c, --config <path>', 'Config file path')
   .option('--expires <duration>', 'Replacement lifetime, such as 30m, 7d, 30d, or never')
   .option('--ttl <duration>', 'Alias for --expires')
@@ -424,7 +424,7 @@ tokenCommand
 
 tokenCommand
   .command('remove [id]')
-  .description('Remove a scoped API token')
+  .description('Remove a scoped MCP/API token')
   .option('-c, --config <path>', 'Config file path')
   .option('-y, --yes', 'Remove without prompting for confirmation')
   .action(async (id: string | undefined, options: { config?: string; yes?: boolean }, command: Command) => {
@@ -454,7 +454,7 @@ tokenCommand
 
 const apiTokensCommand = program
   .command('tokens')
-  .description('Manage scoped API tokens')
+  .description('Manage scoped MCP/API tokens (advanced)')
   .option('-c, --config <path>', 'Config file path')
   .option('--json', 'Output as JSON')
   .action(async (options: { config?: string; json?: boolean }) => {
@@ -463,7 +463,7 @@ const apiTokensCommand = program
 
 apiTokensCommand
   .command('list')
-  .description('List scoped API tokens')
+  .description('List scoped MCP/API tokens')
   .option('-c, --config <path>', 'Config file path')
   .option('--json', 'Output as JSON')
   .action(async (options: { config?: string; json?: boolean }, command: Command) => {
@@ -473,7 +473,7 @@ apiTokensCommand
 apiTokensCommand
   .command('add [id]')
   .alias('create')
-  .description('Create a scoped API token and print it once')
+  .description('Create a scoped MCP/API token and print it once')
   .option('-c, --config <path>', 'Config file path')
   .option('--name <text>', 'Display name')
   .option('--description <text>', 'Optional description')
@@ -494,7 +494,7 @@ apiTokensCommand
 
 apiTokensCommand
   .command('edit [id]')
-  .description('Edit a scoped API token')
+  .description('Edit a scoped MCP/API token')
   .option('-c, --config <path>', 'Config file path')
   .option('--name <text>', 'Display name')
   .option('--description <text>', 'Optional description')
@@ -511,7 +511,7 @@ apiTokensCommand
 
 apiTokensCommand
   .command('rotate [id]')
-  .description('Rotate a scoped API token and print the replacement once')
+  .description('Rotate a scoped MCP/API token and print the replacement once')
   .option('-c, --config <path>', 'Config file path')
   .option('--expires <duration>', 'Replacement lifetime, such as 30m, 7d, 30d, or never')
   .option('--ttl <duration>', 'Alias for --expires')
@@ -522,7 +522,7 @@ apiTokensCommand
 
 apiTokensCommand
   .command('remove [id]')
-  .description('Remove a scoped API token')
+  .description('Remove a scoped MCP/API token')
   .option('-c, --config <path>', 'Config file path')
   .option('-y, --yes', 'Remove without prompting for confirmation')
   .action(async (id: string | undefined, options: { config?: string; yes?: boolean }, command: Command) => {
@@ -531,7 +531,7 @@ apiTokensCommand
 
 const tunnelCommand = program
   .command('tunnel')
-  .description('Show tunnel status or manage the active tunnel')
+  .description('Manage public access for dashboard and shared links')
   .option('-c, --config <path>', 'Config file path')
   .action(async (options: { config?: string }) => {
     await showTunnel(options);

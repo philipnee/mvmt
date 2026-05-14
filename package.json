@@ -1,7 +1,7 @@
 {
   "name": "mvmt",
   "version": "0.1.1",
-  "description": "Mount selected local folders and serve them over MCP",
+  "description": "Share local files and folders through dashboard links, leases, and MCP",
   "license": "MIT",
   "type": "module",
   "main": "./dist/src/index.js",
