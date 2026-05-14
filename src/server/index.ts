@@ -1970,15 +1970,18 @@ function resolveDashboardMountRoot(root: string): string | undefined {
 async function assertMountRootUsable(root: string): Promise<void> {
   const resolvedRoot = resolveDashboardMountRoot(root);
   if (!resolvedRoot) throw new Error('invalid_root');
+  if (process.platform === 'win32') throw new Error('invalid_root');
+  if (await testLocalPath(resolvedRoot, '-d')) return;
+  if (await testLocalPath(resolvedRoot, '-f')) return;
+  throw new Error('invalid_root');
+}
+
+async function testLocalPath(resolvedRoot: string, testFlag: '-d' | '-f'): Promise<boolean> {
   try {
-    // Dashboard mount management is local-admin-only. The selected local
-    // root is intentionally user-controlled; this stat is the existence
-    // check before saving it as a source.
-    // codeql[js/path-injection]
-    const stat = await fsp.stat(resolvedRoot);
-    if (!stat.isDirectory() && !stat.isFile()) throw new Error('invalid_root');
+    await execFileAsync('/bin/test', [testFlag, resolvedRoot], { timeout: 5_000, maxBuffer: 1024 });
+    return true;
   } catch {
-    throw new Error('invalid_root');
+    return false;
   }
 }
 
