@@ -55,6 +55,7 @@ import {
   recordLeaseUse,
   revokeLease,
   rotateLeaseToken,
+  setLeasePublished,
   validateLeaseToken,
 } from '../lease/store.js';
 import { findLeaseSecret, leaseSecretsPathForLeaseStore, removeLeaseSecret, saveLeaseSecret } from '../lease/secrets.js';
@@ -973,6 +974,9 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
         resources,
         expiresAt: ttl.expiresAt,
         permissions: [...permissions],
+        // Creating a share link in the dashboard is the explicit publish
+        // gesture — the lease is meant to be reachable over the relay.
+        published: true,
       });
       saveLeaseSecret(leaseSecretsPath, created.record.id, created.token);
       const url = leasePublicUrl(userFacingBaseUrlFor(req), created.record.id, created.token);
@@ -995,6 +999,38 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     removeLeaseSecret(leaseSecretsPath, id);
     logHttpRequest(requestLog, req, 200, 'dashboard.leases', `revoked ${id}`);
     res.json({ ok: true });
+  });
+
+  // Toggles the exposure boundary for a lease. Unpublishing removes the
+  // relay door without revoking the lease — local apps can still reach
+  // it over 127.0.0.1. Distinct from revoke, which kills the lease.
+  app.post('/dashboard/api/leases/:id/publish', dashboardOriginMiddleware, dashboardAuthMiddleware, (req, res) => {
+    const id = firstStringQuery(req.params.id);
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const published = body.published === true;
+    if (!id) {
+      res.status(400).json({ error: 'id_required' });
+      return;
+    }
+    const lease = findLease(leaseStorePath, id);
+    if (!lease) {
+      logHttpRequest(requestLog, req, 404, 'dashboard.leases', 'unknown_lease');
+      res.status(404).json({ error: 'lease_not_found' });
+      return;
+    }
+    if (lease.revokedAt) {
+      logHttpRequest(requestLog, req, 410, 'dashboard.leases', 'revoked_lease');
+      res.status(410).json({ error: 'lease_revoked' });
+      return;
+    }
+    const updated = setLeasePublished(leaseStorePath, id, published);
+    if (!updated) {
+      logHttpRequest(requestLog, req, 404, 'dashboard.leases', 'unknown_lease');
+      res.status(404).json({ error: 'lease_not_found' });
+      return;
+    }
+    logHttpRequest(requestLog, req, 200, 'dashboard.leases', `${published ? 'published' : 'unpublished'} ${id}`);
+    res.json({ lease: updated });
   });
 
   // Rotates a lease's token, invalidating any previously-issued URL. Used
@@ -3102,6 +3138,14 @@ table.t{border-collapse:collapse;width:100%}
     statusBadge.textContent = s.label;
     statusBadge.title = lease.expiresAt ? formatDate(lease.expiresAt) : '';
     statusCell.append(statusBadge);
+    if (lease.published === false) {
+      var localBadge = document.createElement('span');
+      localBadge.className = 'badge';
+      localBadge.textContent = 'Local only';
+      localBadge.title = 'Capability-only: reachable by local apps, not over the relay';
+      localBadge.style.marginLeft = '.35rem';
+      statusCell.append(localBadge);
+    }
 
     var usedCell = document.createElement('td');
     usedCell.setAttribute('data-label', 'Last used');
@@ -3138,6 +3182,28 @@ table.t{border-collapse:collapse;width:100%}
         });
       })(lease.id, lease.url || null);
       actions.append(copyBtn);
+
+      var publishBtn = document.createElement('button');
+      publishBtn.className = 'btn btn-sm';
+      publishBtn.type = 'button';
+      var isPublished = lease.published !== false;
+      publishBtn.textContent = isPublished ? 'Unpublish' : 'Publish';
+      publishBtn.title = isPublished
+        ? 'Remove the relay door; local apps keep access'
+        : 'Give this lease a relay door so it works over the public URL';
+      (function (id, publish) {
+        publishBtn.addEventListener('click', async function () {
+          try {
+            await api('/dashboard/api/leases/' + encodeURIComponent(id) + '/publish', {
+              method: 'POST',
+              body: JSON.stringify({ published: publish }),
+            });
+            await loadLeases();
+            toast(publish ? 'Lease published.' : 'Lease unpublished — local apps keep access.', 'success');
+          } catch (err) { showError(err); }
+        });
+      })(lease.id, !isPublished);
+      actions.append(publishBtn);
 
       var revoke = document.createElement('button');
       revoke.className = 'btn btn-danger btn-sm btn-icon';

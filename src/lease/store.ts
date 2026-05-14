@@ -54,7 +54,18 @@ export function defaultLeasesPath(tokenPath: string | undefined = TOKEN_PATH): s
 
 export function createLease(
   storePath: string,
-  input: { label: string; path?: string; resources?: LeaseResource[]; expiresAt?: string; permissions?: LeasePermission[] },
+  input: {
+    label: string;
+    path?: string;
+    resources?: LeaseResource[];
+    expiresAt?: string;
+    permissions?: LeasePermission[];
+    // Exposure boundary. Omit to leave the lease grandfathered as
+    // published; pass false for a capability-only lease that only local
+    // apps can reach. Callers minting through a deliberate "share"
+    // gesture (e.g. the dashboard) should pass true.
+    published?: boolean;
+  },
 ): CreatedLease {
   const store = readLeaseStore(storePath);
   const token = `mvmt_l_${crypto.randomBytes(32).toString('base64url')}`;
@@ -72,6 +83,7 @@ export function createLease(
     ...(input.expiresAt ? { expiresAt: input.expiresAt } : {}),
     downloadCount: 0,
     uploadCount: 0,
+    ...(input.published === undefined ? {} : { published: input.published }),
   };
   store.leases.push(record);
   writeLeaseStore(storePath, store);

@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 
 import { Command } from 'commander';
-import { addApiToken, editApiToken, listApiTokens, removeApiToken, rotateApiToken } from '../src/cli/api-tokens.js';
+import { addApiToken, editApiToken, listApiTokens, removeApiToken, rotateApiToken, setApiTokenPublished } from '../src/cli/api-tokens.js';
 import { withInheritedConfig } from '../src/cli/command-options.js';
 import { addConnector, listConnectors } from '../src/cli/connectors.js';
 import { runConfigSetup, showConfig } from '../src/cli/config.js';
 import { doctor } from '../src/cli/doctor.js';
 import { init } from '../src/cli/init.js';
-import { addPathsToLease, createFolderLease, listFolderLeases, revokeFolderLease } from '../src/cli/lease.js';
+import { addPathsToLease, createFolderLease, listFolderLeases, revokeFolderLease, setFolderLeasePublished } from '../src/cli/lease.js';
 import { reindex } from '../src/cli/reindex.js';
 import { addMount, editMount, listMounts, removeMount } from '../src/cli/mounts.js';
 import { start } from '../src/cli/start.js';
@@ -241,6 +241,22 @@ leaseCommand
     await revokeFolderLease(id, withInheritedConfig(options, command));
   });
 
+leaseCommand
+  .command('publish <id>')
+  .description('Give a shared link a relay door so it works over the public URL')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (id: string, options: { config?: string }, command: Command) => {
+    await setFolderLeasePublished(id, true, withInheritedConfig(options, command));
+  });
+
+leaseCommand
+  .command('unpublish <id>')
+  .description('Close the relay door for a shared link; local apps keep access')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (id: string, options: { config?: string }, command: Command) => {
+    await setFolderLeasePublished(id, false, withInheritedConfig(options, command));
+  });
+
 const usersCommand = program
   .command('users')
   .description('Manage dashboard users')
@@ -429,6 +445,22 @@ tokenCommand
   .option('-y, --yes', 'Remove without prompting for confirmation')
   .action(async (id: string | undefined, options: { config?: string; yes?: boolean }, command: Command) => {
     await removeApiToken(id, withInheritedConfig(options, command));
+  });
+
+tokenCommand
+  .command('publish [id]')
+  .description('Give a scoped MCP/API token a relay door so remote agents can use it')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (id: string | undefined, options: { config?: string }, command: Command) => {
+    await setApiTokenPublished(id, true, withInheritedConfig(options, command));
+  });
+
+tokenCommand
+  .command('unpublish [id]')
+  .description('Close the relay door for a token; local apps keep access')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (id: string | undefined, options: { config?: string }, command: Command) => {
+    await setApiTokenPublished(id, false, withInheritedConfig(options, command));
   });
 
 tokenCommand

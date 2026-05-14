@@ -203,6 +203,37 @@ export async function removeApiToken(id: string | undefined, options: RemoveApiT
   }
 }
 
+export async function setApiTokenPublished(
+  id: string | undefined,
+  published: boolean,
+  options: ApiTokensCommandOptions = {},
+): Promise<void> {
+  try {
+    const configPath = resolveApiTokensConfigPath(options.config);
+    const config = loadConfig(configPath);
+    const tokenId = id ?? await promptForApiTokenId(
+      config,
+      published ? 'Publish which API token?' : 'Unpublish which API token?',
+    );
+
+    const result = await withConfigLock(configPath, async () => {
+      const latest = loadConfig(configPath);
+      const update = setApiTokenPublishedInConfig(latest, tokenId, published);
+      await saveConfig(configPath, update.config);
+      return update;
+    });
+    recordTokenLifecycle(configPath, 'token.edit', result.config, result.client);
+    if (published) {
+      console.log(chalk.green(`Token '${tokenId}' published — it now has a relay door.`));
+    } else {
+      console.log(chalk.green(`Token '${tokenId}' unpublished — local apps keep access, the relay door is closed.`));
+    }
+    console.log(chalk.dim('Running mvmt processes load API-token changes on the next auth request.'));
+  } catch (err) {
+    printApiTokenCommandError(err);
+  }
+}
+
 export async function rotateApiToken(id: string | undefined, options: RotateApiTokenOptions = {}): Promise<void> {
   try {
     const configPath = resolveApiTokensConfigPath(options.config);

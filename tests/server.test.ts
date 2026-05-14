@@ -1168,6 +1168,90 @@ describe('dashboard access', () => {
     }
   });
 
+  // Creating a share link in the dashboard is the explicit publish
+  // gesture, so the lease is minted published. The publish endpoint then
+  // toggles the relay door without revoking the lease.
+  it('mints dashboard leases published and toggles the relay door via the publish endpoint', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-publish-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const leaseStorePath = path.join(tmp, '.leases.json');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    const root = path.join(tmp, 'read');
+    fs.mkdirSync(root, { recursive: true });
+    fs.writeFileSync(path.join(root, 'note.txt'), 'hello');
+    createPrivilegedUser(usersPath, { username: 'admin', password: 'correct horse battery staple' });
+    const config = parseConfig({
+      version: 1,
+      mounts: [{ name: 'read', type: 'local_folder', path: '/read', root }],
+    });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: config.mounts,
+      leaseStorePath,
+      privilegedUsersPath: usersPath,
+    });
+    try {
+      const cookie = await loginDashboard(server.port, 'admin', 'correct horse battery staple');
+      const create = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: '/read/note.txt', label: 'Note', mode: 'read', expires: '1h' }),
+      });
+      expect(create.status).toBe(201);
+      const createBody = await create.json() as { lease: { id: string; url: string; published?: boolean } };
+      // Dashboard-minted leases are explicitly published.
+      expect(createBody.lease.published).toBe(true);
+      expect(listLeases(leaseStorePath)[0]!.published).toBe(true);
+
+      const leaseId = createBody.lease.id;
+      const token = new URL(createBody.lease.url).searchParams.get('token');
+      const relayHeaders = { 'X-MVMT-Transport': 'relay' };
+
+      // Published: a relay-forwarded request works.
+      const beforeUnpublish = await fetch(
+        `http://127.0.0.1:${server.port}/lease/${leaseId}/files?token=${token}`,
+        { headers: relayHeaders },
+      );
+      expect(beforeUnpublish.status).toBe(200);
+
+      const unpublish = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases/${leaseId}/publish`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ published: false }),
+      });
+      expect(unpublish.status).toBe(200);
+      expect((await unpublish.json() as { lease: { published: boolean } }).lease.published).toBe(false);
+
+      // Capability-only now: relay is rejected, localhost still works.
+      const afterUnpublishRelay = await fetch(
+        `http://127.0.0.1:${server.port}/lease/${leaseId}/files?token=${token}`,
+        { headers: relayHeaders },
+      );
+      expect(afterUnpublishRelay.status).toBe(403);
+      const afterUnpublishLocal = await fetch(
+        `http://127.0.0.1:${server.port}/lease/${leaseId}/files?token=${token}`,
+      );
+      expect(afterUnpublishLocal.status).toBe(200);
+
+      // Re-publish restores the relay door.
+      const republish = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases/${leaseId}/publish`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ published: true }),
+      });
+      expect(republish.status).toBe(200);
+      const afterRepublish = await fetch(
+        `http://127.0.0.1:${server.port}/lease/${leaseId}/files?token=${token}`,
+        { headers: relayHeaders },
+      );
+      expect(afterRepublish.status).toBe(200);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   // The relay routes /t/{slug}/** to the agent. If we built share URLs
   // from baseUrlFor(req) we'd drop the workspace prefix and the public
   // link would 404 on the relay's catch-all error page. Make sure both
@@ -1527,6 +1611,8 @@ describe('dashboard access', () => {
       expect(html).toContain('Rename source');
       expect(html).toContain('Replace link');
       expect(html).toContain('You can copy this link again from the dashboard');
+      expect(html).toContain("'/dashboard/api/leases/' + encodeURIComponent(id) + '/publish'");
+      expect(html).toContain("publishBtn.textContent = isPublished ? 'Unpublish' : 'Publish'");
       expect(html).not.toContain('id="add-mount-settings"');
       expect(html).not.toContain('id="mounts-wrap"');
       expect(html).not.toContain('...(opts.headers || {})');
