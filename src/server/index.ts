@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from 'crypto';
+import { execFile } from 'node:child_process';
 import { createReadStream, createWriteStream } from 'fs';
 import fsp from 'fs/promises';
 import { Server as HttpServer } from 'node:http';
 import path from 'path';
 import { Transform } from 'stream';
 import { pipeline } from 'stream/promises';
+import { promisify } from 'node:util';
 import express, { Request, Response } from 'express';
 import type { AccessToken } from './oauth.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -30,6 +32,7 @@ import { rateLimit } from './rate-limit.js';
 import { ClientConfig, LocalFolderMountConfig } from '../config/schema.js';
 import { readConfig, saveConfig, withConfigLock } from '../config/loader.js';
 import { addMountToConfig, editMountInConfig, MountInput, removeMountFromConfig } from '../cli/mounts.js';
+import { resolveSetupPath } from '../connectors/setup-paths.js';
 import { listDashboardFiles, normalizeDashboardPath, resolveDashboardFileTarget } from '../dashboard/files.js';
 import {
   defaultPrivilegedUsersPath,
@@ -55,6 +58,7 @@ import {
   rotateLeaseToken,
   validateLeaseToken,
 } from '../lease/store.js';
+import { findLeaseSecret, leaseSecretsPathForLeaseStore, removeLeaseSecret, saveLeaseSecret } from '../lease/secrets.js';
 import {
   attachClientIdentity,
   ClientIdentity,
@@ -78,6 +82,7 @@ const DEFAULT_MAX_LEASE_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024;
 const DEFAULT_DASHBOARD_LEASE_TTL = '24h';
 const DASHBOARD_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const DASHBOARD_SESSION_COOKIE = 'mvmt_dashboard';
+const execFileAsync = promisify(execFile);
 
 type McpSession = {
   transport: StreamableHTTPServerTransport;
@@ -126,7 +131,9 @@ export interface HttpServerOptions {
   clients?: readonly ClientConfig[] | (() => readonly ClientConfig[] | undefined);
   leaseMounts?: readonly LocalFolderMountConfig[] | (() => readonly LocalFolderMountConfig[] | undefined);
   leaseStorePath?: string;
+  leaseSecretsPath?: string;
   privilegedUsersPath?: string;
+  localPathPicker?: (kind: 'file' | 'folder') => Promise<string | undefined>;
   // Path to the on-disk config file. When set, the dashboard can persist
   // mount changes (add/edit/remove) through this file using the same
   // helpers and lock that the CLI uses. When undefined, dashboard mount
@@ -222,7 +229,12 @@ export async function startStdioServer(router: ToolRouter): Promise<{ close(): P
 export async function startHttpServer(router: ToolRouter, options: HttpServerOptions): Promise<StartedHttpServer> {
   const { port } = options;
   const tokenPath = options.tokenPath;
-  const requestLog = options.requestLog;
+  const dashboardLogs: HttpRequestLogEntry[] = [];
+  const requestLog = (entry: HttpRequestLogEntry) => {
+    dashboardLogs.push(entry);
+    if (dashboardLogs.length > 100) dashboardLogs.shift();
+    options.requestLog?.(entry);
+  };
   const resolvePublicBaseUrl = options.resolvePublicBaseUrl;
   // Proxied/tunneled deployments should set resolvePublicBaseUrl so OAuth
   // resource audience checks do not depend on the request Host header.
@@ -248,6 +260,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   ensureSigningKey(signingKeyPath);
   const clientsPath = defaultClientsPath(tokenPath ?? TOKEN_PATH);
   const refreshTokensPath = defaultRefreshTokensPath(tokenPath ?? TOKEN_PATH);
+  const leaseSecretsPath = options.leaseSecretsPath ?? leaseSecretsPathForLeaseStore(leaseStorePath);
   const oauth = new OAuthStore({
     signingKey: () => readSigningKey(signingKeyPath) ?? ensureSigningKey(signingKeyPath),
     clientsPath,
@@ -731,6 +744,15 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     next();
   };
 
+  const dashboardLocalMiddleware: express.RequestHandler = (req, res, next) => {
+    if (!isLocalDashboardRequest(req)) {
+      logHttpRequest(requestLog, req, 403, 'dashboard.local', 'local_required');
+      res.status(403).json({ error: 'local_dashboard_required' });
+      return;
+    }
+    next();
+  };
+
   app.get('/dashboard', (req, res) => {
     if (req.originalUrl.includes('?')) {
       res.setHeader('Location', 'dashboard');
@@ -774,7 +796,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     dashboardSessions.set(session.id, session);
     res.setHeader('Set-Cookie', dashboardSessionCookie(session, req));
     logHttpRequest(requestLog, req, 200, 'dashboard.login', 'ok', user.username);
-    res.json({ user: { ...publicDashboardUser(user), admin: Boolean(user.admin) } });
+    res.json({ user: { ...publicDashboardUser(user), admin: Boolean(user.admin) }, localOwner: isLocalDashboardRequest(req) });
   });
 
   app.post('/dashboard/api/logout', dashboardOriginMiddleware, dashboardAuthMiddleware, (req, res) => {
@@ -785,23 +807,57 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     res.json({ ok: true });
   });
 
-  app.get('/dashboard/api/me', dashboardOriginMiddleware, dashboardAuthMiddleware, (_req, res) => {
+  app.get('/dashboard/api/me', dashboardOriginMiddleware, dashboardAuthMiddleware, (req, res) => {
     const session = res.locals.dashboardSession as DashboardSession;
-    res.json({ user: { username: session.username, admin: session.admin }, localOwner: false });
+    res.json({ user: { username: session.username, admin: session.admin }, localOwner: isLocalDashboardRequest(req) });
+  });
+
+  app.get('/dashboard/api/status', dashboardOriginMiddleware, dashboardAuthMiddleware, dashboardLocalMiddleware, (req, res) => {
+    const session = res.locals.dashboardSession as DashboardSession;
+    const configuredPublicBase = resolvePublicBaseUrl?.();
+    const publicDashboardUrl = configuredPublicBase ? `${configuredPublicBase.replace(/\/+$/, '')}/dashboard` : undefined;
+    let tunnel: { configured: boolean; provider?: string; publicUrl?: string; canReconfigure: boolean } = {
+      configured: Boolean(configuredPublicBase),
+      ...(publicDashboardUrl ? { publicUrl: publicDashboardUrl } : {}),
+      canReconfigure: Boolean(options.configPath) && session.admin && isLocalDashboardRequest(req),
+    };
+    if (options.configPath) {
+      try {
+        const config = readConfig(options.configPath);
+        tunnel = {
+          configured: config.server.access === 'tunnel' && Boolean(config.server.tunnel),
+          ...(config.server.tunnel?.provider ? { provider: config.server.tunnel.provider } : {}),
+          ...(publicDashboardUrl ? { publicUrl: publicDashboardUrl } : {}),
+          canReconfigure: Boolean(options.configPath) && session.admin && isLocalDashboardRequest(req),
+        };
+      } catch {
+        // Keep the runtime-only status if the config cannot be read.
+      }
+    }
+    logHttpRequest(requestLog, req, 200, 'dashboard.status');
+    res.json({
+      server: {
+        localUrl: `http://127.0.0.1:${port}/dashboard`,
+        publicUrl: publicDashboardUrl,
+      },
+      tunnel,
+      logs: dashboardLogs.slice(-50),
+    });
   });
 
   app.get('/dashboard/api/mounts', dashboardOriginMiddleware, dashboardAuthMiddleware, (req, res) => {
     const session = res.locals.dashboardSession as DashboardSession;
+    const canManage = Boolean(options.configPath) && session.admin && isLocalDashboardRequest(req);
     const mounts = resolveLeaseMounts(options.leaseMounts);
     logHttpRequest(requestLog, req, 200, 'dashboard.mounts');
     res.json({
-      canManage: Boolean(options.configPath) && session.admin,
+      canManage,
       mounts: mounts.map((mount) => ({
         name: mount.name,
         path: mount.path,
         // Local filesystem paths are admin-only info; non-admins see the
         // virtual path and base permission, not the on-disk root.
-        ...(session.admin ? { root: mount.root } : {}),
+        ...(canManage ? { root: mount.root } : {}),
         description: mount.description,
         writeAccess: Boolean(mount.writeAccess),
         enabled: mount.enabled !== false,
@@ -809,10 +865,37 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     });
   });
 
+  app.post('/dashboard/api/local-path-picker', dashboardOriginMiddleware, dashboardAuthMiddleware, dashboardLocalMiddleware, dashboardAdminMiddleware, async (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const kind = body.kind === 'file' || body.kind === 'folder' ? body.kind : undefined;
+    if (!kind) {
+      res.status(400).json({ error: 'invalid_picker_kind' });
+      return;
+    }
+    const picker = options.localPathPicker ?? pickLocalPathWithFinder;
+    try {
+      const picked = await picker(kind);
+      if (!picked) {
+        res.json({ cancelled: true });
+        return;
+      }
+      res.json({ path: picked });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'picker_unavailable';
+      logHttpRequest(requestLog, req, 400, 'dashboard.path_picker', detail);
+      res.status(400).json({ error: 'picker_unavailable', detail });
+    }
+  });
+
   app.get('/dashboard/api/files', dashboardOriginMiddleware, dashboardAuthMiddleware, async (req, res) => {
     const requestPath = firstStringQuery(req.query.path) ?? '/';
     try {
-      const listing = await listDashboardFiles(resolveLeaseMounts(options.leaseMounts), requestPath);
+      const session = res.locals.dashboardSession as DashboardSession;
+      const mounts = resolveLeaseMounts(options.leaseMounts);
+      let listing = await listDashboardFiles(mounts, requestPath);
+      if (normalizeDashboardPath(requestPath) === '/' && session.admin && isLocalDashboardRequest(req)) {
+        listing = withUnavailableRootMounts(listing, mounts);
+      }
       logHttpRequest(requestLog, req, 200, 'dashboard.files', listing.path);
       res.json(listing);
     } catch (err) {
@@ -822,9 +905,18 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     }
   });
 
+  const dashboardLeasePayload = (req: Request, lease: LeaseRecord): LeaseRecord & { url?: string } => {
+    const secret = findLeaseSecret(leaseSecretsPath, lease.id);
+    const canRecoverUrl = secret && !leaseUnavailableReason(lease) && validateLeaseToken(lease, secret.token);
+    return {
+      ...lease,
+      ...(canRecoverUrl ? { url: leasePublicUrl(userFacingBaseUrlFor(req), lease.id, secret.token) } : {}),
+    };
+  };
+
   app.get('/dashboard/api/leases', dashboardOriginMiddleware, dashboardAuthMiddleware, (req, res) => {
     logHttpRequest(requestLog, req, 200, 'dashboard.leases');
-    res.json({ leases: listLeases(leaseStorePath) });
+    res.json({ leases: listLeases(leaseStorePath).map((lease) => dashboardLeasePayload(req, lease)) });
   });
 
   app.post('/dashboard/api/leases', dashboardOriginMiddleware, dashboardAuthMiddleware, async (req, res) => {
@@ -869,6 +961,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
         expiresAt: ttl.expiresAt,
         permissions: [...permissions],
       });
+      saveLeaseSecret(leaseSecretsPath, created.record.id, created.token);
       const url = leasePublicUrl(userFacingBaseUrlFor(req), created.record.id, created.token);
       logHttpRequest(requestLog, req, 201, 'dashboard.leases', `created ${created.record.id}`);
       res.status(201).json({ lease: { ...created.record, url } });
@@ -886,13 +979,14 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       res.status(404).json({ error: 'lease_not_found' });
       return;
     }
+    removeLeaseSecret(leaseSecretsPath, id);
     logHttpRequest(requestLog, req, 200, 'dashboard.leases', `revoked ${id}`);
     res.json({ ok: true });
   });
 
   // Rotates a lease's token, invalidating any previously-issued URL. Used
-  // by the dashboard when an admin needs a shareable URL for a lease whose
-  // original token is no longer in browser localStorage.
+  // by the dashboard when an admin explicitly wants to replace a link whose
+  // original token is not recoverable from the local lease-secret store.
   app.post('/dashboard/api/leases/:id/rotate', dashboardOriginMiddleware, dashboardAuthMiddleware, (req, res) => {
     const id = typeof req.params.id === 'string' ? req.params.id : '';
     if (!id) {
@@ -916,6 +1010,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       res.status(404).json({ error: 'lease_not_found' });
       return;
     }
+    saveLeaseSecret(leaseSecretsPath, rotated.record.id, rotated.token);
     const url = leasePublicUrl(userFacingBaseUrlFor(req), rotated.record.id, rotated.token);
     logHttpRequest(requestLog, req, 200, 'dashboard.leases', `rotated ${id}`);
     res.json({ lease: { ...rotated.record, url } });
@@ -934,7 +1029,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     return options.configPath;
   };
 
-  app.post('/dashboard/api/mounts', dashboardOriginMiddleware, dashboardAuthMiddleware, dashboardAdminMiddleware, async (req, res) => {
+  app.post('/dashboard/api/mounts', dashboardOriginMiddleware, dashboardAuthMiddleware, dashboardLocalMiddleware, dashboardAdminMiddleware, async (req, res) => {
     const configPath = requireConfigPath(req, res);
     if (!configPath) return;
     const body = (req.body ?? {}) as Record<string, unknown>;
@@ -943,6 +1038,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
         const current = readConfig(configPath);
         const mountInput = mountInputFromBody(body, current.mounts);
         if (typeof mountInput === 'string') throw new Error(mountInput);
+        await assertMountRootUsable(mountInput.root);
         const next = addMountToConfig(current, mountInput);
         await saveConfig(configPath, next);
         return next.mounts.find((mount) => mount.name === mountInput.name);
@@ -959,7 +1055,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     }
   });
 
-  app.patch('/dashboard/api/mounts/:name', dashboardOriginMiddleware, dashboardAuthMiddleware, dashboardAdminMiddleware, async (req, res) => {
+  app.patch('/dashboard/api/mounts/:name', dashboardOriginMiddleware, dashboardAuthMiddleware, dashboardLocalMiddleware, dashboardAdminMiddleware, async (req, res) => {
     const configPath = requireConfigPath(req, res);
     if (!configPath) return;
     const name = typeof req.params.name === 'string' ? req.params.name : '';
@@ -977,6 +1073,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     try {
       const saved = await withConfigLock(configPath, async () => {
         const current = readConfig(configPath);
+        if (patch.root) await assertMountRootUsable(patch.root);
         const next = editMountInConfig(current, name, patch);
         await saveConfig(configPath, next);
         return next.mounts.find((mount) => mount.name === name);
@@ -986,11 +1083,12 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     } catch (err) {
       const detail = err instanceof Error ? err.message : 'mount_failed';
       logHttpRequest(requestLog, req, 400, 'dashboard.mounts', detail);
-      res.status(400).json({ error: 'mount_failed', detail });
+      const knownValidation = new Set(['invalid_root', 'invalid_path']);
+      res.status(400).json({ error: knownValidation.has(detail) ? detail : 'mount_failed', detail });
     }
   });
 
-  app.delete('/dashboard/api/mounts/:name', dashboardOriginMiddleware, dashboardAuthMiddleware, dashboardAdminMiddleware, async (req, res) => {
+  app.delete('/dashboard/api/mounts/:name', dashboardOriginMiddleware, dashboardAuthMiddleware, dashboardLocalMiddleware, dashboardAdminMiddleware, async (req, res) => {
     const configPath = requireConfigPath(req, res);
     if (!configPath) return;
     const name = typeof req.params.name === 'string' ? req.params.name : '';
@@ -1447,6 +1545,18 @@ function remoteAddressFor(req: Request): string | undefined {
   return raw.startsWith('::ffff:') ? raw.slice(7) : raw;
 }
 
+function isLocalDashboardRequest(req: Request): boolean {
+  if (firstHeaderValue(req.headers['x-mvmt-transport'])?.toLowerCase() === 'relay') return false;
+  const hostHeader = firstHeaderValue(req.headers.host);
+  if (!hostHeader) return false;
+  const bracketEnd = hostHeader.indexOf(']');
+  const host = hostHeader.startsWith('[') && bracketEnd > 0
+    ? hostHeader.slice(1, bracketEnd)
+    : hostHeader.split(':')[0];
+  const normalized = host.toLowerCase();
+  return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1';
+}
+
 function getSessionId(req: Request): string | undefined {
   const header = req.headers['mcp-session-id'];
   return Array.isArray(header) ? header[0] : header;
@@ -1778,6 +1888,29 @@ function dashboardLeasePaths(body: Record<string, unknown>): string[] {
   return typeof body.path === 'string' && body.path.trim().length > 0 ? [body.path] : [];
 }
 
+function withUnavailableRootMounts(
+  listing: Awaited<ReturnType<typeof listDashboardFiles>>,
+  mounts: readonly LocalFolderMountConfig[],
+): Awaited<ReturnType<typeof listDashboardFiles>> {
+  const visible = new Set(listing.entries.map((entry) => entry.path));
+  const missing = mounts
+    .filter((mount) => mount.enabled !== false && !visible.has(mount.path))
+    .map((mount) => ({
+      name: mount.path.split('/').filter(Boolean).join('/') || mount.name,
+      path: mount.path,
+      type: 'directory' as const,
+      size: 0,
+      mtimeMs: 0,
+      writeAccess: Boolean(mount.writeAccess),
+      unavailable: true,
+    }));
+  if (missing.length === 0) return listing;
+  return {
+    ...listing,
+    entries: [...listing.entries, ...missing].sort((a, b) => a.name.localeCompare(b.name)),
+  };
+}
+
 function mountInputFromBody(
   body: Record<string, unknown>,
   existing: readonly { name: string }[],
@@ -1814,6 +1947,31 @@ function mountPatchFromBody(body: Record<string, unknown>): Partial<MountInput> 
   if (typeof body.description === 'string') patch.description = body.description;
   if (typeof body.guidance === 'string') patch.guidance = body.guidance;
   return patch;
+}
+
+async function assertMountRootUsable(root: string): Promise<void> {
+  try {
+    const stat = await fsp.stat(resolveSetupPath(root));
+    if (!stat.isDirectory() && !stat.isFile()) throw new Error('invalid_root');
+  } catch {
+    throw new Error('invalid_root');
+  }
+}
+
+async function pickLocalPathWithFinder(kind: 'file' | 'folder'): Promise<string | undefined> {
+  if (process.platform !== 'darwin') throw new Error('finder_unavailable');
+  const script = kind === 'file'
+    ? 'POSIX path of (choose file with prompt "Choose a file to add to mvmt")'
+    : 'POSIX path of (choose folder with prompt "Choose a folder to add to mvmt")';
+  try {
+    const { stdout } = await execFileAsync('osascript', ['-e', script], { timeout: 120_000, maxBuffer: 1024 * 1024 });
+    const picked = String(stdout).trim();
+    return picked || undefined;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes('User canceled') || message.includes('-128')) return undefined;
+    throw err;
+  }
 }
 
 // Use the basename only so an auto-generated mount name doesn't leak full
@@ -1929,7 +2087,7 @@ header.top{background:#fff;border-bottom:1px solid var(--border);padding:.85rem 
 .brand-sub{color:var(--text-2);font-weight:500;font-size:.85rem;margin-left:.35rem}
 .user-strip{display:flex;align-items:center;gap:.6rem}
 .user-strip .who{display:inline-flex;align-items:center;gap:.4rem;padding:.25rem .6rem;border-radius:999px;background:var(--hover);color:var(--text-2);font-size:.85rem}
-main{max-width:1180px;margin:0 auto;padding:1.5rem}
+main{max-width:1280px;margin:0 auto;padding:1.5rem}
 h1,h2,h3,h4{margin:0;font-weight:600;letter-spacing:-.01em;color:var(--text)}
 h2{font-size:1.05rem}
 h3{font-size:.95rem}
@@ -1961,6 +2119,48 @@ label{font-size:.82rem;color:var(--text-2);font-weight:500}
 .panel-head{display:flex;justify-content:space-between;align-items:center;gap:.75rem;margin-bottom:.85rem;flex-wrap:wrap}
 .panel-title{display:flex;align-items:baseline;gap:.5rem}
 .panel-title .count{color:var(--muted);font-size:.85rem;font-weight:500}
+/* Finder shell */
+.finder{display:grid;grid-template-columns:210px minmax(0,1fr);min-height:calc(100vh - 7rem);background:#fff;border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow);overflow:hidden}
+.finder-sidebar{background:#f8fafc;border-right:1px solid var(--border);padding:.85rem}
+.nav-btn{width:100%;display:flex;align-items:center;gap:.55rem;padding:.58rem .7rem;margin-bottom:.2rem;border:0;border-radius:8px;background:transparent;color:var(--text-2);font:inherit;font-weight:500;cursor:pointer;text-align:left}
+.nav-btn:hover{background:#eef2f7;color:var(--text)}
+.nav-btn.active{background:#e7f3f1;color:var(--accent)}
+.nav-btn .icon{width:1rem;height:1rem;flex:none}
+.nav-btn .nav-count{margin-left:auto;color:var(--muted);font-size:.78rem}
+.finder-main{min-width:0;display:flex;flex-direction:column;background:#fff}
+.finder-toolbar{display:flex;align-items:center;justify-content:space-between;gap:.75rem;padding:.7rem .85rem;border-bottom:1px solid var(--border);background:#fff;position:sticky;top:0;z-index:3}
+.toolbar-left{display:flex;align-items:center;gap:.55rem;min-width:0;flex:1}
+.toolbar-right{display:flex;align-items:center;gap:.35rem;flex:none}
+.view-panel{padding:1rem}
+.view-title{display:flex;align-items:baseline;gap:.45rem;margin-bottom:.8rem}
+.view-title h2{font-size:1.08rem}
+.view-title .count{color:var(--muted);font-size:.85rem}
+.view-toggle.active{background:var(--hover);border-color:var(--border-strong);color:var(--accent)}
+.file-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:.8rem}
+.file-card{border:1px solid transparent;border-radius:10px;padding:.75rem .55rem;text-align:center;cursor:default;background:#fff;min-height:112px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.45rem}
+.file-card:hover{background:var(--hover);border-color:var(--border)}
+.file-card.selected{background:#e7f3f1;border-color:var(--accent)}
+.file-card .icon{width:2.2rem;height:2.2rem;color:var(--muted)}
+.file-card .file-card-name{font-weight:500;font-size:.84rem;line-height:1.25;word-break:break-word;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.file-card .file-card-meta{font-size:.72rem;color:var(--muted)}
+.context-menu{position:fixed;z-index:80;min-width:180px;background:#fff;border:1px solid var(--border);border-radius:10px;box-shadow:var(--shadow-lg);padding:.25rem}
+.context-menu button{width:100%;display:flex;align-items:center;gap:.55rem;border:0;background:transparent;border-radius:7px;padding:.5rem .6rem;text-align:left;font:inherit;color:var(--text);cursor:pointer}
+.context-menu button:hover{background:#0a84ff;color:#fff}
+.context-menu button .icon{width:1rem;height:1rem;flex:none}
+.settings-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem}
+.settings-card{border:1px solid var(--border);border-radius:10px;padding:1rem;background:#fff}
+.settings-card h3{margin-bottom:.65rem}
+.kv{display:grid;grid-template-columns:7rem minmax(0,1fr);gap:.55rem;font-size:.86rem;margin:.45rem 0}
+.kv span:first-child{color:var(--text-2);font-weight:500}
+.kv code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;word-break:break-all}
+.properties-grid{display:grid;grid-template-columns:8rem minmax(0,1fr);gap:.6rem 1rem;font-size:.9rem}
+.properties-grid dt{color:var(--text-2);font-weight:500}
+.properties-grid dd{margin:0;min-width:0;word-break:break-word}
+.properties-grid code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem}
+.log-list{border:1px solid var(--border);border-radius:8px;overflow:hidden;background:#0b1020;color:#e5e7eb;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.75rem;max-height:260px;overflow-y:auto}
+.log-row{display:grid;grid-template-columns:4.5rem 3rem 8rem minmax(0,1fr);gap:.5rem;padding:.38rem .55rem;border-bottom:1px solid rgba(255,255,255,.08)}
+.log-row:last-child{border-bottom:0}
+.log-row .path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* Table */
 .tablewrap{border:1px solid var(--border);border-radius:var(--radius-sm);overflow:hidden;background:#fff}
 table.t{border-collapse:collapse;width:100%}
@@ -2012,16 +2212,8 @@ table.t{border-collapse:collapse;width:100%}
 .form-grid label{align-self:center}
 .form-grid .field-help{grid-column:2;color:var(--text-2);font-size:.78rem;margin-top:-.35rem}
 .form-grid .perm-note{grid-column:2;color:var(--danger);font-size:.8rem}
-/* Mode tiles */
-.tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:.6rem;margin-bottom:1rem}
-.tile{background:#fff;border:1.5px solid var(--border);border-radius:var(--radius-sm);padding:.85rem;text-align:left;cursor:pointer;transition:border-color .1s,background .1s;display:flex;flex-direction:column;gap:.4rem;font:inherit;color:var(--text)}
-.tile:hover{border-color:var(--border-strong);background:#fafbfc}
-.tile.selected{border-color:var(--accent);background:var(--accent-soft)}
-.tile.disabled{opacity:.45;cursor:not-allowed;background:var(--hover)}
-.tile .tile-head{display:flex;align-items:center;gap:.4rem}
-.tile .icon{width:1.1rem;height:1.1rem;color:var(--accent)}
-.tile .tile-title{font-weight:600;font-size:.9rem}
-.tile .tile-desc{color:var(--text-2);font-size:.78rem;line-height:1.4}
+.path-picker-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:.45rem;align-items:center}
+.path-picker-row .btn{white-space:nowrap}
 /* Modal */
 .modal{position:fixed;inset:0;background:rgba(15,23,42,.45);display:flex;align-items:flex-start;justify-content:center;padding:3rem 1rem;z-index:50;overflow:auto;backdrop-filter:blur(2px)}
 .modal-card{background:#fff;border-radius:12px;width:100%;max-width:540px;box-shadow:var(--shadow-lg);overflow:hidden;animation:pop .15s ease-out}
@@ -2055,9 +2247,11 @@ table.t{border-collapse:collapse;width:100%}
 /* Misc */
 .divider{height:1px;background:var(--border);margin:.85rem 0}
 @media (max-width:760px){
-  .tiles{grid-template-columns:1fr}
   .form-grid{grid-template-columns:1fr}
   .form-grid label{margin-bottom:-.25rem}
+  .form-grid .field-help{grid-column:1}
+  .path-picker-row{grid-template-columns:1fr 1fr}
+  .path-picker-row input{grid-column:1 / -1}
   main{padding:1rem}
 }
 @media (max-width:640px){
@@ -2072,6 +2266,14 @@ table.t{border-collapse:collapse;width:100%}
   .panel{padding:.85rem;margin-bottom:.75rem;border-radius:8px}
   .panel-head{align-items:stretch}
   .panel-head .btn{min-height:2.4rem}
+  .finder{display:block;min-height:auto;border-radius:8px}
+  .finder-sidebar{display:flex;gap:.35rem;overflow-x:auto;border-right:0;border-bottom:1px solid var(--border);padding:.55rem}
+  .nav-btn{width:auto;min-width:max-content;margin-bottom:0}
+  .finder-toolbar{position:static;align-items:flex-start;flex-wrap:wrap}
+  .toolbar-left{width:100%;flex-basis:100%}
+  .toolbar-right{width:100%;justify-content:flex-end;flex-wrap:wrap}
+  .view-panel{padding:.7rem}
+  .file-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
   .crumbs{overflow-x:auto;flex-wrap:nowrap;white-space:nowrap;-webkit-overflow-scrolling:touch}
   .tabs{display:grid;grid-template-columns:1fr 1fr;gap:0}
   .tab{padding:.7rem .5rem}
@@ -2130,60 +2332,92 @@ table.t{border-collapse:collapse;width:100%}
   </section>
 
   <section id="app" class="hidden">
-    <section class="panel">
-      <div class="panel-head">
-        <div class="panel-title"><h2>Sources</h2><span class="count" id="mounts-count"></span></div>
-        <button class="btn btn-primary btn-sm hidden" id="add-mount" type="button"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>Add source</button>
-      </div>
-      <div id="mounts-empty" class="empty hidden">
-        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
-        <strong>No sources yet</strong>
-        Add a folder on this device to start sharing files.
-      </div>
-      <div class="tablewrap hidden" id="mounts-wrap">
-        <table class="t"><thead><tr><th>Name</th><th>Shared as</th><th>Local path</th><th>Permission</th><th>State</th><th></th></tr></thead><tbody id="mounts"></tbody></table>
-      </div>
-    </section>
+    <div class="finder">
+      <aside class="finder-sidebar">
+        <button type="button" class="nav-btn active" data-view="files"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>Files</span><span class="nav-count" id="sources-count"></span></button>
+        <button type="button" class="nav-btn" data-view="shares"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg><span>Shared</span><span class="nav-count" id="leases-count"></span></button>
+        <button type="button" class="nav-btn hidden" id="settings-nav" data-view="settings"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4z"/></svg><span>Settings</span></button>
+      </aside>
+      <section class="finder-main">
+        <div class="finder-toolbar">
+          <div class="toolbar-left">
+            <div class="crumbs" id="crumbs" data-test="crumbs"></div>
+            <div class="view-title hidden" id="shares-title"><h2>Shared links</h2></div>
+            <div class="view-title hidden" id="settings-title"><h2>Local settings</h2></div>
+          </div>
+          <div class="toolbar-right">
+            <button class="btn btn-primary btn-icon hidden" id="add-mount" type="button" title="Add local folder"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></button>
+            <button class="btn btn-sm hidden" id="share-selected" type="button"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.59 13.51l6.83 3.98M15.41 6.51l-6.82 3.98"/></svg><span>Share</span></button>
+            <button class="btn btn-ghost btn-icon view-toggle active" id="view-list" type="button" title="List view"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/></svg></button>
+            <button class="btn btn-ghost btn-icon view-toggle" id="view-grid" type="button" title="Icon view"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg></button>
+            <button class="btn btn-ghost btn-icon" id="refresh" type="button" title="Refresh"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M3 12a9 9 0 0 1 15.5-6.4L21 8M21 3v5h-5M21 12a9 9 0 0 1-15.5 6.4L3 16M3 21v-5h5"/></svg></button>
+          </div>
+        </div>
 
-    <section class="panel">
-      <div class="panel-head">
-        <div class="panel-title"><h2>Files</h2></div>
-        <button class="btn btn-ghost btn-icon" id="refresh" type="button" title="Refresh">
-          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15.5-6.4L21 8M21 3v5h-5M21 12a9 9 0 0 1-15.5 6.4L3 16M3 21v-5h5"/></svg>
-        </button>
-      </div>
-      <div class="crumbs" id="crumbs" data-test="crumbs"></div>
-      <div id="empty-mounts" class="empty hidden">
-        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
-        <strong>Nothing to browse yet</strong>
-        Add a source above and the contents will appear here.
-      </div>
-      <div class="tablewrap hidden" id="files-wrap">
-        <table class="t"><thead><tr><th>Name</th><th>Permission</th><th>Modified</th><th></th></tr></thead><tbody id="files"></tbody></table>
-      </div>
-    </section>
+        <section class="view-panel" id="view-files-panel">
+          <div id="empty-mounts" class="empty hidden">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+            <strong>No folders mounted</strong>
+            Open this dashboard locally to add folders from this device.
+          </div>
+          <div class="tablewrap hidden" id="files-wrap">
+            <table class="t"><thead><tr><th>Name</th><th>Size</th><th>Kind</th><th>Modified</th></tr></thead><tbody id="files"></tbody></table>
+          </div>
+          <div class="file-grid hidden" id="files-grid"></div>
+        </section>
 
-    <section class="panel">
-      <div class="panel-head">
-        <div class="panel-title"><h2>Shared links</h2><span class="count" id="leases-count"></span></div>
-      </div>
-      <div class="tabs" data-test="lease-tabs">
-        <button type="button" class="tab active" data-tab="active">Active</button>
-        <button type="button" class="tab" data-tab="inactive">Past</button>
-      </div>
-      <div id="leases-empty" class="empty hidden">
-        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg>
-        <strong>No shared links</strong>
-        Pick a file or folder above to share it.
-      </div>
-      <div class="tablewrap hidden" id="leases-wrap">
-        <table class="t"><thead><tr><th>Label</th><th>Path</th><th>Permission</th><th>Status</th><th>Last used</th><th></th></tr></thead><tbody id="leases"></tbody></table>
-      </div>
-    </section>
+        <section class="view-panel hidden" id="view-shares-panel">
+          <div class="tabs" data-test="lease-tabs">
+            <button type="button" class="tab active" data-tab="active">Active</button>
+            <button type="button" class="tab" data-tab="inactive">Past</button>
+          </div>
+          <div id="leases-empty" class="empty hidden">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg>
+            <strong>No shared links</strong>
+            Select a file or folder, then share it.
+          </div>
+          <div class="tablewrap hidden" id="leases-wrap">
+            <table class="t"><thead><tr><th>Label</th><th>Path</th><th>Permission</th><th>Status</th><th>Activity</th><th></th></tr></thead><tbody id="leases"></tbody></table>
+          </div>
+        </section>
+
+        <section class="view-panel hidden" id="view-settings-panel">
+          <div class="settings-grid">
+            <div class="settings-card">
+              <h3>Network</h3>
+              <div id="network-status"></div>
+            </div>
+            <div class="settings-card" style="grid-column:1 / -1;">
+              <h3>Live logs</h3>
+              <div class="log-list" id="live-logs"></div>
+            </div>
+          </div>
+        </section>
+      </section>
+    </div>
   </section>
 
+  <div id="context-menu" class="context-menu hidden" role="menu">
+    <button type="button" id="context-share" role="menuitem">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.59 13.51l6.83 3.98M15.41 6.51l-6.82 3.98"/></svg>
+      Share
+    </button>
+    <button type="button" id="context-properties" role="menuitem">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+      Properties
+    </button>
+    <button type="button" id="context-rename-source" class="hidden" role="menuitem">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4z"/></svg>
+      Rename source
+    </button>
+    <button type="button" id="context-remove-source" class="hidden danger-menu-item" role="menuitem">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>
+      Remove source
+    </button>
+  </div>
+
   <div id="lease-modal" class="modal hidden" role="dialog" aria-modal="true">
-    <div class="modal-card wide">
+    <div class="modal-card">
       <div id="lease-step-config">
         <div class="modal-head">
           <h2>Share a link</h2>
@@ -2193,32 +2427,14 @@ table.t{border-collapse:collapse;width:100%}
         </div>
         <div class="modal-body">
           <div class="target-chip" id="lease-target"></div>
-          <h3 style="margin-bottom:.55rem;">Permission</h3>
-          <div class="tiles" id="lease-tiles">
-            <button type="button" class="tile" data-mode="read">
-              <div class="tile-head">
-                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>
-                <span class="tile-title">Read only</span>
-              </div>
-              <div class="tile-desc">Recipient can browse and download. Two recipients can use it at once with no conflicts.</div>
-            </button>
-            <button type="button" class="tile" data-mode="upload">
-              <div class="tile-head">
-                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
-                <span class="tile-title">Upload only</span>
-              </div>
-              <div class="tile-desc">Recipient can drop new files in. No browse, no download. Collisions get auto-suffixed.</div>
-            </button>
-            <button type="button" class="tile" data-mode="two-way">
-              <div class="tile-head">
-                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4M3 11V9a4 4 0 0 1 4-4h14M7 23l-4-4 4-4M21 13v2a4 4 0 0 1-4 4H3"/></svg>
-                <span class="tile-title">Read + upload</span>
-              </div>
-              <div class="tile-desc">Recipient can browse, download, and add new files. Existing files stay untouched.</div>
-            </button>
-          </div>
-          <p id="mode-help" class="subtle" style="margin:-.3rem 0 1rem;">Pick how a recipient can interact with this lease.</p>
           <div class="form-grid">
+            <label for="lease-mode">Permission</label>
+            <select id="lease-mode">
+              <option value="read">Read only</option>
+              <option value="two-way">Read and upload</option>
+              <option value="upload">Upload only</option>
+            </select>
+            <p id="mode-help" class="field-help">Recipients can browse and download.</p>
             <label for="lease-label">Label</label>
             <input id="lease-label" placeholder="e.g. Tax docs for accountant" required>
             <label for="lease-expires">Expires in</label>
@@ -2253,12 +2469,36 @@ table.t{border-collapse:collapse;width:100%}
           </div>
           <p class="share-warning">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
-            This is the only time this URL is shown. We save it in your browser so you can copy it again later — if you clear browser data, you'll need to rotate the link.
+            You can copy this link again from the dashboard until it expires or is revoked.
           </p>
         </div>
         <div class="modal-foot">
           <button class="btn btn-primary" type="button" id="lease-done">Done</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="properties-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2>Properties</h2>
+        <button class="btn btn-ghost btn-icon" type="button" id="properties-modal-close" title="Close">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <div class="target-chip" id="properties-target"></div>
+        <dl class="properties-grid">
+          <dt>Type</dt><dd id="properties-type"></dd>
+          <dt>Size</dt><dd id="properties-size"></dd>
+          <dt>Permission</dt><dd id="properties-permission"></dd>
+          <dt>Modified</dt><dd id="properties-modified"></dd>
+          <dt>Path</dt><dd><code id="properties-path"></code></dd>
+        </dl>
+      </div>
+      <div class="modal-foot">
+        <button class="btn btn-primary" type="button" id="properties-done">Done</button>
       </div>
     </div>
   </div>
@@ -2274,7 +2514,12 @@ table.t{border-collapse:collapse;width:100%}
       <div class="modal-body">
         <div class="form-grid">
           <label for="mount-root">Local path</label>
-          <input id="mount-root" placeholder="/Users/you/Documents">
+          <div class="path-picker-row">
+            <input id="mount-root" placeholder="/Users/you/Documents">
+            <button class="btn btn-sm" id="mount-pick-folder" type="button">Choose folder</button>
+            <button class="btn btn-sm" id="mount-pick-file" type="button">Choose file</button>
+          </div>
+          <p class="field-help">Type a path, or use Finder on this Mac.</p>
           <label for="mount-name">Name</label>
           <input id="mount-name" placeholder="auto">
           <label for="mount-path">Shared as</label>
@@ -2337,14 +2582,19 @@ table.t{border-collapse:collapse;width:100%}
   }
 
   var state = {
+    view: 'files',
+    viewMode: 'list',
     currentPath: '/',
+    fileEntries: [],
     selectedEntry: null,
     leases: [],
     mounts: [],
     canManageMounts: false,
+    localOwner: false,
+    status: null,
     activeTab: 'active',
     editingMount: null,
-    leaseMode: null,
+    contextEntry: null,
   };
 
   // ---------- core helpers ----------
@@ -2405,6 +2655,14 @@ table.t{border-collapse:collapse;width:100%}
       case 'mount_read_only': return 'Source is read-only — enable write to allow uploads.';
       case 'mount_management_disabled': return 'Mount management is disabled on this server.';
       case 'admin_required': return 'Admin access required for that action.';
+      case 'local_dashboard_required': return 'Open the dashboard on this device to change sources.';
+      case 'root_required': return 'Choose a local file or folder first.';
+      case 'invalid_root': return 'That local path does not exist or cannot be opened.';
+      case 'invalid_name': return 'Use a source name with letters, numbers, dashes, or underscores.';
+      case 'invalid_path': return 'Shared path must start with /, like /photos.';
+      case 'invalid_picker_kind': return 'Choose file or folder.';
+      case 'picker_unavailable': return 'Finder picker is only available from the local Mac dashboard. You can still type the path.';
+      case 'mount_failed': return 'Source could not be saved.';
       case 'lease_not_found': return 'Lease not found.';
       case 'lease_revoked': return 'Lease was revoked.';
       default: return msg;
@@ -2453,6 +2711,21 @@ table.t{border-collapse:collapse;width:100%}
     el.innerHTML = ICONS[key] || '';
   }
 
+  function formatBytes(value) {
+    if (!value) return '0 bytes';
+    var units = ['bytes', 'KB', 'MB', 'GB', 'TB'];
+    var size = Number(value);
+    var unit = 0;
+    while (size >= 1024 && unit < units.length - 1) { size = size / 1024; unit += 1; }
+    var display = unit === 0 ? String(Math.round(size)) : size.toFixed(size >= 10 ? 1 : 2).replace(/\.0+$/, '');
+    return display + ' ' + units[unit];
+  }
+
+  function permissionText(entry) {
+    if (entry.unavailable) return 'Source is unavailable';
+    return entry.writeAccess ? 'Writable source' : 'Read-only source';
+  }
+
   // ---------- app shell ----------
   function showApp(signedIn) {
     $('login').classList.toggle('hidden', signedIn);
@@ -2460,14 +2733,27 @@ table.t{border-collapse:collapse;width:100%}
     $('header-user').classList.toggle('hidden', !signedIn);
     if (!signedIn) {
       state.currentPath = '/';
+      state.fileEntries = [];
       state.selectedEntry = null;
       state.leases = [];
       state.mounts = [];
+      state.localOwner = false;
+      state.status = null;
+      state.contextEntry = null;
       $('files').replaceChildren();
+      $('files-grid').replaceChildren();
       $('leases').replaceChildren();
-      $('mounts').replaceChildren();
       $('crumbs').replaceChildren();
+      $('settings-nav').classList.add('hidden');
     }
+  }
+
+  function applyDashboardSession(resp) {
+    $('who').textContent = (resp.user && resp.user.username) || '';
+    $('who-role').classList.toggle('hidden', !(resp.user && resp.user.admin));
+    state.localOwner = !!resp.localOwner;
+    $('settings-nav').classList.toggle('hidden', !state.localOwner);
+    if (!state.localOwner && state.view === 'settings') setView('files');
   }
 
   function pathSegments(input) {
@@ -2501,10 +2787,116 @@ table.t{border-collapse:collapse;width:100%}
     $('crumbs').replaceChildren.apply($('crumbs'), nodes);
   }
 
+  function setView(view) {
+    state.view = view;
+    var panels = {
+      files: $('view-files-panel'),
+      shares: $('view-shares-panel'),
+      settings: $('view-settings-panel'),
+    };
+    for (var key in panels) {
+      if (Object.prototype.hasOwnProperty.call(panels, key)) panels[key].classList.toggle('hidden', key !== view);
+    }
+    var nav = document.querySelectorAll('.nav-btn[data-view]');
+    for (var i = 0; i < nav.length; i += 1) nav[i].classList.toggle('active', nav[i].getAttribute('data-view') === view);
+    renderToolbar();
+  }
+
+  function renderToolbar() {
+    var files = state.view === 'files';
+    var shares = state.view === 'shares';
+    var settings = state.view === 'settings';
+    $('crumbs').classList.toggle('hidden', !files);
+    $('shares-title').classList.toggle('hidden', !shares);
+    $('settings-title').classList.toggle('hidden', !settings);
+    $('add-mount').classList.toggle('hidden', !(files && state.canManageMounts));
+    $('share-selected').classList.toggle('hidden', !(files && state.selectedEntry));
+    $('view-list').classList.toggle('hidden', !files);
+    $('view-grid').classList.toggle('hidden', !files);
+  }
+
+  function sourceMountForEntry(entry) {
+    if (!entry || state.currentPath !== '/') return null;
+    for (var i = 0; i < state.mounts.length; i += 1) {
+      if (state.mounts[i].path === entry.path) return state.mounts[i];
+    }
+    return null;
+  }
+
+  function canManageSourceEntry(entry) {
+    return !!(state.canManageMounts && sourceMountForEntry(entry));
+  }
+
+  function setFileViewMode(mode) {
+    state.viewMode = mode;
+    $('view-list').classList.toggle('active', mode === 'list');
+    $('view-grid').classList.toggle('active', mode === 'grid');
+    renderFileEntries();
+  }
+
   // ---------- files ----------
+  function selectEntry(entry) {
+    state.selectedEntry = entry;
+    var nodes = document.querySelectorAll('[data-file-path]');
+    for (var i = 0; i < nodes.length; i += 1) nodes[i].classList.toggle('selected', nodes[i].getAttribute('data-file-path') === entry.path);
+    renderToolbar();
+  }
+
+  function clearSelectedEntry() {
+    state.selectedEntry = null;
+    var nodes = document.querySelectorAll('[data-file-path]');
+    for (var i = 0; i < nodes.length; i += 1) nodes[i].classList.remove('selected');
+    renderToolbar();
+  }
+
+  function showContextMenu(entry, event) {
+    event.preventDefault();
+    state.contextEntry = entry;
+    selectEntry(entry);
+    var sourceEditable = canManageSourceEntry(entry);
+    $('context-share').classList.toggle('hidden', !!entry.unavailable);
+    $('context-rename-source').classList.toggle('hidden', !sourceEditable);
+    $('context-remove-source').classList.toggle('hidden', !sourceEditable);
+    var menu = $('context-menu');
+    menu.classList.remove('hidden');
+    var width = menu.offsetWidth || 180;
+    var height = menu.offsetHeight || 92;
+    var left = Math.min(event.clientX, window.innerWidth - width - 8);
+    var top = Math.min(event.clientY, window.innerHeight - height - 8);
+    menu.style.left = Math.max(8, left) + 'px';
+    menu.style.top = Math.max(8, top) + 'px';
+  }
+
+  function hideContextMenu() {
+    $('context-menu').classList.add('hidden');
+    state.contextEntry = null;
+  }
+
+  function fileKind(entry) {
+    return entry.type === 'directory' ? 'Folder' : 'File';
+  }
+
+  function entryModified(entry) {
+    if (!entry.mtimeMs) return '';
+    var iso = new Date(entry.mtimeMs).toISOString();
+    return { short: relativeTime(iso), full: formatDate(iso) };
+  }
+
+  function attachFileEntryHandlers(element, entry) {
+    element.addEventListener('click', function () { selectEntry(entry); });
+    element.addEventListener('dblclick', function () {
+      if (entry.type === 'directory' && !entry.unavailable) loadFiles(entry.path).catch(showError);
+    });
+    element.addEventListener('contextmenu', function (event) {
+      showContextMenu(entry, event);
+    });
+  }
+
   function renderFileRow(entry) {
     var row = document.createElement('tr');
     row.setAttribute('data-path', entry.path);
+    row.setAttribute('data-file-path', entry.path);
+    row.classList.toggle('selected', state.selectedEntry && state.selectedEntry.path === entry.path);
 
     var nameCell = document.createElement('td');
     nameCell.setAttribute('data-label', 'Name');
@@ -2512,56 +2904,74 @@ table.t{border-collapse:collapse;width:100%}
     nameWrap.className = 'cell-name';
     var iconSpan = document.createElement('span');
     iconSpan.innerHTML = entry.type === 'directory' ? ICONS.folder : ICONS.file;
-    var nameLink = document.createElement('a');
-    nameLink.href = '#';
-    nameLink.className = 'name-text';
-    nameLink.title = entry.path;
-    nameLink.textContent = entry.name;
-    nameLink.addEventListener('click', function (event) {
-      event.preventDefault();
-      if (entry.type === 'directory') loadFiles(entry.path).catch(showError);
-      else openLeaseModal(entry);
-    });
-    nameWrap.append(iconSpan, nameLink);
+    var nameText = document.createElement('span');
+    nameText.className = 'name-text';
+    nameText.title = entry.path;
+    nameText.textContent = entry.name;
+    nameWrap.append(iconSpan, nameText);
     nameCell.append(nameWrap);
 
-    var permCell = document.createElement('td');
-    permCell.setAttribute('data-label', 'Permission');
-    var permBadge = document.createElement('span');
-    permBadge.className = 'badge ' + (entry.writeAccess ? 'write' : 'readonly');
-    permBadge.textContent = entry.writeAccess ? 'Writable' : 'Read-only';
-    permCell.append(permBadge);
+    var kindCell = document.createElement('td');
+    kindCell.setAttribute('data-label', 'Kind');
+    kindCell.textContent = entry.unavailable ? 'Missing source' : fileKind(entry);
+
+    var sizeCell = document.createElement('td');
+    sizeCell.setAttribute('data-label', 'Size');
+    sizeCell.className = 'cell-num';
+    sizeCell.textContent = entry.type === 'directory' ? '--' : formatBytes(entry.size);
 
     var modCell = document.createElement('td');
     modCell.setAttribute('data-label', 'Modified');
     modCell.className = 'cell-num';
-    if (entry.mtimeMs) { modCell.title = formatDate(new Date(entry.mtimeMs).toISOString()); modCell.textContent = relativeTime(new Date(entry.mtimeMs).toISOString()); }
+    var modified = entryModified(entry);
+    if (entry.unavailable) modCell.textContent = 'Unavailable';
+    else if (modified) { modCell.title = modified.full; modCell.textContent = modified.short; }
 
-    var actionCell = document.createElement('td');
-    actionCell.setAttribute('data-label', 'Actions');
-    var actions = document.createElement('div');
-    actions.className = 'actions';
-    if (entry.type === 'directory') {
-      var openBtn = document.createElement('button');
-      openBtn.className = 'btn btn-ghost btn-sm';
-      openBtn.type = 'button';
-      openBtn.textContent = 'Open';
-      openBtn.addEventListener('click', function () { loadFiles(entry.path).catch(showError); });
-      actions.append(openBtn);
-    }
-    var shareBtn = document.createElement('button');
-    shareBtn.className = 'btn btn-sm';
-    shareBtn.type = 'button';
-    shareBtn.innerHTML = ICONS.share + '<span>Share</span>';
-    shareBtn.addEventListener('click', function () { openLeaseModal(entry); });
-    actions.append(shareBtn);
-    actionCell.append(actions);
-
-    row.append(nameCell, permCell, modCell, actionCell);
+    attachFileEntryHandlers(row, entry);
+    row.append(nameCell, sizeCell, kindCell, modCell);
     return row;
   }
 
+  function renderFileCard(entry) {
+    var card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'file-card';
+    card.setAttribute('data-file-path', entry.path);
+    card.classList.toggle('selected', state.selectedEntry && state.selectedEntry.path === entry.path);
+    card.title = entry.unavailable ? entry.path + ' is unavailable. Right-click to remove source.' : entry.path + ' (right-click for options)';
+    card.innerHTML = (entry.type === 'directory' ? ICONS.folder : ICONS.file)
+      + '<span class="file-card-name"></span><span class="file-card-meta"></span>';
+    card.querySelector('.file-card-name').textContent = entry.name;
+    card.querySelector('.file-card-meta').textContent = entry.unavailable ? 'Missing source' : entry.type === 'directory' ? 'Folder' : formatBytes(entry.size);
+    attachFileEntryHandlers(card, entry);
+    return card;
+  }
+
+  function renderFileEntries() {
+    var entries = state.fileEntries || [];
+    var hasEntries = entries.length > 0;
+    var atRoot = state.currentPath === '/';
+    if (atRoot) $('sources-count').textContent = entries.length ? '(' + entries.length + ')' : '';
+    $('empty-mounts').classList.toggle('hidden', hasEntries || !atRoot);
+    $('files-wrap').classList.toggle('hidden', !hasEntries || state.viewMode !== 'list');
+    $('files-grid').classList.toggle('hidden', !hasEntries || state.viewMode !== 'grid');
+    if (!hasEntries) {
+      $('files').replaceChildren();
+      $('files-grid').replaceChildren();
+      return;
+    }
+    var rows = [];
+    var cards = [];
+    for (var i = 0; i < entries.length; i += 1) {
+      rows.push(renderFileRow(entries[i]));
+      cards.push(renderFileCard(entries[i]));
+    }
+    $('files').replaceChildren.apply($('files'), rows);
+    $('files-grid').replaceChildren.apply($('files-grid'), cards);
+  }
+
   async function loadFiles(targetPath) {
+    hideContextMenu();
     var requested = targetPath || state.currentPath;
     var listing;
     try {
@@ -2574,16 +2984,11 @@ table.t{border-collapse:collapse;width:100%}
       throw err;
     }
     state.currentPath = listing.path || requested;
+    state.selectedEntry = null;
+    state.fileEntries = listing.entries || [];
     renderCrumbs();
-    var entries = listing.entries || [];
-    var hasEntries = entries.length > 0;
-    var atRoot = state.currentPath === '/';
-    $('empty-mounts').classList.toggle('hidden', hasEntries || !atRoot);
-    $('files-wrap').classList.toggle('hidden', !hasEntries);
-    if (!hasEntries) { $('files').replaceChildren(); return; }
-    var rows = [];
-    for (var i = 0; i < entries.length; i += 1) rows.push(renderFileRow(entries[i]));
-    $('files').replaceChildren.apply($('files'), rows);
+    renderFileEntries();
+    renderToolbar();
   }
 
   // ---------- leases ----------
@@ -2658,15 +3063,16 @@ table.t{border-collapse:collapse;width:100%}
       var copyBtn = document.createElement('button');
       copyBtn.className = 'btn btn-sm';
       copyBtn.type = 'button';
-      var knownUrl = getStoredLeaseUrl(lease.id);
-      copyBtn.innerHTML = (knownUrl ? ICONS.copy : ICONS.link) + '<span>' + (knownUrl ? 'Copy link' : 'New link') + '</span>';
-      copyBtn.title = knownUrl ? 'Copy the saved URL' : 'No URL saved on this device. Generate a fresh URL (invalidates any previous one).';
-      (function (id) {
+      var knownUrl = lease.url || getStoredLeaseUrl(lease.id);
+      if (lease.url) storeLeaseUrl(lease.id, lease.url);
+      copyBtn.innerHTML = (knownUrl ? ICONS.copy : ICONS.link) + '<span>' + (knownUrl ? 'Copy link' : 'Replace link') + '</span>';
+      copyBtn.title = knownUrl ? 'Copy this lease URL' : 'No recoverable URL is saved. Replace this link to copy a new URL.';
+      (function (id, serverUrl) {
         copyBtn.addEventListener('click', async function () {
           try {
-            var url = getStoredLeaseUrl(id);
+            var url = serverUrl || getStoredLeaseUrl(id);
             if (!url) {
-              if (!confirm('No URL is saved on this device. Generate a fresh URL? Any previously-shared URL for this lease becomes invalid.')) return;
+              if (!confirm('No recoverable URL is saved for this lease. Replace it now? Any previously shared URL for this lease will stop working.')) return;
               var rotated = await api('/dashboard/api/leases/' + encodeURIComponent(id) + '/rotate', { method: 'POST', body: '{}' });
               url = rotated.lease.url;
               storeLeaseUrl(id, url);
@@ -2676,7 +3082,7 @@ table.t{border-collapse:collapse;width:100%}
             renderLeases();
           } catch (err) { showError(err); }
         });
-      })(lease.id);
+      })(lease.id, lease.url || null);
       actions.append(copyBtn);
 
       var revoke = document.createElement('button');
@@ -2726,70 +3132,72 @@ table.t{border-collapse:collapse;width:100%}
     renderLeases();
   }
 
+  // ---------- properties modal ----------
+  function openPropertiesModal(entry) {
+    hideContextMenu();
+    selectEntry(entry);
+    $('properties-target').innerHTML = '<span>' + (entry.type === 'directory' ? ICONS.folder : ICONS.file) + '</span><div class="target-path">' + escapeHtml(entry.path) + '</div>';
+    $('properties-type').textContent = entry.unavailable ? 'Missing source' : fileKind(entry);
+    $('properties-size').textContent = entry.type === 'directory' ? 'Not calculated' : formatBytes(entry.size);
+    $('properties-permission').textContent = permissionText(entry);
+    $('properties-modified').textContent = entry.mtimeMs ? formatDate(new Date(entry.mtimeMs).toISOString()) : 'Unknown';
+    $('properties-path').textContent = entry.path;
+    $('properties-modal').classList.remove('hidden');
+  }
+
+  function closePropertiesModal() {
+    $('properties-modal').classList.add('hidden');
+  }
+
   // ---------- lease modal ----------
   function openLeaseModal(entry) {
+    hideContextMenu();
     state.selectedEntry = entry;
-    state.leaseMode = null;
     $('lease-step-config').classList.remove('hidden');
     $('lease-step-success').classList.add('hidden');
     var target = $('lease-target');
     target.innerHTML = '<span>' + (entry.type === 'directory' ? ICONS.folder : ICONS.file) + '</span><div class="target-path">' + escapeHtml(entry.path) + '</div><span class="badge ' + (entry.writeAccess ? 'write' : 'readonly') + '">' + (entry.type === 'directory' ? 'Folder' : 'File') + ' · ' + (entry.writeAccess ? 'writable' : 'read-only') + '</span>';
     $('lease-label').value = entry.name || entry.path;
     $('lease-expires').value = '24h';
-    setupTiles(entry);
+    configureLeaseModeSelect(entry);
     $('lease-modal').classList.remove('hidden');
     setTimeout(function () { $('lease-label').focus(); $('lease-label').select(); }, 0);
   }
 
   function closeLeaseModal() {
     $('lease-modal').classList.add('hidden');
-    state.selectedEntry = null;
-    state.leaseMode = null;
+    clearSelectedEntry();
   }
 
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, function (c) { return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]; });
   }
 
-  function setupTiles(entry) {
-    var tiles = document.querySelectorAll('#lease-tiles .tile');
-    var help = $('mode-help');
-    for (var i = 0; i < tiles.length; i += 1) {
-      var tile = tiles[i];
-      var mode = tile.getAttribute('data-mode');
-      var disabled = false;
-      var reason = '';
-      if (mode !== 'read' && entry.type === 'file') { disabled = true; reason = 'Upload modes only work on folders.'; }
-      if (mode !== 'read' && !entry.writeAccess) { disabled = true; reason = 'Source is read-only — toggle write access on the source to allow uploads.'; }
-      tile.classList.toggle('disabled', disabled);
-      tile.classList.remove('selected');
-      tile.disabled = disabled;
-      tile.dataset.disabledReason = reason;
+  function configureLeaseModeSelect(entry) {
+    var select = $('lease-mode');
+    var options = select.options;
+    for (var i = 0; i < options.length; i += 1) {
+      var option = options[i];
+      option.disabled = option.value !== 'read' && (entry.type === 'file' || !entry.writeAccess);
     }
-    // default-select first enabled tile
-    state.leaseMode = null;
-    help.textContent = 'Pick how a recipient can interact with this lease.';
-    for (var j = 0; j < tiles.length; j += 1) {
-      if (!tiles[j].disabled) { selectTile(tiles[j]); break; }
-    }
+    select.value = 'read';
+    updateModeHelp();
   }
 
-  function selectTile(tile) {
-    if (tile.disabled) return;
-    var tiles = document.querySelectorAll('#lease-tiles .tile');
-    for (var i = 0; i < tiles.length; i += 1) tiles[i].classList.toggle('selected', tiles[i] === tile);
-    state.leaseMode = tile.getAttribute('data-mode');
+  function updateModeHelp() {
+    var mode = $('lease-mode').value;
     var modeNotes = {
       'read': 'Recipients can view and download. No uploads.',
       'upload': 'Recipients can drop files into the folder. Existing files are not visible or modifiable.',
       'two-way': 'Recipients can view, download, and add new files. Existing files are never overwritten.',
     };
-    $('mode-help').textContent = modeNotes[state.leaseMode] || '';
+    $('mode-help').textContent = modeNotes[mode] || '';
   }
 
   async function submitLease() {
     if (!state.selectedEntry) return;
-    if (!state.leaseMode) { toast('Pick a permission.', 'error'); return; }
+    var mode = $('lease-mode').value;
+    if (!mode) { toast('Pick a permission.', 'error'); return; }
     if (!$('lease-label').value.trim()) { toast('Add a label first.', 'error'); $('lease-label').focus(); return; }
     var btn = $('lease-create');
     btn.disabled = true;
@@ -2799,7 +3207,7 @@ table.t{border-collapse:collapse;width:100%}
         body: JSON.stringify({
           path: state.selectedEntry.path,
           label: $('lease-label').value.trim(),
-          mode: state.leaseMode,
+          mode: mode,
           expires: $('lease-expires').value,
         }),
       });
@@ -2812,106 +3220,49 @@ table.t{border-collapse:collapse;width:100%}
     finally { btn.disabled = false; }
   }
 
-  // ---------- mounts ----------
-  function renderMountRow(mount) {
-    var row = document.createElement('tr');
-    var nameCell = document.createElement('td');
-    nameCell.setAttribute('data-label', 'Name');
-    var nameWrap = document.createElement('div');
-    nameWrap.className = 'cell-name';
-    var iconSpan = document.createElement('span');
-    iconSpan.innerHTML = ICONS.folder;
-    var nameText = document.createElement('span');
-    nameText.className = 'name-text';
-    nameText.title = mount.name;
-    nameText.textContent = mount.name;
-    nameText.style.fontWeight = '500';
-    nameWrap.append(iconSpan, nameText);
-    nameCell.append(nameWrap);
-
-    var pathCell = document.createElement('td');
-    pathCell.setAttribute('data-label', 'Shared as');
-    pathCell.className = 'cell-path';
-    pathCell.textContent = mount.path;
-    pathCell.title = mount.path;
-
-    var rootCell = document.createElement('td');
-    rootCell.setAttribute('data-label', 'Local path');
-    rootCell.className = 'cell-path';
-    rootCell.textContent = mount.root;
-    rootCell.title = mount.root;
-
-    var permCell = document.createElement('td');
-    permCell.setAttribute('data-label', 'Permission');
-    var permBadge = document.createElement('span');
-    permBadge.className = 'badge ' + (mount.writeAccess ? 'write' : 'readonly');
-    permBadge.textContent = mount.writeAccess ? 'Writable' : 'Read-only';
-    permCell.append(permBadge);
-
-    var stateCell = document.createElement('td');
-    stateCell.setAttribute('data-label', 'State');
-    var stateBadge = document.createElement('span');
-    var enabled = mount.enabled !== false;
-    stateBadge.className = 'badge ' + (enabled ? 'active' : 'readonly');
-    stateBadge.textContent = enabled ? 'Enabled' : 'Disabled';
-    stateCell.append(stateBadge);
-
-    var actionCell = document.createElement('td');
-    actionCell.setAttribute('data-label', 'Actions');
-    var actions = document.createElement('div');
-    actions.className = 'actions';
-    if (state.canManageMounts) {
-      var editBtn = document.createElement('button');
-      editBtn.className = 'btn btn-ghost btn-icon';
-      editBtn.type = 'button';
-      editBtn.title = 'Edit';
-      editBtn.innerHTML = ICONS.edit;
-      editBtn.addEventListener('click', function () { openMountModal(mount); });
-      var removeBtn = document.createElement('button');
-      removeBtn.className = 'btn btn-danger btn-icon';
-      removeBtn.type = 'button';
-      removeBtn.title = 'Remove';
-      removeBtn.innerHTML = ICONS.trash;
-      (function (target) {
-        removeBtn.addEventListener('click', async function () {
-          if (!confirm('Remove source "' + target.name + '"? Existing links that reference it become unusable.')) return;
-          try {
-            await api('/dashboard/api/mounts/' + encodeURIComponent(target.name), { method: 'DELETE', body: '{}' });
-            await reloadMounts();
-            await loadFiles('/');
-            toast('Source removed.', 'success');
-          } catch (err) { showError(err); }
-        });
-      })(mount);
-      actions.append(editBtn, removeBtn);
-    } else {
-      var locked = document.createElement('span');
-      locked.className = 'subtle';
-      locked.textContent = 'CLI only';
-      actions.append(locked);
+  // ---------- settings ----------
+  function renderStatus() {
+    if (!state.localOwner) return;
+    var status = state.status || {};
+    var server = status.server || {};
+    var tunnel = status.tunnel || {};
+    var rows = [];
+    function kv(label, value) {
+      rows.push('<div class="kv"><span>' + escapeHtml(label) + '</span><code>' + escapeHtml(value || 'Not configured') + '</code></div>');
     }
-    actionCell.append(actions);
-    row.append(nameCell, pathCell, rootCell, permCell, stateCell, actionCell);
-    return row;
+    kv('Local UI', server.localUrl || '');
+    kv('Public UI', server.publicUrl || '');
+    kv('Tunnel', tunnel.configured ? (tunnel.provider || 'configured') : 'Not configured');
+    rows.push('<p class="muted" style="margin:.65rem 0 0;font-size:.84rem;">Tunnel reconfiguration is local-only. Use the interactive terminal menu for now: <code>tunnel config</code>.</p>');
+    $('network-status').innerHTML = rows.join('');
+
+    var logs = status.logs || [];
+    if (!logs.length) {
+      $('live-logs').innerHTML = '<div class="log-row"><span></span><span></span><span></span><span class="path">No dashboard events yet</span></div>';
+      return;
+    }
+    var logRows = [];
+    for (var i = logs.length - 1; i >= 0; i -= 1) {
+      var entry = logs[i];
+      var time = entry.ts ? new Date(entry.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
+      logRows.push('<div class="log-row"><span>' + escapeHtml(time) + '</span><span>' + escapeHtml(String(entry.status || '')) + '</span><span>' + escapeHtml(entry.kind || '') + '</span><span class="path">' + escapeHtml((entry.method || '') + ' ' + (entry.path || '') + (entry.detail ? ' · ' + entry.detail : '')) + '</span></div>');
+    }
+    $('live-logs').innerHTML = logRows.join('');
   }
 
-  function renderMounts() {
-    $('mounts-count').textContent = state.mounts.length ? '(' + state.mounts.length + ')' : '';
-    var hasMounts = state.mounts.length > 0;
-    $('mounts-empty').classList.toggle('hidden', hasMounts);
-    $('mounts-wrap').classList.toggle('hidden', !hasMounts);
-    if (!hasMounts) { $('mounts').replaceChildren(); return; }
-    var rows = [];
-    for (var i = 0; i < state.mounts.length; i += 1) rows.push(renderMountRow(state.mounts[i]));
-    $('mounts').replaceChildren.apply($('mounts'), rows);
+  async function loadStatus() {
+    if (!state.localOwner) return;
+    state.status = await api('/dashboard/api/status');
+    renderStatus();
   }
 
   async function reloadMounts() {
     var payload = await api('/dashboard/api/mounts');
     state.mounts = payload.mounts || [];
     state.canManageMounts = !!payload.canManage;
-    $('add-mount').classList.toggle('hidden', !state.canManageMounts);
-    renderMounts();
+    $('sources-count').textContent = state.mounts.length ? '(' + state.mounts.length + ')' : '';
+    $('add-mount').classList.toggle('hidden', !(state.view === 'files' && state.canManageMounts));
+    renderToolbar();
   }
 
   function openMountModal(existing) {
@@ -2932,8 +3283,71 @@ table.t{border-collapse:collapse;width:100%}
 
   function closeMountModal() { $('mount-modal').classList.add('hidden'); state.editingMount = null; }
 
+  async function pickMountRoot(kind) {
+    try {
+      var payload = await api('/dashboard/api/local-path-picker', {
+        method: 'POST',
+        body: JSON.stringify({ kind: kind }),
+      });
+      if (payload.path) {
+        $('mount-root').value = payload.path;
+        $('mount-root').focus();
+      }
+    } catch (err) { showError(err); }
+  }
+
+  function normalizeSourceRename(value) {
+    var trimmed = String(value || '').trim().replace(/^\\/+|\\/+$/g, '');
+    if (!trimmed || trimmed.indexOf('/') !== -1) return null;
+    if (!/^[A-Za-z0-9._~-]+$/.test(trimmed)) return null;
+    return '/' + trimmed;
+  }
+
+  async function renameSource(entry) {
+    hideContextMenu();
+    var mount = sourceMountForEntry(entry);
+    if (!mount) return;
+    var current = (mount.path || entry.path || '').replace(/^\\/+/, '');
+    var nextName = prompt('Rename source:', current);
+    if (nextName === null) return;
+    var nextPath = normalizeSourceRename(nextName);
+    if (!nextPath) { toast('Use one source name, like photos or tax-docs.', 'error'); return; }
+    if (nextPath === mount.path) return;
+    for (var i = 0; i < state.mounts.length; i += 1) {
+      if (state.mounts[i].name !== mount.name && state.mounts[i].path === nextPath) {
+        toast('A source with that name already exists.', 'error');
+        return;
+      }
+    }
+    if (!confirm('Rename this source to ' + nextPath + '? Existing links that use the old path may stop working.')) return;
+    try {
+      await api('/dashboard/api/mounts/' + encodeURIComponent(mount.name), {
+        method: 'PATCH',
+        body: JSON.stringify({ path: nextPath }),
+      });
+      await reloadMounts();
+      await loadFiles('/');
+      toast('Source renamed.', 'success');
+    } catch (err) { showError(err); }
+  }
+
+  async function removeSource(entry) {
+    hideContextMenu();
+    var mount = sourceMountForEntry(entry);
+    if (!mount) return;
+    if (!confirm('Remove source "' + (entry.name || mount.path) + '" from mvmt? This does not delete local files. Existing links that reference it become unusable.')) return;
+    try {
+      await api('/dashboard/api/mounts/' + encodeURIComponent(mount.name), { method: 'DELETE', body: '{}' });
+      await reloadMounts();
+      await loadFiles('/');
+      toast('Source removed.', 'success');
+    } catch (err) { showError(err); }
+  }
+
   async function saveMount() {
-    var body = { root: $('mount-root').value.trim(), writeAccess: $('mount-write').checked };
+    var root = $('mount-root').value.trim();
+    if (!root) { toast('Choose a local file or folder first.', 'error'); $('mount-root').focus(); return; }
+    var body = { root: root, writeAccess: $('mount-write').checked };
     if ($('mount-path').value.trim()) body.path = $('mount-path').value.trim();
     if ($('mount-description').value.trim()) body.description = $('mount-description').value.trim();
     var url = '/dashboard/api/mounts'; var method = 'POST';
@@ -2959,6 +3373,7 @@ table.t{border-collapse:collapse;width:100%}
     await reloadMounts();
     await loadFiles(state.currentPath);
     await loadLeases();
+    await loadStatus();
   }
 
   // ---------- wiring ----------
@@ -2972,8 +3387,7 @@ table.t{border-collapse:collapse;width:100%}
         method: 'POST',
         body: JSON.stringify({ username: $('username').value, password: $('password').value }),
       });
-      $('who').textContent = (resp.user && resp.user.username) || '';
-      $('who-role').classList.toggle('hidden', !(resp.user && resp.user.admin));
+      applyDashboardSession(resp);
       $('password').value = '';
       $('login-status').textContent = '';
       showApp(true);
@@ -2993,6 +3407,22 @@ table.t{border-collapse:collapse;width:100%}
   });
 
   $('refresh').addEventListener('click', function () { refresh().catch(showError); });
+  $('share-selected').addEventListener('click', function () {
+    if (state.selectedEntry) openLeaseModal(state.selectedEntry);
+  });
+  $('view-list').addEventListener('click', function () { setFileViewMode('list'); });
+  $('view-grid').addEventListener('click', function () { setFileViewMode('grid'); });
+
+  var navButtons = document.querySelectorAll('.nav-btn[data-view]');
+  for (var n = 0; n < navButtons.length; n += 1) {
+    (function (btn) {
+      btn.addEventListener('click', function () {
+        var view = btn.getAttribute('data-view') || 'files';
+        if (view === 'settings' && !state.localOwner) return;
+        setView(view);
+      });
+    })(navButtons[n]);
+  }
 
   var tabButtons = document.querySelectorAll('.tab');
   for (var t = 0; t < tabButtons.length; t += 1) {
@@ -3009,12 +3439,31 @@ table.t{border-collapse:collapse;width:100%}
   $('mount-modal-close').addEventListener('click', closeMountModal);
   $('mount-cancel').addEventListener('click', closeMountModal);
   $('mount-save').addEventListener('click', function () { saveMount().catch(showError); });
+  $('mount-pick-folder').addEventListener('click', function () { pickMountRoot('folder').catch(showError); });
+  $('mount-pick-file').addEventListener('click', function () { pickMountRoot('file').catch(showError); });
   $('mount-modal').addEventListener('click', function (event) { if (event.target === $('mount-modal')) closeMountModal(); });
 
-  document.addEventListener('click', function (event) {
-    var tile = event.target.closest('#lease-tiles .tile');
-    if (tile) selectTile(tile);
+  $('context-menu').addEventListener('click', function (event) { event.stopPropagation(); });
+  $('context-share').addEventListener('click', function () {
+    var entry = state.contextEntry || state.selectedEntry;
+    if (entry) openLeaseModal(entry);
   });
+  $('context-properties').addEventListener('click', function () {
+    var entry = state.contextEntry || state.selectedEntry;
+    if (entry) openPropertiesModal(entry);
+  });
+  $('context-rename-source').addEventListener('click', function () {
+    var entry = state.contextEntry || state.selectedEntry;
+    if (entry) renameSource(entry).catch(showError);
+  });
+  $('context-remove-source').addEventListener('click', function () {
+    var entry = state.contextEntry || state.selectedEntry;
+    if (entry) removeSource(entry).catch(showError);
+  });
+  document.addEventListener('click', function (event) {
+    if (!event.target.closest('#context-menu')) hideContextMenu();
+  });
+  $('lease-mode').addEventListener('change', updateModeHelp);
   $('lease-modal-close').addEventListener('click', closeLeaseModal);
   $('lease-cancel').addEventListener('click', closeLeaseModal);
   $('lease-done').addEventListener('click', closeLeaseModal);
@@ -3024,9 +3473,14 @@ table.t{border-collapse:collapse;width:100%}
     catch (err) { showError(err); }
   });
   $('lease-modal').addEventListener('click', function (event) { if (event.target === $('lease-modal')) closeLeaseModal(); });
+  $('properties-modal-close').addEventListener('click', closePropertiesModal);
+  $('properties-done').addEventListener('click', closePropertiesModal);
+  $('properties-modal').addEventListener('click', function (event) { if (event.target === $('properties-modal')) closePropertiesModal(); });
   document.addEventListener('keydown', function (event) {
     if (event.key === 'Escape') {
-      if (!$('lease-modal').classList.contains('hidden')) closeLeaseModal();
+      if (!$('context-menu').classList.contains('hidden')) hideContextMenu();
+      else if (!$('lease-modal').classList.contains('hidden')) closeLeaseModal();
+      else if (!$('properties-modal').classList.contains('hidden')) closePropertiesModal();
       else if (!$('mount-modal').classList.contains('hidden')) closeMountModal();
     }
   });
@@ -3034,8 +3488,7 @@ table.t{border-collapse:collapse;width:100%}
   // boot
   api('/dashboard/api/me')
     .then(async function (resp) {
-      $('who').textContent = (resp.user && resp.user.username) || '';
-      $('who-role').classList.toggle('hidden', !(resp.user && resp.user.admin));
+      applyDashboardSession(resp);
       showApp(true);
       await refresh();
     })
@@ -3051,29 +3504,89 @@ const LEASE_BROWSER_PAGE_HTML = `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>mvmt folder lease</title>
-  <style>
-  body{font-family:ui-sans-serif,system-ui,sans-serif;margin:2rem;max-width:960px;color:#0f172a}
-  table{border-collapse:collapse;width:100%}
-  td,th{border-bottom:1px solid #ddd;padding:.5rem;text-align:left}
-  a{color:#0f766e}
-  .meta,.status,.hint{color:#666}
-  .upload{border:1px dashed #94a3b8;border-radius:8px;padding:1rem;margin:1rem 0;background:#f8fafc}
-  .upload.drag{border-color:#0f766e;background:#ecfdf5}
-  .hidden{display:none}
-  input{margin-top:.5rem}
-  </style>
+<style>
+:root{--bg:#f5f6f8;--panel:#fff;--text:#0f172a;--text-2:#475569;--muted:#94a3b8;--border:#e4e7ec;--border-strong:#cbd5e1;--hover:#f1f5f9;--accent:#0f766e;--accent-2:#115e59;--accent-soft:#ccfbf1;--ok:#15803d;--ok-soft:#dcfce7;--warn:#b45309;--warn-soft:#fef3c7;--danger:#b91c1c;--shadow:0 1px 2px rgba(15,23,42,.04),0 1px 3px rgba(15,23,42,.04)}
+*,*::before,*::after{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+.top{height:52px;background:#fff;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;padding:0 1.25rem;position:sticky;top:0;z-index:5}
+.brand{display:flex;align-items:center;gap:.5rem;font-weight:700}
+.brand .dot{width:.55rem;height:.55rem;border-radius:50%;background:var(--accent)}
+.badge{display:inline-flex;align-items:center;gap:.3rem;padding:.16rem .55rem;border-radius:999px;font-size:.7rem;font-weight:650;letter-spacing:.04em;text-transform:uppercase;border:1px solid #bbf7d0;background:var(--ok-soft);color:var(--ok)}
+main{max-width:1120px;margin:0 auto;padding:1.25rem}
+.hero{display:flex;align-items:flex-end;justify-content:space-between;gap:1rem;margin:.3rem 0 1rem}
+h1{font-size:1.6rem;line-height:1.1;margin:0;font-weight:700;letter-spacing:-.02em}
+.meta{margin:.45rem 0 0;color:var(--text-2)}
+.shell{background:#fff;border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow);overflow:hidden}
+.toolbar{display:flex;align-items:center;justify-content:space-between;gap:.75rem;padding:.7rem .85rem;border-bottom:1px solid var(--border);background:#fff}
+.crumbs{display:flex;align-items:center;gap:.35rem;min-width:0;overflow-x:auto;white-space:nowrap;color:var(--text-2)}
+.crumbs a{color:var(--text-2);text-decoration:none;border-radius:6px;padding:.18rem .35rem}
+.crumbs a:hover{background:var(--hover);color:var(--text)}
+.crumbs .current{font-weight:650;color:var(--text);padding:.18rem .35rem}
+.crumbs .sep{color:var(--muted)}
+.status{color:var(--text-2);font-size:.88rem;min-height:1.25rem}
+.upload{border:1px dashed #94a3b8;border-radius:12px;margin:1rem;padding:1rem 1.1rem;background:#f8fafc;display:flex;align-items:center;justify-content:space-between;gap:1rem}
+.upload.drag{border-color:var(--accent);background:#ecfdf5}
+.upload.uploading{border-color:var(--accent);background:#ecfdf5;box-shadow:inset 0 0 0 1px rgba(15,118,110,.15)}
+.upload strong{display:block;font-size:.95rem}
+.hint{margin:.18rem 0 0;color:var(--text-2)}
+.upload input{max-width:18rem}
+.upload-progress{flex:1 1 16rem;min-width:14rem}
+.upload-status{display:flex;align-items:center;gap:.55rem;font-weight:700;color:var(--text);margin-bottom:.55rem}
+.spinner{width:1rem;height:1rem;border:2px solid #cbd5e1;border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;flex:none}
+.progress{height:.55rem;border-radius:999px;background:#e2e8f0;overflow:hidden}
+.bar{height:100%;width:0%;border-radius:999px;background:var(--accent);transition:width .15s ease}
+.progress.indeterminate .bar{width:35%;animation:progress-slide 1s ease-in-out infinite}
+.upload-progress.done .spinner,.upload-progress.error .spinner{display:none}
+.upload-progress.error .bar{background:var(--danger)}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes progress-slide{0%{transform:translateX(-120%)}100%{transform:translateX(320%)}}
+.hidden{display:none!important}
+.tablewrap{overflow:auto}
+table{border-collapse:collapse;width:100%;min-width:640px}
+th{font-size:.7rem;font-weight:700;color:var(--text-2);background:#fafbfc;text-transform:uppercase;letter-spacing:.05em;padding:.58rem .9rem;text-align:left;border-bottom:1px solid var(--border)}
+td{padding:.68rem .9rem;border-bottom:1px solid var(--border);vertical-align:middle}
+tbody tr:hover{background:var(--hover)}
+.name{display:flex;align-items:center;gap:.55rem;min-width:0}
+.icon{width:1.05rem;height:1.05rem;color:var(--muted);flex:none}
+.name a{color:var(--text);font-weight:550;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.name a:hover{color:var(--accent)}
+.kind,.bytes{color:var(--text-2)}
+.bytes{text-align:right;font-variant-numeric:tabular-nums}
+.empty{padding:2.5rem 1rem;text-align:center;color:var(--text-2)}
+@media (max-width:640px){.top{padding:0 .85rem}.brand span:last-child{display:none}main{padding:.75rem}.hero{display:block}.shell{border-radius:10px}.toolbar{align-items:flex-start;flex-direction:column}.upload{align-items:flex-start;flex-direction:column}.upload input{max-width:100%}table{min-width:0}table,thead,tbody,tr,td{display:block;width:100%}thead{display:none}tbody{display:flex;flex-direction:column;gap:.55rem;padding:.7rem;background:var(--bg)}tr{background:#fff;border:1px solid var(--border);border-radius:10px;padding:.7rem}td{border:0;padding:.25rem 0}.bytes{text-align:left}.kind::before,.bytes::before{content:attr(data-label);display:inline-block;width:4.5rem;color:var(--text-2);font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em}}
+</style>
 </head>
 <body>
-<h1 id="title">Folder lease</h1>
-  <p class="meta" id="meta"></p>
-  <p id="parent"></p>
-  <p class="status" id="status"></p>
+<header class="top">
+  <div class="brand"><span class="dot"></span><span>mvmt</span></div>
+  <span class="badge" id="lease-kind">Folder lease</span>
+</header>
+<main>
+  <section class="hero">
+    <div>
+      <h1 id="title">Folder lease</h1>
+      <p class="meta" id="meta"></p>
+    </div>
+    <p class="status" id="status"></p>
+  </section>
+  <section class="shell">
+    <div class="toolbar">
+      <nav class="crumbs" id="crumbs" aria-label="Folder path"></nav>
+    </div>
   <div class="upload hidden" id="upload">
-    <strong>Upload to this folder</strong>
-    <p class="hint">Choose files or drop them here. Existing filenames are saved with a suffix.</p>
+    <div><strong>Upload to this folder</strong><p class="hint">Choose files or drop them here. Existing filenames are saved with a suffix.</p></div>
     <input id="upload-files" type="file" multiple>
+    <div class="upload-progress hidden" id="upload-progress" aria-live="polite">
+      <div class="upload-status"><span class="spinner"></span><span id="upload-status-text">Uploading...</span></div>
+      <div class="progress" id="upload-progress-track"><div class="bar" id="upload-progress-bar"></div></div>
+    </div>
   </div>
-  <table><thead><tr><th>Name</th><th>Type</th><th>Bytes</th></tr></thead><tbody id="entries"></tbody></table>
+    <div class="tablewrap">
+      <table><thead><tr><th>Name</th><th>Type</th><th style="text-align:right">Size</th></tr></thead><tbody id="entries"></tbody></table>
+    </div>
+    <div class="empty hidden" id="empty">No files in this folder.</div>
+  </section>
+</main>
   <script>
 const pathParts = location.pathname.split('/').filter(Boolean);
 // When served through a relay the path is /t/{slug}/lease/{id}; locally
@@ -3083,21 +3596,33 @@ const leaseIdx = pathParts.indexOf('lease');
 const leaseId = leaseIdx >= 0 ? decodeURIComponent(pathParts[leaseIdx + 1] || '') : '';
 const basePrefix = leaseIdx > 0 ? '/' + pathParts.slice(0, leaseIdx).join('/') : '';
 const params = new URLSearchParams(location.search);
-const token = params.get('token') || params.get('t') || '';
+const tokenKey = 'mvmt_lease_token_' + leaseId;
+let token = params.get('token') || params.get('t') || sessionStorage.getItem(tokenKey) || '';
+if (token) sessionStorage.setItem(tokenKey, token);
 const requestedPath = params.get('path') || '';
+if (params.has('token') || params.has('t')) {
+  const clean = new URL(location.href);
+  clean.searchParams.delete('token');
+  clean.searchParams.delete('t');
+  history.replaceState(null, '', clean.pathname + clean.search);
+}
 const title = document.getElementById('title');
 const meta = document.getElementById('meta');
-  const parent = document.getElementById('parent');
+  const crumbs = document.getElementById('crumbs');
   const status = document.getElementById('status');
   const entries = document.getElementById('entries');
+  const empty = document.getElementById('empty');
   const upload = document.getElementById('upload');
   const uploadInput = document.getElementById('upload-files');
+  const uploadProgress = document.getElementById('upload-progress');
+  const uploadStatusText = document.getElementById('upload-status-text');
+  const uploadProgressTrack = document.getElementById('upload-progress-track');
+  const uploadProgressBar = document.getElementById('upload-progress-bar');
   let currentListingPath = '/';
 
 function pageUrl(nextPath) {
   const url = new URL(basePrefix + '/lease/' + encodeURIComponent(leaseId), location.origin);
   if (nextPath && nextPath !== '/') url.searchParams.set('path', nextPath);
-  if (token) url.searchParams.set('token', token);
   return url.pathname + url.search;
 }
 
@@ -3114,6 +3639,29 @@ function parentPath(inputPath) {
   return parts.length === 0 ? '/' : '/' + parts.join('/');
 }
 
+function renderCrumbs(inputPath) {
+  const parts = (inputPath || '/').split('/').filter(Boolean);
+  const nodes = [];
+  const root = document.createElement(parts.length ? 'a' : 'span');
+  root.textContent = 'Shared folder';
+  root.className = parts.length ? '' : 'current';
+  if (parts.length) root.href = pageUrl('/');
+  nodes.push(root);
+  let current = '';
+  for (const part of parts) {
+    current += '/' + part;
+    const sep = document.createElement('span');
+    sep.className = 'sep';
+    sep.textContent = '/';
+    const node = document.createElement(current === inputPath ? 'span' : 'a');
+    node.textContent = part;
+    node.className = current === inputPath ? 'current' : '';
+    if (current !== inputPath) node.href = pageUrl(current);
+    nodes.push(sep, node);
+  }
+  crumbs.replaceChildren(...nodes);
+}
+
 function uploadUrl(fileName) {
   const parts = currentListingPath.split('/').filter(Boolean);
   parts.push(fileName);
@@ -3121,6 +3669,82 @@ function uploadUrl(fileName) {
   const url = new URL(basePrefix + '/lease/' + encodeURIComponent(leaseId) + '/files/' + encodedPath, location.origin);
   if (token) url.searchParams.set('token', token);
   return url.pathname + url.search;
+}
+
+function formatBytes(value) {
+  if (!value) return '0 bytes';
+  const units = ['bytes', 'KB', 'MB', 'GB', 'TB'];
+  let size = Number(value);
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size = size / 1024;
+    unit += 1;
+  }
+  const display = unit === 0 ? String(Math.round(size)) : size.toFixed(size >= 10 ? 1 : 2).replace(/\\.0+$/, '');
+  return display + ' ' + units[unit];
+}
+
+function iconFor(type) {
+  if (type === 'directory') {
+    return '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
+  }
+  return '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>';
+}
+
+async function uploadFailureMessage(response, fileName) {
+  let detail = '';
+  try { detail = await response.text(); } catch (_) { /* no response body */ }
+  if (response.status === 413) return 'Upload failed: ' + fileName + ' is too large for this public relay.';
+  if (response.status === 401) return 'Upload failed: this link token is missing or invalid.';
+  if (response.status === 403) return 'Upload failed: this link does not allow uploads.';
+  if (response.status === 404) return 'Upload failed: the shared folder is unavailable.';
+  if (response.status === 409) return 'Upload failed: a file with that name already exists.';
+  return 'Upload failed: ' + fileName + ' (HTTP ' + response.status + (detail ? ' - ' + detail.slice(0, 120) : '') + ')';
+}
+
+function uploadNetworkFailureMessage() {
+  return 'Upload failed before reaching mvmt. Check the relay or network connection.';
+}
+
+function showUploadProgress(message, percent) {
+  upload.classList.add('uploading');
+  uploadProgress.classList.remove('hidden', 'done', 'error');
+  uploadStatusText.textContent = message;
+  status.textContent = '';
+  if (typeof percent === 'number' && Number.isFinite(percent)) {
+    uploadProgressTrack.classList.remove('indeterminate');
+    uploadProgressBar.style.width = Math.max(4, Math.min(100, percent)) + '%';
+  } else {
+    uploadProgressTrack.classList.add('indeterminate');
+    uploadProgressBar.style.width = '';
+  }
+}
+
+function showUploadDone(message) {
+  upload.classList.remove('uploading');
+  uploadProgress.classList.remove('hidden', 'error');
+  uploadProgress.classList.add('done');
+  uploadProgressTrack.classList.remove('indeterminate');
+  uploadProgressBar.style.width = '100%';
+  uploadStatusText.textContent = message;
+  status.textContent = '';
+}
+
+function showUploadError(message) {
+  upload.classList.remove('uploading');
+  uploadProgress.classList.remove('hidden', 'done');
+  uploadProgress.classList.add('error');
+  uploadProgressTrack.classList.remove('indeterminate');
+  uploadProgressBar.style.width = '100%';
+  uploadStatusText.textContent = message;
+  status.textContent = '';
+}
+
+function xhrResponse(xhr) {
+  return {
+    status: xhr.status,
+    text: async function() { return xhr.responseText || ''; },
+  };
 }
 
 async function loadListing() {
@@ -3136,25 +3760,29 @@ async function loadListing() {
 	  const listing = await response.json();
 	  currentListingPath = listing.path || '/';
 	  title.textContent = listing.label || 'Folder lease';
-	  meta.textContent = (listing.path || '/') + (listing.expiresAt ? ' - expires ' + listing.expiresAt : '');
+	  meta.textContent = (listing.path || '/') + (listing.expiresAt ? ' - expires ' + new Date(listing.expiresAt).toLocaleString() : '');
 	  upload.classList.toggle('hidden', !listing.canUpload);
-	  if (listing.path && listing.path !== '/') {
-    const link = document.createElement('a');
-    link.href = pageUrl(parentPath(listing.path));
-    link.textContent = '..';
-    parent.replaceChildren(link);
-  }
+  renderCrumbs(listing.path || '/');
+  empty.classList.toggle('hidden', listing.entries.length > 0);
   entries.replaceChildren(...listing.entries.map((entry) => {
     const row = document.createElement('tr');
     const nameCell = document.createElement('td');
+    const nameWrap = document.createElement('div');
+    nameWrap.className = 'name';
+    nameWrap.innerHTML = iconFor(entry.type);
     const link = document.createElement('a');
     link.href = entry.type === 'directory' ? pageUrl(entry.path) : fileUrl(entry.path);
     link.textContent = entry.name;
-    nameCell.append(link);
+    nameWrap.append(link);
+    nameCell.append(nameWrap);
     const typeCell = document.createElement('td');
-    typeCell.textContent = entry.type;
+    typeCell.className = 'kind';
+    typeCell.setAttribute('data-label', 'Type');
+    typeCell.textContent = entry.type === 'directory' ? 'Folder' : 'File';
     const sizeCell = document.createElement('td');
-    sizeCell.textContent = entry.type === 'directory' ? '' : String(entry.size);
+    sizeCell.className = 'bytes';
+    sizeCell.setAttribute('data-label', 'Size');
+    sizeCell.textContent = entry.type === 'directory' ? '--' : formatBytes(entry.size);
     row.append(nameCell, typeCell, sizeCell);
     return row;
 	  }));
@@ -3163,21 +3791,57 @@ async function loadListing() {
 	async function uploadFiles(fileList) {
 	  const files = Array.from(fileList || []);
 	  if (files.length === 0) return;
+	  let uploaded = 0;
 	  for (const file of files) {
-	    status.textContent = 'Uploading ' + file.name + '...';
-	    const response = await fetch(uploadUrl(file.name), { method: 'PUT', body: file });
-	    if (!response.ok) {
-	      status.textContent = 'Upload failed: ' + file.name;
+	    try {
+	      await uploadFile(file);
+	      uploaded += 1;
+	    } catch (error) {
+	      showUploadError(error instanceof Error ? error.message : uploadNetworkFailureMessage());
 	      return;
 	    }
 	  }
 	  uploadInput.value = '';
-	  status.textContent = 'Upload complete.';
+	  showUploadDone(uploaded === 1 ? 'Upload complete.' : 'Uploaded ' + uploaded + ' files.');
 	  await loadListing();
 	}
 
+	function uploadFile(file) {
+	  return new Promise((resolve, reject) => {
+	    const xhr = new XMLHttpRequest();
+	    xhr.open('PUT', uploadUrl(file.name));
+	    xhr.upload.addEventListener('loadstart', () => {
+	      showUploadProgress('Uploading ' + file.name + '...', undefined);
+	    });
+	    xhr.upload.addEventListener('progress', (event) => {
+	      if (event.lengthComputable && event.total > 0) {
+	        const percent = Math.round((event.loaded / event.total) * 100);
+	        showUploadProgress('Uploading ' + file.name + ' (' + percent + '%)', percent);
+	      } else {
+	        showUploadProgress('Uploading ' + file.name + '...', undefined);
+	      }
+	    });
+	    xhr.addEventListener('load', () => {
+	      if (xhr.status >= 200 && xhr.status < 300) {
+	        showUploadProgress('Finishing ' + file.name + '...', 100);
+	        resolve();
+	        return;
+	      }
+	      uploadFailureMessage(xhrResponse(xhr), file.name).then((message) => {
+	        reject(new Error(message));
+	      }, () => {
+	        reject(new Error('Upload failed: ' + file.name));
+	      });
+	    });
+	    xhr.addEventListener('error', () => reject(new Error(uploadNetworkFailureMessage())));
+	    xhr.addEventListener('abort', () => reject(new Error('Upload canceled: ' + file.name)));
+	    showUploadProgress('Uploading ' + file.name + '...', undefined);
+	    xhr.send(file);
+	  });
+	}
+
 	uploadInput.addEventListener('change', () => uploadFiles(uploadInput.files).catch(() => {
-	  status.textContent = 'Upload failed.';
+	  showUploadError(uploadNetworkFailureMessage());
 	}));
 	upload.addEventListener('dragover', (event) => {
 	  event.preventDefault();
@@ -3190,7 +3854,7 @@ async function loadListing() {
 	  event.preventDefault();
 	  upload.classList.remove('drag');
 	  uploadFiles(event.dataTransfer.files).catch(() => {
-	    status.textContent = 'Upload failed.';
+	    showUploadError(uploadNetworkFailureMessage());
 	  });
 	});
 
@@ -3208,19 +3872,59 @@ const LEASE_UPLOAD_PAGE_HTML = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>mvmt upload lease</title>
 <style>
-body{font-family:ui-sans-serif,system-ui,sans-serif;margin:2rem;max-width:720px}
-.drop{border:2px dashed #bbb;border-radius:8px;padding:2rem;text-align:center}
-.meta,.status{color:#666}
-button{padding:.55rem .8rem}
+:root{--bg:#f5f6f8;--panel:#fff;--text:#0f172a;--text-2:#475569;--muted:#94a3b8;--border:#e4e7ec;--accent:#0f766e;--accent-2:#115e59;--ok:#15803d;--ok-soft:#dcfce7;--danger:#b91c1c;--shadow:0 1px 2px rgba(15,23,42,.04),0 1px 3px rgba(15,23,42,.04)}
+*,*::before,*::after{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+.top{height:52px;background:#fff;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;padding:0 1.25rem;position:sticky;top:0;z-index:5}
+.brand{display:flex;align-items:center;gap:.5rem;font-weight:700}
+.brand .dot{width:.55rem;height:.55rem;border-radius:50%;background:var(--accent)}
+.badge{display:inline-flex;align-items:center;padding:.16rem .55rem;border-radius:999px;font-size:.7rem;font-weight:650;letter-spacing:.04em;text-transform:uppercase;border:1px solid #bbf7d0;background:var(--ok-soft);color:var(--ok)}
+main{max-width:720px;margin:0 auto;padding:1.25rem}
+.hero{margin:.3rem 0 1rem}
+h1{font-size:1.6rem;line-height:1.1;margin:0;font-weight:700;letter-spacing:-.02em}
+.meta{margin:.45rem 0 0;color:var(--text-2)}
+.card{background:#fff;border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow);overflow:hidden}
+.drop{border:1px dashed #94a3b8;border-radius:12px;margin:1rem;padding:2rem;text-align:center;background:#f8fafc}
+.drop.drag{border-color:var(--accent);background:#ecfdf5}
+.drop.uploading{border-color:var(--accent);background:#ecfdf5;box-shadow:inset 0 0 0 1px rgba(15,118,110,.15)}
+.drop strong{display:block;font-size:1rem;margin-bottom:.35rem}
+.status{color:var(--text-2);margin:.65rem 0 0}
+.upload-progress{max-width:28rem;margin:1rem auto 0;text-align:left}
+.upload-status{display:flex;align-items:center;gap:.55rem;font-weight:700;color:var(--text);margin-bottom:.55rem}
+.spinner{width:1rem;height:1rem;border:2px solid #cbd5e1;border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;flex:none}
+.progress{height:.55rem;border-radius:999px;background:#e2e8f0;overflow:hidden}
+.bar{height:100%;width:0%;border-radius:999px;background:var(--accent);transition:width .15s ease}
+.progress.indeterminate .bar{width:35%;animation:progress-slide 1s ease-in-out infinite}
+.upload-progress.done .spinner,.upload-progress.error .spinner{display:none}
+.upload-progress.error .bar{background:var(--danger)}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes progress-slide{0%{transform:translateX(-120%)}100%{transform:translateX(320%)}}
+input{max-width:100%}
+@media (max-width:640px){.top{padding:0 .85rem}.brand span:last-child{display:none}main{padding:.75rem}.card{border-radius:10px}.drop{margin:.75rem;padding:1.25rem}}
 </style>
 </head>
 <body>
-<h1>Upload files</h1>
-<p class="meta">Upload-only lease</p>
-<div class="drop">
-  <input id="files" type="file" multiple>
-  <p class="status" id="status">Choose files or drop them here.</p>
-</div>
+<header class="top">
+  <div class="brand"><span class="dot"></span><span>mvmt</span></div>
+  <span class="badge">Upload only</span>
+</header>
+<main>
+  <section class="hero">
+    <h1>Upload files</h1>
+    <p class="meta">Upload-only lease</p>
+  </section>
+  <section class="card">
+    <div class="drop">
+      <strong>Upload to this folder</strong>
+      <input id="files" type="file" multiple>
+      <div class="upload-progress hidden" id="upload-progress" aria-live="polite">
+        <div class="upload-status"><span class="spinner"></span><span id="upload-status-text">Uploading...</span></div>
+        <div class="progress" id="upload-progress-track"><div class="bar" id="upload-progress-bar"></div></div>
+      </div>
+      <p class="status" id="status">Choose files or drop them here.</p>
+    </div>
+  </section>
+</main>
 <script>
 const pathParts = location.pathname.split('/').filter(Boolean);
 // Mirror the lease browser page: anchor on 'lease' so the id and any
@@ -3229,35 +3933,141 @@ const leaseIdx = pathParts.indexOf('lease');
 const leaseId = leaseIdx >= 0 ? decodeURIComponent(pathParts[leaseIdx + 1] || '') : '';
 const basePrefix = leaseIdx > 0 ? '/' + pathParts.slice(0, leaseIdx).join('/') : '';
 const params = new URLSearchParams(location.search);
-const token = params.get('token') || params.get('t') || '';
+const tokenKey = 'mvmt_lease_token_' + leaseId;
+let token = params.get('token') || params.get('t') || sessionStorage.getItem(tokenKey) || '';
+if (token) sessionStorage.setItem(tokenKey, token);
+if (params.has('token') || params.has('t')) {
+  const clean = new URL(location.href);
+  clean.searchParams.delete('token');
+  clean.searchParams.delete('t');
+  history.replaceState(null, '', clean.pathname + clean.search);
+}
 const drop = document.querySelector('.drop');
 const input = document.getElementById('files');
 const status = document.getElementById('status');
+const uploadProgress = document.getElementById('upload-progress');
+const uploadStatusText = document.getElementById('upload-status-text');
+const uploadProgressTrack = document.getElementById('upload-progress-track');
+const uploadProgressBar = document.getElementById('upload-progress-bar');
 function uploadPath(name) {
-  return basePrefix + '/lease/' + encodeURIComponent(leaseId) + '/files/' + encodeURIComponent(name) + '?token=' + encodeURIComponent(token);
+  const url = new URL(basePrefix + '/lease/' + encodeURIComponent(leaseId) + '/files/' + encodeURIComponent(name), location.origin);
+  if (token) url.searchParams.set('token', token);
+  return url.pathname + url.search;
+}
+async function uploadFailureMessage(response, fileName) {
+  let detail = '';
+  try { detail = await response.text(); } catch (_) { /* no response body */ }
+  if (response.status === 413) return 'Upload failed: ' + fileName + ' is too large for this public relay.';
+  if (response.status === 401) return 'Upload failed: this link token is missing or invalid.';
+  if (response.status === 403) return 'Upload failed: this link does not allow uploads.';
+  if (response.status === 404) return 'Upload failed: the shared folder is unavailable.';
+  if (response.status === 409) return 'Upload failed: a file with that name already exists.';
+  return 'Upload failed: ' + fileName + ' (HTTP ' + response.status + (detail ? ' - ' + detail.slice(0, 120) : '') + ')';
+}
+function uploadNetworkFailureMessage() {
+  return 'Upload failed before reaching mvmt. Check the relay or network connection.';
+}
+function showUploadProgress(message, percent) {
+  drop.classList.add('uploading');
+  uploadProgress.classList.remove('hidden', 'done', 'error');
+  uploadStatusText.textContent = message;
+  status.textContent = '';
+  if (typeof percent === 'number' && Number.isFinite(percent)) {
+    uploadProgressTrack.classList.remove('indeterminate');
+    uploadProgressBar.style.width = Math.max(4, Math.min(100, percent)) + '%';
+  } else {
+    uploadProgressTrack.classList.add('indeterminate');
+    uploadProgressBar.style.width = '';
+  }
+}
+function showUploadDone(message) {
+  drop.classList.remove('uploading');
+  uploadProgress.classList.remove('hidden', 'error');
+  uploadProgress.classList.add('done');
+  uploadProgressTrack.classList.remove('indeterminate');
+  uploadProgressBar.style.width = '100%';
+  uploadStatusText.textContent = message;
+  status.textContent = '';
+}
+function showUploadError(message) {
+  drop.classList.remove('uploading');
+  uploadProgress.classList.remove('hidden', 'done');
+  uploadProgress.classList.add('error');
+  uploadProgressTrack.classList.remove('indeterminate');
+  uploadProgressBar.style.width = '100%';
+  uploadStatusText.textContent = message;
+  status.textContent = '';
+}
+function xhrResponse(xhr) {
+  return {
+    status: xhr.status,
+    text: async function() { return xhr.responseText || ''; },
+  };
 }
 async function uploadFiles(files) {
-  for (const file of files) {
-    status.textContent = 'Uploading ' + file.name + '...';
-    const response = await fetch(uploadPath(file.name), { method: 'PUT', body: file });
-    if (!response.ok) {
-      status.textContent = 'Upload failed: ' + file.name;
+  const selectedFiles = Array.from(files || []);
+  if (selectedFiles.length === 0) return;
+  let uploaded = 0;
+  for (const file of selectedFiles) {
+    try {
+      await uploadFile(file);
+      uploaded += 1;
+    } catch (error) {
+      showUploadError(error instanceof Error ? error.message : uploadNetworkFailureMessage());
       return;
     }
   }
-  status.textContent = 'Upload complete.';
+  showUploadDone(uploaded === 1 ? 'Upload complete.' : 'Uploaded ' + uploaded + ' files.');
   input.value = '';
 }
+function uploadFile(file) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', uploadPath(file.name));
+    xhr.upload.addEventListener('loadstart', () => {
+      showUploadProgress('Uploading ' + file.name + '...', undefined);
+    });
+    xhr.upload.addEventListener('progress', (event) => {
+      if (event.lengthComputable && event.total > 0) {
+        const percent = Math.round((event.loaded / event.total) * 100);
+        showUploadProgress('Uploading ' + file.name + ' (' + percent + '%)', percent);
+      } else {
+        showUploadProgress('Uploading ' + file.name + '...', undefined);
+      }
+    });
+    xhr.addEventListener('load', () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        showUploadProgress('Finishing ' + file.name + '...', 100);
+        resolve();
+        return;
+      }
+      uploadFailureMessage(xhrResponse(xhr), file.name).then((message) => {
+        reject(new Error(message));
+      }, () => {
+        reject(new Error('Upload failed: ' + file.name));
+      });
+    });
+    xhr.addEventListener('error', () => reject(new Error(uploadNetworkFailureMessage())));
+    xhr.addEventListener('abort', () => reject(new Error('Upload canceled: ' + file.name)));
+    showUploadProgress('Uploading ' + file.name + '...', undefined);
+    xhr.send(file);
+  });
+}
 input.addEventListener('change', () => uploadFiles(input.files).catch(() => {
-  status.textContent = 'Upload failed.';
+  showUploadError(uploadNetworkFailureMessage());
 }));
 drop.addEventListener('dragover', (event) => {
   event.preventDefault();
+  drop.classList.add('drag');
+});
+drop.addEventListener('dragleave', () => {
+  drop.classList.remove('drag');
 });
 drop.addEventListener('drop', (event) => {
   event.preventDefault();
+  drop.classList.remove('drag');
   uploadFiles(event.dataTransfer.files).catch(() => {
-    status.textContent = 'Upload failed.';
+    showUploadError(uploadNetworkFailureMessage());
   });
 });
 </script>

@@ -247,6 +247,7 @@ function createRelayWebSocket(socket: net.Socket | tls.TLSSocket, initial: Buffe
   const messageListeners = new Set<(message: string) => void>();
   const closeListeners = new Set<() => void>();
   let closeNotified = false;
+  let textFragments: Buffer[] | undefined;
 
   const notifyClose = () => {
     if (closeNotified) return;
@@ -260,8 +261,20 @@ function createRelayWebSocket(socket: net.Socket | tls.TLSSocket, initial: Buffe
       if (!parsed) return;
       buffer = buffer.slice(parsed.consumed);
       if (parsed.opcode === 0x1) {
-        const message = parsed.payload.toString('utf8');
-        for (const listener of messageListeners) listener(message);
+        if (parsed.fin) {
+          const message = parsed.payload.toString('utf8');
+          for (const listener of messageListeners) listener(message);
+        } else {
+          textFragments = [parsed.payload];
+        }
+      } else if (parsed.opcode === 0x0) {
+        if (!textFragments) continue;
+        textFragments.push(parsed.payload);
+        if (parsed.fin) {
+          const message = Buffer.concat(textFragments).toString('utf8');
+          textFragments = undefined;
+          for (const listener of messageListeners) listener(message);
+        }
       } else if (parsed.opcode === 0x8) {
         socket.end();
         notifyClose();
@@ -301,8 +314,9 @@ function createRelayWebSocket(socket: net.Socket | tls.TLSSocket, initial: Buffe
   };
 }
 
-function parseWebSocketFrame(buffer: Buffer): { opcode: number; payload: Buffer; consumed: number } | undefined {
+function parseWebSocketFrame(buffer: Buffer): { fin: boolean; opcode: number; payload: Buffer; consumed: number } | undefined {
   if (buffer.length < 2) return undefined;
+  const fin = Boolean(buffer[0]! & 0x80);
   const opcode = buffer[0]! & 0x0f;
   const masked = Boolean(buffer[1]! & 0x80);
   let length = buffer[1]! & 0x7f;
@@ -327,7 +341,7 @@ function parseWebSocketFrame(buffer: Buffer): { opcode: number; payload: Buffer;
     const mask = buffer.slice(maskOffset, maskOffset + 4);
     for (let i = 0; i < payload.length; i += 1) payload[i] = payload[i]! ^ mask[i % 4]!;
   }
-  return { opcode, payload, consumed: offset + length };
+  return { fin, opcode, payload, consumed: offset + length };
 }
 
 function encodeWebSocketFrame(payload: Buffer, opcode: number): Buffer {

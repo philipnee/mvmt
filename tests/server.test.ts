@@ -18,6 +18,7 @@ import { TextContextIndex } from '../src/context/text-index.js';
 import { OAuthStore } from '../src/server/oauth.js';
 import { ToolRouter } from '../src/server/router.js';
 import { addLeaseResources, createLease, listLeases, revokeLease } from '../src/lease/store.js';
+import { findLeaseSecret, leaseSecretsPathForLeaseStore } from '../src/lease/secrets.js';
 import { createPrivilegedUser, removePrivilegedUser } from '../src/dashboard/users.js';
 import { createAuditLogger } from '../src/utils/audit.js';
 import { hashApiToken } from '../src/utils/api-token-hash.js';
@@ -292,10 +293,15 @@ describe('folder lease access', () => {
       expect(readPage.status).toBe(200);
       const readHtml = await readPage.text();
       expect(readHtml).toContain('Folder lease');
+      expect(readHtml).toContain("sessionStorage.setItem(tokenKey, token)");
+      expect(readHtml).toContain("history.replaceState(null, '', clean.pathname + clean.search)");
       expect(readHtml).not.toContain('&lt;img src=x onerror=alert(1)&gt; Sarah');
       expect(readHtml).not.toContain('report &amp; &lt;draft&gt;.txt');
       expect(readHtml).not.toContain('<img src=x onerror=alert(1)>');
       expect(readHtml).not.toContain('</script><img');
+      for (const body of inlineScriptBodies(readHtml)) {
+        expect(() => new Function(body)).not.toThrow();
+      }
 
       const uploadPage = await fetch(`http://127.0.0.1:${server.port}/lease/${uploadLease.record.id}?token=${unsafeQuery}`, {
         headers: { Authorization: `Bearer     ${uploadLease.token}` },
@@ -303,9 +309,20 @@ describe('folder lease access', () => {
       expect(uploadPage.status).toBe(200);
       const uploadHtml = await uploadPage.text();
       expect(uploadHtml).toContain('Upload-only lease');
+      expect(uploadHtml).toContain("sessionStorage.setItem(tokenKey, token)");
+      expect(uploadHtml).toContain('is too large for this public relay');
+      expect(uploadHtml).toContain('Upload failed before reaching mvmt');
+      expect(uploadHtml).toContain('id="upload-progress"');
+      expect(uploadHtml).toContain('id="upload-progress-bar"');
+      expect(uploadHtml).toContain('function showUploadProgress(message, percent)');
+      expect(uploadHtml).toContain('new XMLHttpRequest()');
+      expect(uploadHtml).toContain("showUploadProgress('Uploading ' + file.name + ' (' + percent + '%)', percent)");
       expect(uploadHtml).not.toContain('&lt;img src=x onerror=alert(1)&gt; Sarah');
       expect(uploadHtml).not.toContain('</script><img');
       expect(uploadHtml).not.toContain('token = "</script>');
+      for (const body of inlineScriptBodies(uploadHtml)) {
+        expect(() => new Function(body)).not.toThrow();
+      }
     } finally {
       await server.close();
       fs.rmSync(tmp, { recursive: true, force: true });
@@ -453,6 +470,12 @@ describe('folder lease access', () => {
       expect(readUploadHtml).toContain('Upload to this folder');
       expect(readUploadHtml.indexOf('function uploadUrl(fileName)')).toBeLessThan(readUploadHtml.indexOf('async function loadListing()'));
       expect(readUploadHtml).toContain("uploadInput.addEventListener('change', () => uploadFiles(uploadInput.files).catch");
+      expect(readUploadHtml).toContain('is too large for this public relay');
+      expect(readUploadHtml).toContain('Upload failed before reaching mvmt');
+      expect(readUploadHtml).toContain('id="upload-progress"');
+      expect(readUploadHtml).toContain('id="upload-progress-bar"');
+      expect(readUploadHtml).toContain('function showUploadProgress(message, percent)');
+      expect(readUploadHtml).toContain('new XMLHttpRequest()');
       const readUploadListing = await fetch(`http://127.0.0.1:${server.port}/lease/${readUploadLease.record.id}/files?token=${readUploadLease.token}`);
       expect(((await readUploadListing.json()) as { canUpload: boolean }).canUpload).toBe(true);
 
@@ -591,6 +614,12 @@ describe('dashboard access', () => {
       expect(readLease.status).toBe(201);
       const readBody = await readLease.json() as { lease: { id: string; url: string; permissions: string[] } };
       expect(readBody.lease.permissions).toEqual(['read']);
+      const listedLeases = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases`, {
+        headers: { Cookie: cookie },
+      });
+      expect(listedLeases.status).toBe(200);
+      const listedBody = await listedLeases.json() as { leases: { id: string; url?: string }[] };
+      expect(listedBody.leases.find((lease) => lease.id === readBody.lease.id)?.url).toBe(readBody.lease.url);
 
       // 'write' mode is no longer accepted by the dashboard.
       const writeBlocked = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases`, {
@@ -676,6 +705,7 @@ describe('dashboard access', () => {
       });
       expect(revoke.status).toBe(200);
       expect(listLeases(leaseStorePath).find((lease) => lease.id === readBody.lease.id)?.revokedAt).toBeTruthy();
+      expect(findLeaseSecret(leaseSecretsPathForLeaseStore(leaseStorePath), readBody.lease.id)).toBeUndefined();
     } finally {
       await server.close();
       fs.rmSync(tmp, { recursive: true, force: true });
@@ -703,6 +733,7 @@ describe('dashboard access', () => {
       leaseMounts: () => readConfig(configPath).mounts,
       leaseStorePath,
       privilegedUsersPath: usersPath,
+      localPathPicker: async (kind) => kind === 'folder' ? mountRoot : path.join(mountRoot, 'one.txt'),
     });
     try {
       const cookie = await loginDashboard(server.port, 'admin', 'correct horse battery staple');
@@ -711,6 +742,24 @@ describe('dashboard access', () => {
       const initialBody = await initialMounts.json() as { canManage: boolean; mounts: unknown[] };
       expect(initialBody.canManage).toBe(true);
       expect(initialBody.mounts).toEqual([]);
+
+      const missingRoot = path.join(tmp, 'missing');
+      const invalidAdd = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/mounts`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ root: missingRoot, path: '/missing' }),
+      });
+      expect(invalidAdd.status).toBe(400);
+      expect(await invalidAdd.json()).toMatchObject({ error: 'invalid_root' });
+      expect(readConfig(configPath).mounts).toEqual([]);
+
+      const pickedFolder = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/local-path-picker`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: 'folder' }),
+      });
+      expect(pickedFolder.status).toBe(200);
+      expect(await pickedFolder.json()).toEqual({ path: mountRoot });
 
       const add = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/mounts`, {
         method: 'POST',
@@ -750,12 +799,116 @@ describe('dashboard access', () => {
       expect(editBody.mount.writeAccess).toBe(true);
       expect(editBody.mount.description).toBe('family photos');
 
+      const invalidEdit = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/mounts/${encodeURIComponent(addBody.mount.name)}`, {
+        method: 'PATCH',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ root: missingRoot }),
+      });
+      expect(invalidEdit.status).toBe(400);
+      expect(await invalidEdit.json()).toMatchObject({ error: 'invalid_root' });
+
       const remove = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/mounts/${encodeURIComponent(addBody.mount.name)}`, {
         method: 'DELETE',
         headers: { Cookie: cookie },
       });
       expect(remove.status).toBe(200);
       expect(readConfig(configPath).mounts).toEqual([]);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('shows stale root sources to local admins so they can remove them', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-stale-mount-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const leaseStorePath = path.join(tmp, '.leases.json');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    const configPath = path.join(tmp, 'config.yaml');
+    const liveRoot = path.join(tmp, 'live');
+    const missingRoot = path.join(tmp, 'missing');
+    fs.mkdirSync(liveRoot, { recursive: true });
+    createPrivilegedUser(usersPath, { username: 'admin', password: 'correct horse battery staple', admin: true });
+    await saveConfig(configPath, parseConfig({
+      version: 1,
+      mounts: [
+        { name: 'live', type: 'local_folder', path: '/live', root: liveRoot },
+        { name: 'gone', type: 'local_folder', path: '/gone', root: missingRoot },
+      ],
+    }));
+
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      configPath,
+      leaseMounts: () => readConfig(configPath).mounts,
+      leaseStorePath,
+      privilegedUsersPath: usersPath,
+    });
+    try {
+      const cookie = await loginDashboard(server.port, 'admin', 'correct horse battery staple');
+      const listing = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/files?path=/`, {
+        headers: { Cookie: cookie },
+      });
+      expect(listing.status).toBe(200);
+      const body = await listing.json() as { entries: { path: string; unavailable?: boolean }[] };
+      expect(body.entries).toEqual(expect.arrayContaining([
+        expect.objectContaining({ path: '/live' }),
+        expect.objectContaining({ path: '/gone', unavailable: true }),
+      ]));
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps source management local-only for remote dashboard sessions', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-remote-local-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const leaseStorePath = path.join(tmp, '.leases.json');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    const configPath = path.join(tmp, 'config.yaml');
+    const mountRoot = path.join(tmp, 'photos');
+    fs.mkdirSync(mountRoot, { recursive: true });
+    createPrivilegedUser(usersPath, { username: 'admin', password: 'correct horse battery staple', admin: true });
+    await saveConfig(configPath, parseConfig({
+      version: 1,
+      mounts: [{ name: 'photos', type: 'local_folder', path: '/photos', root: mountRoot, writeAccess: true }],
+    }));
+
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      configPath,
+      leaseMounts: () => readConfig(configPath).mounts,
+      leaseStorePath,
+      privilegedUsersPath: usersPath,
+    });
+    try {
+      const cookie = await loginDashboard(server.port, 'admin', 'correct horse battery staple');
+      const remoteHeaders = { Cookie: cookie, 'X-MVMT-Transport': 'relay' };
+
+      const me = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/me`, { headers: remoteHeaders });
+      expect(me.status).toBe(200);
+      expect(((await me.json()) as { localOwner: boolean }).localOwner).toBe(false);
+
+      const mounts = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/mounts`, { headers: remoteHeaders });
+      expect(mounts.status).toBe(200);
+      const mountsBody = await mounts.json() as { canManage: boolean; mounts: { root?: string }[] };
+      expect(mountsBody.canManage).toBe(false);
+      expect(mountsBody.mounts[0]?.root).toBeUndefined();
+
+      const status = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/status`, { headers: remoteHeaders });
+      expect(status.status).toBe(403);
+      expect((await status.json()) as { error: string }).toEqual({ error: 'local_dashboard_required' });
+
+      const blocked = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/mounts`, {
+        method: 'POST',
+        headers: { ...remoteHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ root: mountRoot, path: '/blocked' }),
+      });
+      expect(blocked.status).toBe(403);
+      expect((await blocked.json()) as { error: string }).toEqual({ error: 'local_dashboard_required' });
     } finally {
       await server.close();
       fs.rmSync(tmp, { recursive: true, force: true });
@@ -795,6 +948,7 @@ describe('dashboard access', () => {
       const originalUrl = new URL(createBody.lease.url);
       const originalToken = originalUrl.searchParams.get('token');
       expect(originalToken).toBeTruthy();
+      expect(findLeaseSecret(leaseSecretsPathForLeaseStore(leaseStorePath), createBody.lease.id)?.token).toBe(originalToken);
 
       const rotate = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases/${encodeURIComponent(createBody.lease.id)}/rotate`, {
         method: 'POST',
@@ -807,6 +961,7 @@ describe('dashboard access', () => {
       const newToken = newUrl.searchParams.get('token');
       expect(newToken).toBeTruthy();
       expect(newToken).not.toBe(originalToken);
+      expect(findLeaseSecret(leaseSecretsPathForLeaseStore(leaseStorePath), createBody.lease.id)?.token).toBe(newToken);
 
       const oldFetch = await fetch(`${originalUrl.origin}/lease/${createBody.lease.id}/files?token=${originalToken}`);
       expect(oldFetch.status).toBe(401);
@@ -1159,22 +1314,39 @@ describe('dashboard access', () => {
       expect(html).toContain('id="crumbs"');
       expect(html).toContain('data-test="lease-tabs"');
       expect(html).toContain('id="add-mount"');
-      expect(html).toContain('Sources');
+      expect(html).toContain('id="mount-pick-folder"');
+      expect(html).toContain('id="mount-pick-file"');
+      expect(html).toContain('data-view="files"');
+      expect(html).toContain('id="files-grid"');
+      expect(html).toContain('id="share-selected"');
+      expect(html).toContain('id="settings-nav"');
       expect(html).toContain('Shared links');
       expect(html).toContain('id="mount-modal"');
       expect(html).toContain('id="lease-modal"');
-      expect(html).toContain('id="lease-tiles"');
+      expect(html).toContain('id="context-menu"');
+      expect(html).toContain('id="context-rename-source"');
+      expect(html).toContain('id="context-remove-source"');
+      expect(html).toContain('id="properties-modal"');
+      expect(html).toContain('id="lease-mode"');
       expect(html).toContain('id="copy-url"');
       expect(html).toContain('<section id="login" class="panel login-card">');
       expect(html).toContain('@media (max-width:640px)');
       expect(html).toContain("setAttribute('data-label', 'Actions')");
-      expect(html).toContain('data-mode="upload"');
-      expect(html).toContain('data-mode="two-way"');
+      expect(html).toContain('<option value="upload">Upload only</option>');
+      expect(html).toContain('<option value="two-way">Read and upload</option>');
       expect(html).toContain('function scrubDashboardUrl()');
       expect(html).toContain("history.replaceState(null, '', location.pathname)");
       expect(html).toContain("var DASHBOARD_API_PREFIX = '/dashboard/api/'");
       expect(html).toContain('function dashboardRequestUrl(url)');
       expect(html).toContain("return dashboardBasePath() + '/api/' + url.slice(DASHBOARD_API_PREFIX.length)");
+      expect(html).toContain("api('/dashboard/api/local-path-picker'");
+      expect(html).toContain('Choose a local file or folder first.');
+      expect(html).toContain('Remove source');
+      expect(html).toContain('Rename source');
+      expect(html).toContain('Replace link');
+      expect(html).toContain('You can copy this link again from the dashboard');
+      expect(html).not.toContain('id="add-mount-settings"');
+      expect(html).not.toContain('id="mounts-wrap"');
       expect(html).not.toContain('...(opts.headers || {})');
       expect(html).not.toContain('60_000');
 
