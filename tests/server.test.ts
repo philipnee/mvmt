@@ -3047,6 +3047,22 @@ describe('startHttpServer lifecycle', () => {
       expect(authMeta.authorization_endpoint).toBe(`${base}/authorize`);
       expect(authMeta.token_endpoint).toBe(`${base}/token`);
       expect(authMeta.registration_endpoint).toBe(`${base}/register`);
+
+      // Step 4: the approval page form must POST relatively. An absolute
+      // action="/authorize" would submit to the relay root and 404.
+      const sessionToken = fs.readFileSync(tokenPath, 'utf-8').trim();
+      await fetch(`http://127.0.0.1:${server.port}/register`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${sessionToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client_id: 'test-client', redirect_uris: ['https://client.example/callback'] }),
+      });
+      const approvalPage = await (await fetch(
+        `http://127.0.0.1:${server.port}/authorize?response_type=code&client_id=test-client`
+        + `&redirect_uri=https%3A%2F%2Fclient.example%2Fcallback&resource=${encodeURIComponent(`${base}/mcp`)}`
+        + `&code_challenge=secret-challenge&code_challenge_method=S256`,
+      )).text();
+      expect(approvalPage).toContain('<form method="POST" action="authorize">');
+      expect(approvalPage).not.toContain('action="/authorize"');
     } finally {
       await server.close();
       fs.rmSync(tmp, { recursive: true, force: true });

@@ -805,7 +805,10 @@ export function renderAuthorizePage(params: AuthorizePageParams): string {
     Paste a scoped mvmt API token to approve. Run <code>mvmt token add</code> on the host machine to create one.
   </p>
   ${error}
-  <form method="POST" action="/authorize">
+  <!-- Relative action: the page may be served behind a relay path prefix
+       (e.g. /t/demo/authorize). An absolute "/authorize" would POST to the
+       relay root and 404. "authorize" resolves against the current URL. -->
+  <form method="POST" action="authorize">
     ${hidden('response_type', params.responseType)}
     ${hidden('client_id', params.clientId)}
     ${hidden('redirect_uri', params.redirectUri)}
