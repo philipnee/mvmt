@@ -753,6 +753,24 @@ describe('dashboard access', () => {
       expect(await invalidAdd.json()).toMatchObject({ error: 'invalid_root' });
       expect(readConfig(configPath).mounts).toEqual([]);
 
+      const relativeAdd = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/mounts`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ root: 'relative/path', path: '/relative' }),
+      });
+      expect(relativeAdd.status).toBe(400);
+      expect(await relativeAdd.json()).toMatchObject({ error: 'invalid_root' });
+      expect(readConfig(configPath).mounts).toEqual([]);
+
+      const nulAdd = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/mounts`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ root: `${mountRoot}\0suffix`, path: '/nul' }),
+      });
+      expect(nulAdd.status).toBe(400);
+      expect(await nulAdd.json()).toMatchObject({ error: 'invalid_root' });
+      expect(readConfig(configPath).mounts).toEqual([]);
+
       const pickedFolder = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/local-path-picker`, {
         method: 'POST',
         headers: { Cookie: cookie, 'Content-Type': 'application/json' },

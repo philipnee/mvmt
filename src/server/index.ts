@@ -1915,8 +1915,8 @@ function mountInputFromBody(
   body: Record<string, unknown>,
   existing: readonly { name: string }[],
 ): MountInput | string {
-  const root = typeof body.root === 'string' ? body.root.trim() : '';
-  if (!root) return 'root_required';
+  const root = mountRootFromDashboardValue(body.root, 'root_required');
+  if (root === 'root_required' || root === 'invalid_root') return root;
   const rawName = typeof body.name === 'string' ? body.name.trim() : '';
   const name = rawName || nextAvailableMountName(defaultMountNameFromRoot(root), existing);
   if (!/^[a-z0-9][a-z0-9_-]*$/.test(name)) return 'invalid_name';
@@ -1935,8 +1935,9 @@ function mountInputFromBody(
 function mountPatchFromBody(body: Record<string, unknown>): Partial<MountInput> | string {
   const patch: Partial<MountInput> = {};
   if (body.root !== undefined) {
-    if (typeof body.root !== 'string' || body.root.trim().length === 0) return 'invalid_root';
-    patch.root = body.root.trim();
+    const root = mountRootFromDashboardValue(body.root, 'invalid_root');
+    if (root === 'root_required' || root === 'invalid_root') return 'invalid_root';
+    patch.root = root;
   }
   if (body.path !== undefined) {
     if (typeof body.path !== 'string' || body.path.trim().length === 0) return 'invalid_path';
@@ -1949,9 +1950,31 @@ function mountPatchFromBody(body: Record<string, unknown>): Partial<MountInput> 
   return patch;
 }
 
+function mountRootFromDashboardValue(value: unknown, emptyError: 'root_required' | 'invalid_root'): string | 'root_required' | 'invalid_root' {
+  if (typeof value !== 'string') return emptyError;
+  const root = value.trim();
+  if (!root) return emptyError;
+  const resolved = resolveDashboardMountRoot(root);
+  return resolved ?? 'invalid_root';
+}
+
+function resolveDashboardMountRoot(root: string): string | undefined {
+  if (root.length > 4096 || root.includes('\0')) return undefined;
+  const isHomeRelative = root === '~' || root.startsWith(`~${path.sep}`);
+  if (!path.isAbsolute(root) && !isHomeRelative) return undefined;
+  const resolved = resolveSetupPath(root);
+  if (!path.isAbsolute(resolved) || resolved.includes('\0')) return undefined;
+  return resolved;
+}
+
 async function assertMountRootUsable(root: string): Promise<void> {
+  const resolvedRoot = resolveDashboardMountRoot(root);
+  if (!resolvedRoot) throw new Error('invalid_root');
   try {
-    const stat = await fsp.stat(resolveSetupPath(root));
+    // Dashboard mount management is local-admin-only. The selected local
+    // root is intentionally user-controlled; this stat is the existence
+    // check before saving it as a source.
+    const stat = await fsp.stat(resolvedRoot); // lgtm[js/path-injection]
     if (!stat.isDirectory() && !stat.isFile()) throw new Error('invalid_root');
   } catch {
     throw new Error('invalid_root');
