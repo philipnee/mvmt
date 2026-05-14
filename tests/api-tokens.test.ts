@@ -4,6 +4,7 @@ import {
   editApiTokenInConfig,
   removeApiTokenFromConfig,
   rotateApiTokenInConfig,
+  setApiTokenPublishedInConfig,
 } from '../src/cli/api-tokens.js';
 import { parseConfig } from '../src/config/loader.js';
 import { verifyApiToken } from '../src/utils/api-token-hash.js';
@@ -482,5 +483,29 @@ describe('API token config helpers', () => {
 
     expect(next.clients).toHaveLength(1);
     expect(next.clients?.[0].id).toBe('chatgpt');
+  });
+
+  it('sets and clears the published exposure flag on a token', () => {
+    const base = parseConfig({
+      version: 1,
+      mounts: [{ name: 'document', type: 'local_folder', path: '/document', root: '/tmp/document' }],
+    });
+    const created = addApiTokenToConfig(base, {
+      id: 'codex',
+      name: 'Codex CLI',
+      plaintextToken: 'plain-token',
+      permissions: [{ source: '/document', mode: 'read' }],
+    });
+    // A freshly added token carries no explicit published value
+    // (grandfathered as published until the dashboard mints with intent).
+    expect(created.client.published).toBeUndefined();
+
+    const published = setApiTokenPublishedInConfig(created.config, 'codex', true);
+    expect(published.client.published).toBe(true);
+
+    const unpublished = setApiTokenPublishedInConfig(published.config, 'codex', false);
+    expect(unpublished.client.published).toBe(false);
+
+    expect(() => setApiTokenPublishedInConfig(created.config, 'missing', true)).toThrow();
   });
 });

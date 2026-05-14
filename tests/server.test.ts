@@ -17,7 +17,7 @@ import { parseConfig, readConfig, saveConfig } from '../src/config/loader.js';
 import { TextContextIndex } from '../src/context/text-index.js';
 import { OAuthStore } from '../src/server/oauth.js';
 import { ToolRouter } from '../src/server/router.js';
-import { addLeaseResources, createLease, listLeases, revokeLease } from '../src/lease/store.js';
+import { addLeaseResources, createLease, listLeases, revokeLease, setLeasePublished } from '../src/lease/store.js';
 import { findLeaseSecret, leaseSecretsPathForLeaseStore } from '../src/lease/secrets.js';
 import { createPrivilegedUser, removePrivilegedUser } from '../src/dashboard/users.js';
 import { createAuditLogger } from '../src/utils/audit.js';
@@ -194,6 +194,170 @@ describe('file lease downloads', () => {
       await server.close();
       fs.rmSync(tmp, { recursive: true, force: true });
     }
+  });
+});
+
+// The exposure boundary: a capability-only grant (explicitly
+// published:false) has no relay door. It still works for apps reaching
+// mvmt over 127.0.0.1; a relay-forwarded request for it is rejected.
+// Grants without an explicit published value are grandfathered as
+// published so existing tokens and leases keep working.
+describe('grant exposure boundary', () => {
+  async function withLeaseServer(
+    run: (ctx: { port: number; leaseStorePath: string; leaseId: string; token: string }) => Promise<void>,
+  ): Promise<void> {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-exposure-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const leaseStorePath = path.join(tmp, '.leases.json');
+    const filePath = path.join(tmp, 'payload.bin');
+    fs.writeFileSync(filePath, Buffer.from([1, 2, 3]));
+    const config = parseConfig({
+      version: 1,
+      mounts: [{ name: 'payload', type: 'local_folder', path: '/payload.bin', root: filePath }],
+    });
+    const lease = createLease(leaseStorePath, {
+      label: 'Payload',
+      path: '/payload.bin',
+      resources: [{ path: '/payload.bin', sourcePath: '/payload.bin', type: 'file' }],
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: config.mounts,
+      leaseStorePath,
+    });
+    try {
+      await run({ port: server.port, leaseStorePath, leaseId: lease.record.id, token: lease.token });
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+
+  const leaseUrl = (port: number, id: string, token: string) =>
+    `http://127.0.0.1:${port}/lease/${id}/files/payload.bin?token=${token}`;
+
+  it('rejects a relay-forwarded request for a capability-only lease', async () => {
+    await withLeaseServer(async ({ port, leaseStorePath, leaseId, token }) => {
+      setLeasePublished(leaseStorePath, leaseId, false);
+      const viaRelay = await fetch(leaseUrl(port, leaseId, token), {
+        headers: { 'X-MVMT-Transport': 'relay' },
+      });
+      expect(viaRelay.status).toBe(403);
+      expect((await viaRelay.json() as { error: string }).error).toBe('lease_not_published');
+    });
+  });
+
+  it('allows a localhost request for a capability-only lease', async () => {
+    await withLeaseServer(async ({ port, leaseStorePath, leaseId, token }) => {
+      setLeasePublished(leaseStorePath, leaseId, false);
+      const local = await fetch(leaseUrl(port, leaseId, token));
+      expect(local.status).toBe(200);
+    });
+  });
+
+  it('allows a relay-forwarded request for a published lease', async () => {
+    await withLeaseServer(async ({ port, leaseStorePath, leaseId, token }) => {
+      setLeasePublished(leaseStorePath, leaseId, true);
+      const viaRelay = await fetch(leaseUrl(port, leaseId, token), {
+        headers: { 'X-MVMT-Transport': 'relay' },
+      });
+      expect(viaRelay.status).toBe(200);
+    });
+  });
+
+  it('grandfathers a lease with no explicit published value as published', async () => {
+    await withLeaseServer(async ({ port, leaseId, token }) => {
+      const viaRelay = await fetch(leaseUrl(port, leaseId, token), {
+        headers: { 'X-MVMT-Transport': 'relay' },
+      });
+      expect(viaRelay.status).toBe(200);
+    });
+  });
+
+  async function withMcpServer(
+    published: boolean | undefined,
+    run: (ctx: { port: number; token: string }) => Promise<void>,
+  ): Promise<void> {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-exposure-mcp-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const root = path.join(tmp, 'workspace');
+    fs.mkdirSync(root, { recursive: true });
+    fs.writeFileSync(path.join(root, 'note.md'), 'hello');
+    const config = parseConfig({
+      version: 1,
+      mounts: [{ name: 'workspace', type: 'local_folder', path: '/workspace', root }],
+      clients: [
+        {
+          id: 'codex',
+          name: 'Codex CLI',
+          auth: { type: 'token', tokenHash: hashApiToken('codex-token') },
+          permissions: [{ path: '/workspace/**', actions: ['read'] }],
+          ...(published === undefined ? {} : { published }),
+        },
+      ],
+    });
+    const router = new ToolRouter();
+    await router.initialize();
+    const server = await startHttpServer(router, {
+      port: 0,
+      tokenPath,
+      leaseMounts: config.mounts,
+      clients: config.clients,
+    });
+    try {
+      await run({ port: server.port, token: 'codex-token' });
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+
+  const mcpInitialize = (port: number, token: string, viaRelay: boolean) =>
+    fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/json, text/event-stream',
+        'Content-Type': 'application/json',
+        ...(viaRelay ? { 'X-MVMT-Transport': 'relay' } : {}),
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 't', version: '0' } },
+      }),
+    });
+
+  it('rejects a relay-forwarded /mcp request for a capability-only token', async () => {
+    await withMcpServer(false, async ({ port, token }) => {
+      const viaRelay = await mcpInitialize(port, token, true);
+      expect(viaRelay.status).toBe(403);
+      expect((await viaRelay.json() as { error: string }).error).toBe('grant_not_published');
+    });
+  });
+
+  it('allows a localhost /mcp request for a capability-only token', async () => {
+    await withMcpServer(false, async ({ port, token }) => {
+      const local = await mcpInitialize(port, token, false);
+      expect(local.status).toBe(200);
+    });
+  });
+
+  it('allows a relay-forwarded /mcp request for a published token', async () => {
+    await withMcpServer(true, async ({ port, token }) => {
+      const viaRelay = await mcpInitialize(port, token, true);
+      expect(viaRelay.status).toBe(200);
+    });
+  });
+
+  it('grandfathers a token with no explicit published value as published', async () => {
+    await withMcpServer(undefined, async ({ port, token }) => {
+      const viaRelay = await mcpInitialize(port, token, true);
+      expect(viaRelay.status).toBe(200);
+    });
   });
 });
 

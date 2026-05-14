@@ -118,6 +118,20 @@ export function rotateLeaseToken(storePath: string, id: string): CreatedLease | 
   return { record: next, token };
 }
 
+// Sets the exposure boundary for a lease. `published: false` makes it
+// capability-only (no relay door, still usable by local apps);
+// `published: true` gives it a relay door. Distinct from revokeLease,
+// which kills the lease entirely.
+export function setLeasePublished(storePath: string, id: string, published: boolean): LeaseRecord | undefined {
+  const store = readLeaseStore(storePath);
+  const index = store.leases.findIndex((lease) => lease.id === id);
+  if (index < 0) return undefined;
+  const next: LeaseRecord = { ...store.leases[index]!, published };
+  store.leases[index] = next;
+  writeLeaseStore(storePath, store);
+  return next;
+}
+
 export function revokeLease(storePath: string, id: string): boolean {
   const store = readLeaseStore(storePath);
   const index = store.leases.findIndex((lease) => lease.id === id);

@@ -58,7 +58,7 @@ import {
   validateLeaseToken,
 } from '../lease/store.js';
 import { findLeaseSecret, leaseSecretsPathForLeaseStore, removeLeaseSecret, saveLeaseSecret } from '../lease/secrets.js';
-import { leaseGrantScope } from '../grant/model.js';
+import { isGrantPublished, leaseGrantScope } from '../grant/model.js';
 import {
   attachClientIdentity,
   ClientIdentity,
@@ -369,6 +369,19 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       res.status(403).json({
         error: 'oauth_client_quarantined',
         error_description: 'OAuth client_id is not mapped to a configured mvmt client; admin must approve',
+      });
+      return;
+    }
+    if (identity && isRelayRequest(req) && !isGrantPublished(identity.published)) {
+      // Exposure boundary: a capability-only grant (explicitly published:
+      // false) has no relay door. The credential still works for local
+      // apps over 127.0.0.1; a relay-forwarded request for it is
+      // rejected. Grants without an explicit published value are
+      // grandfathered as published.
+      logHttpRequest(requestLog, req, 403, authLogKind(req), 'grant_not_published', identity.id);
+      res.status(403).json({
+        error: 'grant_not_published',
+        error_description: 'This grant is not published for relay access',
       });
       return;
     }
@@ -1133,6 +1146,16 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       res.status(410).json({ error: `lease_${unavailable}` });
       return undefined;
     }
+
+    // Exposure boundary: a capability-only lease (explicitly published:
+    // false) has no relay door. It still works for local apps over
+    // 127.0.0.1; a relay-forwarded request for it is rejected. Leases
+    // without an explicit published value are grandfathered as published.
+    if (isRelayRequest(req) && !isGrantPublished(lease.published)) {
+      logHttpRequest(requestLog, req, 403, 'lease.request', 'not_published', lease.id);
+      res.status(403).json({ error: 'lease_not_published' });
+      return undefined;
+    }
     return lease;
   };
 
@@ -1508,6 +1531,7 @@ function identityFromLease(lease: LeaseRecord): ClientIdentity {
     source: 'lease',
     rawToolsEnabled: false,
     permissions: leaseGrantScope(lease),
+    ...(lease.published === undefined ? {} : { published: lease.published }),
   };
 }
 
@@ -1540,8 +1564,16 @@ function remoteAddressFor(req: Request): string | undefined {
   return raw.startsWith('::ffff:') ? raw.slice(7) : raw;
 }
 
+// True when the request reached this server through the relay rather than
+// over localhost. The relay stamps every forwarded request with this
+// header; a request without it came in over 127.0.0.1, which only a
+// process already on this machine can do.
+function isRelayRequest(req: Request): boolean {
+  return firstHeaderValue(req.headers['x-mvmt-transport'])?.toLowerCase() === 'relay';
+}
+
 function isLocalDashboardRequest(req: Request): boolean {
-  if (firstHeaderValue(req.headers['x-mvmt-transport'])?.toLowerCase() === 'relay') return false;
+  if (isRelayRequest(req)) return false;
   const hostHeader = firstHeaderValue(req.headers.host);
   if (!hostHeader) return false;
   const bracketEnd = hostHeader.indexOf(']');

@@ -24,6 +24,11 @@ export interface ClientIdentity {
   // Original OAuth client_id, present on `source === 'oauth'` and on
   // `source === 'quarantine'`. Useful for audit and admin triage.
   oauthClientId?: string;
+  // Exposure state of the underlying grant. `undefined` means the record
+  // predates the publish concept and is grandfathered as published — see
+  // isGrantPublished(). The relay-exposure check at the /mcp auth boundary
+  // rejects a relay-forwarded request when this is explicitly false.
+  published?: boolean;
 }
 
 const QUARANTINE_PREFIX = 'quarantine:';
@@ -185,6 +190,7 @@ function identityFromConfig(
     rawToolsEnabled: client.rawToolsEnabled,
     permissions: client.permissions,
     ...(oauthClientId ? { oauthClientId } : {}),
+    ...(client.published === undefined ? {} : { published: client.published }),
   };
 }
 

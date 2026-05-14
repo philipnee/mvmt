@@ -367,6 +367,26 @@ export function rotateApiTokenInConfig(
   return { config: nextConfig, created: false, plaintextToken, client: nextClient };
 }
 
+// Sets the exposure boundary for an API-token grant. `published: false`
+// makes it capability-only (usable by local apps over 127.0.0.1, no
+// relay door); `published: true` gives it a relay door. Distinct from
+// removeApiTokenFromConfig, which deletes the grant entirely.
+export function setApiTokenPublishedInConfig(
+  config: MvmtConfig,
+  id: string,
+  published: boolean,
+): ApiTokenUpdateResult {
+  const tokenId = normalizeApiTokenId(id);
+  const existing = findTokenClient(config, tokenId);
+  const nextClient: ClientConfig = { ...existing, published };
+  const clients = [
+    ...(config.clients ?? []).filter((client) => client.id !== tokenId),
+    nextClient,
+  ];
+  const nextConfig = ConfigSchema.parse({ ...config, clients });
+  return { config: nextConfig, created: false, client: nextClient };
+}
+
 export function removeApiTokenFromConfig(config: MvmtConfig, id: string): MvmtConfig {
   const tokenId = normalizeApiTokenId(id);
   findTokenClient(config, tokenId);
