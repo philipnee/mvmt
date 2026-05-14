@@ -50,7 +50,6 @@ import {
   leaseAllows,
   LeaseRecord,
   LeaseResource,
-  leaseResources,
   leaseUnavailableReason,
   listLeases,
   recordLeaseUse,
@@ -59,6 +58,7 @@ import {
   validateLeaseToken,
 } from '../lease/store.js';
 import { findLeaseSecret, leaseSecretsPathForLeaseStore, removeLeaseSecret, saveLeaseSecret } from '../lease/secrets.js';
+import { leaseGrantScope } from '../grant/model.js';
 import {
   attachClientIdentity,
   ClientIdentity,
@@ -1500,19 +1500,14 @@ function resolveLeaseMounts(value: HttpServerOptions['leaseMounts']): readonly L
 }
 
 function identityFromLease(lease: LeaseRecord): ClientIdentity {
+  // Scope resolution is delegated to the Grant read-model so leases and
+  // API tokens share one source of truth for path/action mapping.
   return {
     id: `lease:${lease.id}`,
     name: `Lease: ${lease.label}`,
     source: 'lease',
     rawToolsEnabled: false,
-    permissions: leaseAllows(lease, 'read')
-      ? leaseResources(lease).map((resource) => ({
-          path: resource.type === 'folder' ? `${stripTrailingSlashes(resource.sourcePath)}/**` : resource.sourcePath,
-          actions: leaseAllows(lease, 'write')
-            ? ['search' as const, 'read' as const, 'write' as const]
-            : ['search' as const, 'read' as const],
-        }))
-      : [],
+    permissions: leaseGrantScope(lease),
   };
 }
 

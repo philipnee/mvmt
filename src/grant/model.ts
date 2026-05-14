@@ -1,5 +1,5 @@
 import { ClientConfig } from '../config/schema.js';
-import { LeaseRecord, leaseResources, LeasePermission } from '../lease/store.js';
+import { LeaseRecord, leaseAllows, leaseResources } from '../lease/store.js';
 
 // A Grant is the unified read-model for a scoped capability, independent
 // of where it is stored (clients[] in config, or the lease store) and of
@@ -13,7 +13,8 @@ import { LeaseRecord, leaseResources, LeasePermission } from '../lease/store.js'
 export type GrantAction = 'search' | 'read' | 'write';
 
 export interface GrantScopeEntry {
-  // Absolute virtual path or glob, e.g. /workspace/** or /notes/file.md.
+  // Absolute virtual path or glob, in the same form the permission
+  // matcher uses for API-token grants, e.g. /workspace/** or /notes/x.md.
   path: string;
   actions: GrantAction[];
 }
@@ -60,32 +61,40 @@ export function clientConfigToGrant(client: ClientConfig): Grant {
 }
 
 export function leaseRecordToGrant(lease: LeaseRecord): Grant {
-  const actions = leasePermissionsToGrantActions(lease.permissions);
   return {
     id: lease.id,
     label: lease.label,
     kind: 'lease',
-    // A lease applies one permission set across all of its resources.
-    scope: leaseResources(lease).map((resource) => ({
-      path: resource.path,
-      actions: [...actions],
-    })),
+    scope: leaseGrantScope(lease),
     published: isGrantPublished(lease.published),
     ...(lease.expiresAt ? { expiresAt: lease.expiresAt } : {}),
     ...(lease.revokedAt ? { revokedAt: lease.revokedAt } : {}),
   };
 }
 
-// Maps the lease permission vocabulary into the canonical grant actions.
-// `upload` is write-without-read: it grants `write` only, and the absence
-// of `read` is what makes it upload-only. Leases never carry `search` —
-// that action must be granted explicitly through an API-token grant.
-function leasePermissionsToGrantActions(permissions: LeasePermission[]): GrantAction[] {
-  const actions = new Set<GrantAction>();
-  for (const permission of permissions) {
-    if (permission === 'read') actions.add('read');
-    if (permission === 'write') actions.add('write');
-    if (permission === 'upload') actions.add('write');
-  }
-  return [...actions];
+// A lease's capability scope, expressed in the same path-glob + actions
+// form the permission matcher uses for API-token grants. A folder
+// resource expands to a /** subtree; a file resource maps to its exact
+// source path. Read access also grants `search` (the index-backed read
+// tool). An upload-only lease (write without read) carries no
+// MCP-resolvable scope — its writes go through the lease browser's
+// upload path, not the permission matcher — so it projects to an empty
+// scope here, matching the long-standing /mcp behaviour for leases.
+export function leaseGrantScope(lease: LeaseRecord): GrantScopeEntry[] {
+  if (!leaseAllows(lease, 'read')) return [];
+  const actions: GrantAction[] = leaseAllows(lease, 'write')
+    ? ['search', 'read', 'write']
+    : ['search', 'read'];
+  return leaseResources(lease).map((resource) => ({
+    path: resource.type === 'folder'
+      ? `${stripTrailingSlashes(resource.sourcePath)}/**`
+      : resource.sourcePath,
+    actions: [...actions],
+  }));
+}
+
+function stripTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value[end - 1] === '/') end -= 1;
+  return value.slice(0, end);
 }

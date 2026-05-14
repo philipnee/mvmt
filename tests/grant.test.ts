@@ -97,7 +97,7 @@ describe('clientConfigToGrant', () => {
 });
 
 describe('leaseRecordToGrant', () => {
-  it('applies the lease permission set across every resource', () => {
+  it('expands folders to a /** subtree and keeps files exact, with search on read', () => {
     const grant = leaseRecordToGrant(lease());
     expect(grant).toMatchObject<Partial<Grant>>({
       id: 'lease-1',
@@ -106,22 +106,24 @@ describe('leaseRecordToGrant', () => {
       published: true,
     });
     expect(grant.scope).toEqual([
-      { path: '/taxes', actions: ['read'] },
-      { path: '/taxes/w2.pdf', actions: ['read'] },
+      { path: '/taxes/**', actions: ['search', 'read'] },
+      { path: '/taxes/w2.pdf', actions: ['search', 'read'] },
     ]);
   });
 
-  it('maps upload to write-without-read', () => {
-    const grant = leaseRecordToGrant(lease({ permissions: ['upload'] }));
-    expect(grant.scope.every((entry) => entry.actions.includes('write'))).toBe(true);
-    expect(grant.scope.some((entry) => entry.actions.includes('read'))).toBe(false);
-  });
-
-  it('maps a two-way lease to read + write and never search', () => {
+  it('grants search + read + write for a two-way lease', () => {
     const grant = leaseRecordToGrant(lease({ permissions: ['read', 'write'] }));
     for (const entry of grant.scope) {
-      expect(entry.actions.sort()).toEqual(['read', 'write']);
+      expect(entry.actions).toEqual(['search', 'read', 'write']);
     }
+  });
+
+  it('projects an upload-only lease to an empty scope (no MCP-resolvable access)', () => {
+    expect(leaseRecordToGrant(lease({ permissions: ['upload'] })).scope).toEqual([]);
+  });
+
+  it('projects a write-without-read lease to an empty scope', () => {
+    expect(leaseRecordToGrant(lease({ permissions: ['write'] })).scope).toEqual([]);
   });
 
   it('carries an explicit published:false through as capability-only', () => {
