@@ -427,6 +427,30 @@ describe('CLI usability', () => {
     }
   });
 
+  it('publishes and unpublishes a scoped API token', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    const configPath = path.join(tmp, 'config.yaml');
+    const mountRoot = path.join(tmp, 'notes');
+    try {
+      await fs.mkdir(mountRoot);
+      await saveConfig(configPath, parseConfig({
+        version: 1,
+        mounts: [{ name: 'notes', type: 'local_folder', path: '/notes', root: mountRoot }],
+      }));
+      await runCli(['token', 'add', 'codex', '--config', configPath, '--scope', 'notes:read']);
+
+      const { stdout: published } = await runCli(['token', 'publish', 'codex', '--config', configPath]);
+      expect(published).toContain("Token 'codex' published");
+      expect(readConfig(configPath).clients?.[0]).toMatchObject({ id: 'codex', published: true });
+
+      const { stdout: unpublished } = await runCli(['token', 'unpublish', 'codex', '--config', configPath]);
+      expect(unpublished).toContain("Token 'codex' unpublished");
+      expect(readConfig(configPath).clients?.[0]).toMatchObject({ id: 'codex', published: false });
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('labels client-bound API-token endpoints clearly', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
     const configPath = path.join(tmp, 'config.yaml');
