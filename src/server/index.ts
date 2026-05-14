@@ -241,11 +241,14 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   // Proxied/tunneled deployments should set resolvePublicBaseUrl so OAuth
   // resource audience checks do not depend on the request Host header.
   const baseUrlFor = (req: Request): string => getBaseUrl(req, resolvePublicBaseUrl?.());
-  // baseUrlFor() strips the path because OAuth issuer/audience checks need
-  // just protocol+host. User-facing share links must keep the workspace
-  // prefix (e.g. https://relay.example.com/t/demo) so the relay can route
-  // /lease/... back to the right agent — without it the public URL hits
-  // the relay's catch-all "no explicit mapping for /error" 404.
+  // baseUrlFor() returns just protocol+host — fine for origin comparison,
+  // but it strips any relay workspace prefix (e.g. /t/demo). Every URL
+  // we hand to a client or browser must keep that prefix so the relay
+  // can route it back to this agent — share links, and the OAuth issuer/
+  // metadata/endpoints/resource. Without the prefix those URLs hit the
+  // relay's catch-all "no explicit mapping for /error" 404 and the OAuth
+  // discovery chain dead-ends. When no relay URL is configured this
+  // falls back to baseUrlFor(), so local-only behaviour is unchanged.
   const userFacingBaseUrlFor = (req: Request): string => resolvePublicBaseUrl?.() ?? baseUrlFor(req);
   const app = express();
   app.use(express.json({ limit: '10mb' }));
@@ -313,7 +316,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     }
     const authHeader = firstHeaderValue(req.headers.authorization);
     if (!authHeader) {
-      const baseUrl = baseUrlFor(req);
+      const baseUrl = userFacingBaseUrlFor(req);
       res.setHeader(
         'WWW-Authenticate',
         `Bearer realm="mvmt", resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`,
@@ -323,7 +326,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       return;
     }
     if (!authHeader.startsWith('Bearer ')) {
-      const baseUrl = baseUrlFor(req);
+      const baseUrl = userFacingBaseUrlFor(req);
       res.setHeader(
         'WWW-Authenticate',
         `Bearer realm="mvmt", resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`,
@@ -337,7 +340,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     // copies the client-supplied `resource` into the token's `aud`;
     // we validate it here so a token minted for a different resource
     // cannot be replayed at this server.
-    const expectedAudience = `${baseUrlFor(req)}/mcp`;
+    const expectedAudience = `${userFacingBaseUrlFor(req)}/mcp`;
     const oauthAccessToken = oauth.validateAccessToken(authHeader, {
       expectedAudience,
       allowLegacyNoAudience: true,
@@ -393,7 +396,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       return;
     }
 
-    const baseUrl = baseUrlFor(req);
+    const baseUrl = userFacingBaseUrlFor(req);
     res.setHeader(
       'WWW-Authenticate',
       `Bearer realm="mvmt", resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`,
@@ -403,7 +406,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   };
 
   const authorizationServerMetadata = (req: Request, res: Response) => {
-    const baseUrl = baseUrlFor(req);
+    const baseUrl = userFacingBaseUrlFor(req);
     logHttpRequest(requestLog, req, 200, 'oauth.discovery');
     res.json({
       issuer: baseUrl,
@@ -421,7 +424,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   app.get('/.well-known/oauth-authorization-server/mcp', authorizationServerMetadata);
 
   const protectedResourceMetadata = (req: Request, res: Response) => {
-    const baseUrl = baseUrlFor(req);
+    const baseUrl = userFacingBaseUrlFor(req);
     logHttpRequest(requestLog, req, 200, 'oauth.resource');
     res.json({
       resource: `${baseUrl}/mcp`,
@@ -525,7 +528,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       res.status(400).type('text/plain').send(parsed.error);
       return;
     }
-    const canonicalResource = `${baseUrlFor(req)}/mcp`;
+    const canonicalResource = `${userFacingBaseUrlFor(req)}/mcp`;
     const { params, resourceDefaulted } = defaultAuthorizeResource(parsed, canonicalResource);
     if (!oauth.isRedirectUriAllowed(params.clientId, params.redirectUri)) {
       const rejectedHost = safeHost(params.redirectUri);
@@ -563,7 +566,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       res.status(400).type('text/plain').send(parsed.error);
       return;
     }
-    const canonicalResource = `${baseUrlFor(req)}/mcp`;
+    const canonicalResource = `${userFacingBaseUrlFor(req)}/mcp`;
     const { params, resourceDefaulted } = defaultAuthorizeResource(parsed, canonicalResource);
     if (!oauth.isRedirectUriAllowed(params.clientId, params.redirectUri)) {
       const rejectedHost = safeHost(params.redirectUri);

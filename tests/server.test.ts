@@ -3005,6 +3005,54 @@ describe('startHttpServer lifecycle', () => {
     }
   });
 
+  // When mvmt is reached through a relay path prefix (e.g. /t/demo), the
+  // OAuth discovery chain must keep that prefix end to end. getBaseUrl()
+  // strips the path, which would point WWW-Authenticate, the metadata
+  // docs, and the resource/issuer at the relay root — where they 404 and
+  // the client (Claude) reports "couldn't reach the MCP server".
+  it('keeps the relay workspace prefix across the whole OAuth discovery chain', async () => {
+    const router = new ToolRouter();
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-oauth-prefix-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const server = await startHttpServer(router, {
+      port: 0,
+      tokenPath,
+      resolvePublicBaseUrl: () => 'https://mvmt-relay.fly.dev/t/demo',
+    });
+    const base = 'https://mvmt-relay.fly.dev/t/demo';
+    try {
+      // Step 1: the unauthenticated /mcp 401 points at the prefixed metadata.
+      const unauth = await fetch(`http://127.0.0.1:${server.port}/mcp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      expect(unauth.status).toBe(401);
+      expect(unauth.headers.get('www-authenticate'))
+        .toContain(`resource_metadata="${base}/.well-known/oauth-protected-resource"`);
+
+      // Step 2: protected-resource metadata advertises the prefixed resource.
+      const resourceMeta = await (await fetch(
+        `http://127.0.0.1:${server.port}/.well-known/oauth-protected-resource`,
+      )).json() as { resource: string; authorization_servers: string[] };
+      expect(resourceMeta.resource).toBe(`${base}/mcp`);
+      expect(resourceMeta.authorization_servers).toEqual([base]);
+
+      // Step 3: authorization-server metadata advertises prefixed endpoints.
+      const authMeta = await (await fetch(
+        `http://127.0.0.1:${server.port}/.well-known/oauth-authorization-server`,
+      )).json() as Record<string, string>;
+      expect(authMeta.issuer).toBe(base);
+      expect(authMeta.authorization_endpoint).toBe(`${base}/authorize`);
+      expect(authMeta.token_endpoint).toBe(`${base}/token`);
+      expect(authMeta.registration_endpoint).toBe(`${base}/register`);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('returns a close handle that releases the listening port', async () => {
     const router = new ToolRouter();
     await router.initialize();
