@@ -11,7 +11,11 @@ const root = path.resolve(import.meta.dirname, '..');
 const cliArgs = ['--import', 'tsx', 'bin/mvmt.ts', '--no-update-check'];
 const serverOutput = new WeakMap<ChildProcessWithoutNullStreams, string>();
 
-describe('CLI usability', () => {
+// Every test here spawns the real CLI binary as a child process — often
+// several spawns per test — so the 5s default is too tight under CI
+// load. Scope the higher timeout to this exec-heavy suite rather than
+// loosening it globally for the fast unit-test files.
+describe('CLI usability', { timeout: 20_000 }, () => {
   it('shows examples in top-level help', async () => {
     const { stdout } = await runCli(['--help']);
 
