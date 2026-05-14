@@ -467,20 +467,24 @@ function printStartupBanner(
     console.log('');
   }
   if (interactiveMode) {
-    console.log(`${chalk.bold('Dashboard')}    manage sources, files, and leases in a browser`);
-    console.log(`${chalk.bold('Leases')}       type ${chalk.cyan('lease create')} to make a link from the terminal`);
-    console.log(`${chalk.bold('Events')}       lease, dashboard, MCP auth, and tool-call attempts`);
+    console.log(`${chalk.bold('Dashboard')}    browse files, manage sources, and copy shared links`);
+    console.log(`${chalk.bold('Share link')}   type ${chalk.cyan('lease create')} to share a file or folder`);
+    console.log(`${chalk.bold('Users')}        type ${chalk.cyan('users add')} to create a dashboard login`);
+    console.log(`${chalk.bold('Public access')} type ${chalk.cyan('tunnel config')} then ${chalk.cyan('tunnel start')}`);
+    console.log(`${chalk.bold('Events')}       dashboard, share-link, MCP auth, and tool-call attempts`);
     console.log(`${chalk.dim(`Audit log: ${AUDIT_LOG_PATH}`)}`);
     console.log(`\n${chalk.dim('Interactive mode: type "help" for commands.')}`);
   } else {
-    console.log(`${chalk.bold('Session')}      ${TOKEN_PATH}`);
-    console.log(`${chalk.bold('Tool-call log')} ${AUDIT_LOG_PATH}`);
-    console.log('\nCreate scoped client access with:');
-    console.log(`  ${chalk.cyan('mvmt token add <name> --scope <mount>:read')}\n`);
-    console.log('Connect a local HTTP client:');
-    console.log(`  URL: ${chalk.cyan(localMcpUrl(port))}`);
-    console.log('  Header: Authorization: Bearer <token>');
-    console.log(chalk.dim('  Use `mvmt token session` only for legacy local testing with no scoped tokens configured.'));
+    console.log(`${chalk.bold('Dashboard')}    ${chalk.cyan(localDashboardUrl(port))}`);
+    if (publicUrl) {
+      console.log(`${chalk.bold('Public UI')}    ${chalk.yellow(formatDashboardPublicUrl(publicUrl))}`);
+    }
+    console.log(`${chalk.bold('Share link')}   ${chalk.cyan('mvmt lease create <path> --label <label>')}`);
+    console.log(`${chalk.bold('Users')}        ${chalk.cyan('mvmt users add <name>')}`);
+    console.log(`${chalk.bold('Public access')} ${chalk.cyan('mvmt tunnel config')} then ${chalk.cyan('mvmt tunnel start')}`);
+    console.log(`${chalk.dim(`Activity log: ${AUDIT_LOG_PATH}`)}`);
+    console.log(`\n${chalk.dim(`Advanced MCP endpoint: ${localMcpUrl(port)}`)}`);
+    console.log(chalk.dim('Advanced MCP/API tokens: mvmt token add <name> --scope <source>:read'));
   }
 }
 
