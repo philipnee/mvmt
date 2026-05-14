@@ -1613,6 +1613,10 @@ describe('dashboard access', () => {
       expect(html).toContain('You can copy this link again from the dashboard');
       expect(html).toContain("'/dashboard/api/leases/' + encodeURIComponent(id) + '/publish'");
       expect(html).toContain("publishBtn.textContent = isPublished ? 'Unpublish' : 'Publish'");
+      expect(html).toContain('id="mcp-modal"');
+      expect(html).toContain('id="context-mcp"');
+      expect(html).toContain("api('/dashboard/api/grants'");
+      expect(html).toContain('function submitMcpGrant()');
       expect(html).not.toContain('id="add-mount-settings"');
       expect(html).not.toContain('id="mounts-wrap"');
       expect(html).not.toContain('...(opts.headers || {})');
@@ -1804,6 +1808,186 @@ describe('dashboard access', () => {
         body: JSON.stringify({ username: 'sarah', password: 'correct horse battery staple' }),
       });
       expect(loginAgain.status).toBe(401);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  // The dashboard "Create MCP access" flow mints a clients[] API-token
+  // grant scoped to specific files/folders. It is admin + config-path
+  // gated, validates every scope path against the configured mounts, and
+  // honours the publish exposure boundary on the resulting grant.
+  it('mints a per-file/folder MCP grant from the dashboard', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-grant-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const leaseStorePath = path.join(tmp, '.leases.json');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    const configPath = path.join(tmp, 'config.yaml');
+    const root = path.join(tmp, 'workspace');
+    fs.mkdirSync(path.join(root, 'drafts'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'note.md'), 'hello');
+    createPrivilegedUser(usersPath, { username: 'admin', password: 'correct horse battery staple', admin: true });
+    await saveConfig(configPath, parseConfig({
+      version: 1,
+      mounts: [{ name: 'workspace', type: 'local_folder', path: '/workspace', root, writeAccess: true }],
+    }));
+
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      configPath,
+      leaseMounts: () => readConfig(configPath).mounts,
+      clients: () => readConfig(configPath).clients,
+      leaseStorePath,
+      privilegedUsersPath: usersPath,
+    });
+    try {
+      const cookie = await loginDashboard(server.port, 'admin', 'correct horse battery staple');
+
+      // Capability-only grant: read on the whole mount, write on a subfolder.
+      const create = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/grants`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          label: 'Claude - workspace',
+          expires: 'never',
+          published: false,
+          scopes: [
+            { path: '/workspace', mode: 'read' },
+            { path: '/workspace/drafts', mode: 'write' },
+          ],
+        }),
+      });
+      expect(create.status).toBe(201);
+      const created = await create.json() as { grant: { id: string; published: boolean }; token: string; endpoint: string };
+      expect(created.token).toMatch(/^mvmt_t_/);
+      expect(created.endpoint).toMatch(/\/mcp$/);
+      expect(created.grant.published).toBe(false);
+
+      // The grant landed in clients[] with the resolved per-path scope.
+      const client = readConfig(configPath).clients?.find((c) => c.id === created.grant.id);
+      expect(client).toBeTruthy();
+      expect(client?.published).toBe(false);
+      expect(client?.permissions).toEqual([
+        { path: '/workspace/**', actions: ['search', 'read'] },
+        { path: '/workspace/drafts/**', actions: ['search', 'read', 'write'] },
+      ]);
+
+      // Capability-only: works over localhost, rejected over the relay.
+      const localMcp = await fetch(`http://127.0.0.1:${server.port}/mcp`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${created.token}`,
+          Accept: 'application/json, text/event-stream',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0', id: 1, method: 'initialize',
+          params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 't', version: '0' } },
+        }),
+      });
+      expect(localMcp.status).toBe(200);
+
+      const relayMcp = await fetch(`http://127.0.0.1:${server.port}/mcp`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${created.token}`,
+          Accept: 'application/json, text/event-stream',
+          'Content-Type': 'application/json',
+          'X-MVMT-Transport': 'relay',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0', id: 1, method: 'initialize',
+          params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 't', version: '0' } },
+        }),
+      });
+      expect(relayMcp.status).toBe(403);
+      expect((await relayMcp.json() as { error: string }).error).toBe('grant_not_published');
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects dashboard MCP grants that fall outside a mount, on read-only writes, or without admin/config', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-grant-reject-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const leaseStorePath = path.join(tmp, '.leases.json');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    const configPath = path.join(tmp, 'config.yaml');
+    const root = path.join(tmp, 'readonly');
+    fs.mkdirSync(root, { recursive: true });
+    fs.writeFileSync(path.join(root, 'note.md'), 'hello');
+    createPrivilegedUser(usersPath, { username: 'admin', password: 'correct horse battery staple', admin: true });
+    createPrivilegedUser(usersPath, { username: 'member', password: 'correct horse battery staple' });
+    await saveConfig(configPath, parseConfig({
+      version: 1,
+      mounts: [{ name: 'readonly', type: 'local_folder', path: '/readonly', root }],
+    }));
+
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      configPath,
+      leaseMounts: () => readConfig(configPath).mounts,
+      clients: () => readConfig(configPath).clients,
+      leaseStorePath,
+      privilegedUsersPath: usersPath,
+    });
+    try {
+      const adminCookie = await loginDashboard(server.port, 'admin', 'correct horse battery staple');
+      const post = (cookie: string, body: unknown) => fetch(`http://127.0.0.1:${server.port}/dashboard/api/grants`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      const noLabel = await post(adminCookie, { scopes: [{ path: '/readonly', mode: 'read' }] });
+      expect(noLabel.status).toBe(400);
+      expect((await noLabel.json() as { error: string }).error).toBe('label_required');
+
+      const noScopes = await post(adminCookie, { label: 'x', scopes: [] });
+      expect(noScopes.status).toBe(400);
+      expect((await noScopes.json() as { error: string }).error).toBe('scope_required');
+
+      const outside = await post(adminCookie, { label: 'x', scopes: [{ path: '/not-a-mount', mode: 'read' }] });
+      expect(outside.status).toBe(400);
+
+      const writeReadOnly = await post(adminCookie, { label: 'x', scopes: [{ path: '/readonly', mode: 'write' }] });
+      expect(writeReadOnly.status).toBe(400);
+      expect((await writeReadOnly.json() as { error: string }).error).toBe('mount_read_only');
+
+      const memberCookie = await loginDashboard(server.port, 'member', 'correct horse battery staple');
+      const nonAdmin = await post(memberCookie, { label: 'x', scopes: [{ path: '/readonly', mode: 'read' }] });
+      expect(nonAdmin.status).toBe(403);
+
+      expect(readConfig(configPath).clients ?? []).toEqual([]);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses dashboard MCP grant creation when no configPath is wired', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-grant-noconfig-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    createPrivilegedUser(usersPath, { username: 'admin', password: 'correct horse battery staple', admin: true });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: [],
+      privilegedUsersPath: usersPath,
+    });
+    try {
+      const cookie = await loginDashboard(server.port, 'admin', 'correct horse battery staple');
+      const blocked = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/grants`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label: 'x', scopes: [{ path: '/x', mode: 'read' }] }),
+      });
+      expect(blocked.status).toBe(403);
     } finally {
       await server.close();
       fs.rmSync(tmp, { recursive: true, force: true });

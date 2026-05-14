@@ -29,9 +29,10 @@ import {
   renderAuthorizePage,
 } from './oauth.js';
 import { rateLimit } from './rate-limit.js';
-import { ClientConfig, LocalFolderMountConfig } from '../config/schema.js';
+import { ClientConfig, LocalFolderMountConfig, PermissionConfig } from '../config/schema.js';
 import { readConfig, saveConfig, withConfigLock } from '../config/loader.js';
 import { addMountToConfig, editMountInConfig, MountInput, removeMountFromConfig } from '../cli/mounts.js';
+import { addApiTokenToConfig } from '../cli/api-tokens.js';
 import { resolveSetupPath } from '../connectors/setup-paths.js';
 import { listDashboardFiles, normalizeDashboardPath, resolveDashboardFileTarget } from '../dashboard/files.js';
 import {
@@ -1157,6 +1158,81 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       const detail = err instanceof Error ? err.message : 'mount_failed';
       logHttpRequest(requestLog, req, 400, 'dashboard.mounts', detail);
       res.status(400).json({ error: 'mount_failed', detail });
+    }
+  });
+
+  // Mint a per-file/folder MCP grant — a clients[] API token scoped to
+  // specific paths the owner picked in the dashboard. Each scope path is
+  // validated to live inside a configured mount before it becomes a
+  // permission entry. Like mount mutation, this is admin + local-only
+  // and needs options.configPath.
+  app.post('/dashboard/api/grants', dashboardOriginMiddleware, dashboardAuthMiddleware, dashboardLocalMiddleware, dashboardAdminMiddleware, async (req, res) => {
+    const configPath = requireConfigPath(req, res);
+    if (!configPath) return;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const label = typeof body.label === 'string' ? body.label.trim() : '';
+    const published = body.published === true;
+    const rawScopes = Array.isArray(body.scopes) ? body.scopes : [];
+    if (!label) {
+      res.status(400).json({ error: 'label_required' });
+      return;
+    }
+    if (rawScopes.length === 0) {
+      res.status(400).json({ error: 'scope_required' });
+      return;
+    }
+    try {
+      const mounts = resolveLeaseMounts(options.leaseMounts);
+      const permissions: PermissionConfig[] = [];
+      for (const entry of rawScopes) {
+        const scope = (entry ?? {}) as Record<string, unknown>;
+        const scopePath = typeof scope.path === 'string' ? scope.path.trim() : '';
+        const mode = scope.mode === 'write' ? 'write' : 'read';
+        if (!scopePath) {
+          res.status(400).json({ error: 'scope_path_required' });
+          return;
+        }
+        // Resolving against the configured mounts is the security gate:
+        // a path that does not land inside a mount throws and the grant
+        // is rejected, so a grant can never reach outside the namespace.
+        const target = await resolveDashboardFileTarget(mounts, scopePath);
+        if (mode === 'write' && !target.writeAccess) {
+          res.status(400).json({ error: 'mount_read_only', detail: target.virtualPath });
+          return;
+        }
+        permissions.push({
+          path: target.type === 'file'
+            ? target.virtualPath
+            : `${stripTrailingSlashes(target.virtualPath)}/**`,
+          actions: mode === 'write' ? ['search', 'read', 'write'] : ['search', 'read'],
+        });
+      }
+      const expires = typeof body.expires === 'string' && body.expires ? body.expires : undefined;
+      const grantId = `grant-${randomUUID().slice(0, 8)}`;
+      const saved = await withConfigLock(configPath, async () => {
+        const current = readConfig(configPath);
+        const update = addApiTokenToConfig(current, {
+          id: grantId,
+          name: label,
+          // permissions is ignored when resolvedPermissions is present.
+          permissions: [],
+          resolvedPermissions: permissions,
+          ...(expires ? { expires } : {}),
+          published,
+        });
+        await saveConfig(configPath, update.config);
+        return update;
+      });
+      logHttpRequest(requestLog, req, 201, 'dashboard.grants', `created ${saved.client.id}`);
+      res.status(201).json({
+        grant: { id: saved.client.id, label: saved.client.name, published },
+        token: saved.plaintextToken,
+        endpoint: `${userFacingBaseUrlFor(req)}/mcp`,
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'grant_failed';
+      logHttpRequest(requestLog, req, 400, 'dashboard.grants', detail);
+      res.status(400).json({ error: 'grant_failed', detail });
     }
   });
 
@@ -2492,6 +2568,10 @@ table.t{border-collapse:collapse;width:100%}
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.59 13.51l6.83 3.98M15.41 6.51l-6.82 3.98"/></svg>
       Share
     </button>
+    <button type="button" id="context-mcp" class="hidden" role="menuitem">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l6-6-6-6"/><path d="M12 19h8"/></svg>
+      Create MCP access
+    </button>
     <button type="button" id="context-properties" role="menuitem">
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
       Properties
@@ -2564,6 +2644,71 @@ table.t{border-collapse:collapse;width:100%}
         </div>
         <div class="modal-foot">
           <button class="btn btn-primary" type="button" id="lease-done">Done</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="mcp-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <div id="mcp-step-config">
+        <div class="modal-head">
+          <h2>Create MCP access</h2>
+          <button class="btn btn-ghost btn-icon" type="button" id="mcp-modal-close" title="Close">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="modal-body">
+          <p class="muted" style="margin:.25rem 0 1rem;font-size:.88rem;">An agent with this token can use the paths below over MCP, within the permission you set on each.</p>
+          <div id="mcp-scopes"></div>
+          <button class="btn btn-sm" type="button" id="mcp-add-scope" style="margin-top:.4rem;">Add path</button>
+          <div class="form-grid" style="margin-top:.85rem;">
+            <label for="mcp-label">Label</label>
+            <input id="mcp-label" placeholder="e.g. Claude - workspace" required>
+            <label for="mcp-expires">Expires in</label>
+            <select id="mcp-expires">
+              <option value="never" selected>Never</option>
+              <option value="30d">30 days</option>
+              <option value="7d">7 days</option>
+              <option value="24h">24 hours</option>
+            </select>
+            <label for="mcp-published">Relay access</label>
+            <label id="mcp-published-field" style="display:flex;align-items:center;gap:.4rem;font-size:.88rem;color:var(--text);"><input id="mcp-published" type="checkbox" style="width:auto;"> Reachable over the relay (uncheck for apps on this machine only)</label>
+          </div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn" type="button" id="mcp-cancel">Cancel</button>
+          <button class="btn btn-primary" type="button" id="mcp-create">Create access</button>
+        </div>
+      </div>
+      <div id="mcp-step-success" class="hidden">
+        <div class="modal-body">
+          <div class="success-state">
+            <span class="check">
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 7"/></svg>
+            </span>
+            <h2>MCP access ready</h2>
+            <p class="muted" style="margin:.25rem 0 0;">Give the agent the endpoint and token below.</p>
+          </div>
+          <div class="form-grid" style="margin-top:.5rem;">
+            <label>Endpoint</label>
+            <div class="share-url" data-test="mcp-endpoint-card"><code id="mcp-created-endpoint"></code></div>
+            <label>Token</label>
+            <div class="share-url" data-test="mcp-token-card">
+              <code id="mcp-created-token"></code>
+              <button class="btn btn-primary btn-sm" type="button" id="mcp-copy-token">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                Copy
+              </button>
+            </div>
+          </div>
+          <p class="share-warning">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+            The token is shown once and is not stored in plaintext. If you lose it, rotate the grant with <code>mvmt token rotate</code>.
+          </p>
+        </div>
+        <div class="modal-foot">
+          <button class="btn btn-primary" type="button" id="mcp-done">Done</button>
         </div>
       </div>
     </div>
@@ -2945,6 +3090,7 @@ table.t{border-collapse:collapse;width:100%}
     selectEntry(entry);
     var sourceEditable = canManageSourceEntry(entry);
     $('context-share').classList.toggle('hidden', !!entry.unavailable);
+    $('context-mcp').classList.toggle('hidden', !!entry.unavailable || !state.canManageMounts);
     $('context-rename-source').classList.toggle('hidden', !sourceEditable);
     $('context-remove-source').classList.toggle('hidden', !sourceEditable);
     var menu = $('context-menu');
@@ -3340,6 +3486,91 @@ table.t{border-collapse:collapse;width:100%}
     finally { btn.disabled = false; }
   }
 
+  // ---------- MCP access (per-file/folder API-token grants) ----------
+  function addMcpScopeRow(scopePath, mode) {
+    var row = document.createElement('div');
+    row.className = 'mcp-scope-row';
+    row.style.display = 'flex';
+    row.style.gap = '.4rem';
+    row.style.marginBottom = '.4rem';
+
+    var pathInput = document.createElement('input');
+    pathInput.type = 'text';
+    pathInput.className = 'mcp-scope-path';
+    pathInput.placeholder = '/source/path';
+    pathInput.value = scopePath || '';
+    pathInput.style.flex = '1';
+
+    var modeSelect = document.createElement('select');
+    modeSelect.className = 'mcp-scope-mode';
+    modeSelect.style.width = 'auto';
+    var readOpt = document.createElement('option');
+    readOpt.value = 'read';
+    readOpt.textContent = 'Read';
+    var writeOpt = document.createElement('option');
+    writeOpt.value = 'write';
+    writeOpt.textContent = 'Read + write';
+    modeSelect.append(readOpt, writeOpt);
+    modeSelect.value = mode === 'write' ? 'write' : 'read';
+
+    var removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.className = 'btn btn-ghost btn-icon';
+    removeBtn.title = 'Remove path';
+    removeBtn.innerHTML = ICONS.trash;
+    removeBtn.addEventListener('click', function () {
+      if ($('mcp-scopes').children.length > 1) row.remove();
+    });
+
+    row.append(pathInput, modeSelect, removeBtn);
+    $('mcp-scopes').append(row);
+  }
+
+  function openMcpModal(entry) {
+    hideContextMenu();
+    $('mcp-step-config').classList.remove('hidden');
+    $('mcp-step-success').classList.add('hidden');
+    $('mcp-scopes').innerHTML = '';
+    addMcpScopeRow(entry ? entry.path : '', entry && entry.writeAccess ? 'write' : 'read');
+    $('mcp-label').value = entry ? ('Agent access — ' + (entry.name || entry.path)) : '';
+    $('mcp-expires').value = 'never';
+    $('mcp-published').checked = false;
+    $('mcp-modal').classList.remove('hidden');
+    setTimeout(function () { $('mcp-label').focus(); $('mcp-label').select(); }, 0);
+  }
+
+  function closeMcpModal() { $('mcp-modal').classList.add('hidden'); }
+
+  async function submitMcpGrant() {
+    var rows = $('mcp-scopes').querySelectorAll('.mcp-scope-row');
+    var scopes = [];
+    for (var i = 0; i < rows.length; i += 1) {
+      var pathValue = rows[i].querySelector('.mcp-scope-path').value.trim();
+      if (!pathValue) continue;
+      scopes.push({ path: pathValue, mode: rows[i].querySelector('.mcp-scope-mode').value });
+    }
+    if (scopes.length === 0) { toast('Add at least one path.', 'error'); return; }
+    if (!$('mcp-label').value.trim()) { toast('Add a label first.', 'error'); $('mcp-label').focus(); return; }
+    var btn = $('mcp-create');
+    btn.disabled = true;
+    try {
+      var payload = await api('/dashboard/api/grants', {
+        method: 'POST',
+        body: JSON.stringify({
+          label: $('mcp-label').value.trim(),
+          expires: $('mcp-expires').value,
+          published: $('mcp-published').checked,
+          scopes: scopes,
+        }),
+      });
+      $('mcp-created-endpoint').textContent = payload.endpoint || '';
+      $('mcp-created-token').textContent = payload.token || '';
+      $('mcp-step-config').classList.add('hidden');
+      $('mcp-step-success').classList.remove('hidden');
+    } catch (err) { showError(err); }
+    finally { btn.disabled = false; }
+  }
+
   // ---------- settings ----------
   function renderStatus() {
     if (!state.localOwner) return;
@@ -3568,6 +3799,10 @@ table.t{border-collapse:collapse;width:100%}
     var entry = state.contextEntry || state.selectedEntry;
     if (entry) openLeaseModal(entry);
   });
+  $('context-mcp').addEventListener('click', function () {
+    var entry = state.contextEntry || state.selectedEntry;
+    if (entry) openMcpModal(entry);
+  });
   $('context-properties').addEventListener('click', function () {
     var entry = state.contextEntry || state.selectedEntry;
     if (entry) openPropertiesModal(entry);
@@ -3593,6 +3828,16 @@ table.t{border-collapse:collapse;width:100%}
     catch (err) { showError(err); }
   });
   $('lease-modal').addEventListener('click', function (event) { if (event.target === $('lease-modal')) closeLeaseModal(); });
+  $('mcp-modal-close').addEventListener('click', closeMcpModal);
+  $('mcp-cancel').addEventListener('click', closeMcpModal);
+  $('mcp-done').addEventListener('click', closeMcpModal);
+  $('mcp-add-scope').addEventListener('click', function () { addMcpScopeRow('', 'read'); });
+  $('mcp-create').addEventListener('click', function () { submitMcpGrant().catch(showError); });
+  $('mcp-copy-token').addEventListener('click', async function () {
+    try { await copyToClipboard($('mcp-created-token').textContent || ''); toast('Token copied to clipboard.', 'success'); }
+    catch (err) { showError(err); }
+  });
+  $('mcp-modal').addEventListener('click', function (event) { if (event.target === $('mcp-modal')) closeMcpModal(); });
   $('properties-modal-close').addEventListener('click', closePropertiesModal);
   $('properties-done').addEventListener('click', closePropertiesModal);
   $('properties-modal').addEventListener('click', function (event) { if (event.target === $('properties-modal')) closePropertiesModal(); });
@@ -3600,6 +3845,7 @@ table.t{border-collapse:collapse;width:100%}
     if (event.key === 'Escape') {
       if (!$('context-menu').classList.contains('hidden')) hideContextMenu();
       else if (!$('lease-modal').classList.contains('hidden')) closeLeaseModal();
+      else if (!$('mcp-modal').classList.contains('hidden')) closeMcpModal();
       else if (!$('properties-modal').classList.contains('hidden')) closePropertiesModal();
       else if (!$('mount-modal').classList.contains('hidden')) closeMountModal();
     }

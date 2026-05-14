@@ -65,8 +65,15 @@ export interface ApiTokenInput {
   now?: number;
   clientBinding?: string | null;
   permissions: ApiTokenPermissionInput[];
+  // Pre-resolved permission entries, used by callers (the dashboard) that
+  // scope grants to files/folders rather than whole mounts. When present,
+  // `permissions` is ignored and these are stored verbatim.
+  resolvedPermissions?: PermissionConfig[];
   replacePermissions?: boolean;
   plaintextToken?: string;
+  // Exposure boundary for the new grant. Omit to leave it grandfathered
+  // as published; pass false for a capability-only grant.
+  published?: boolean;
 }
 
 export interface ApiTokenUpdateResult {
@@ -293,7 +300,8 @@ export function addApiTokenToConfig(config: MvmtConfig, inputValue: ApiTokenInpu
   if (!name) throw new Error('API token display name cannot be empty.');
   const description = (inputValue.description ?? '').trim();
   const expiresAt = resolveExpiresAt(inputValue);
-  const permissions = applyPermissionInputs(config, [], inputValue.permissions);
+  const permissions = inputValue.resolvedPermissions
+    ?? applyPermissionInputs(config, [], inputValue.permissions);
   const plaintextToken = inputValue.plaintextToken ?? generateApiToken();
   const createdAt = new Date(inputValue.now ?? Date.now()).toISOString();
   const clientBinding = normalizeClientBinding(inputValue.clientBinding);
@@ -311,6 +319,7 @@ export function addApiTokenToConfig(config: MvmtConfig, inputValue: ApiTokenInpu
     },
     rawToolsEnabled: false,
     permissions,
+    ...(inputValue.published === undefined ? {} : { published: inputValue.published }),
   };
   const clients = [
     ...(config.clients ?? []),
