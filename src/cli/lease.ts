@@ -19,6 +19,7 @@ import {
   listLeases,
   revokeLease,
 } from '../lease/store.js';
+import { leaseSecretsPathForLeaseStore, removeLeaseSecret, saveLeaseSecret } from '../lease/secrets.js';
 import { parseTokenTtl } from '../utils/token-ttl.js';
 import { normalizeTunnelBaseUrl } from '../utils/tunnel.js';
 
@@ -72,13 +73,15 @@ export async function createFolderLease(inputPath: string | string[] | undefined
   if (prepared.config !== config) await saveConfig(configPath, prepared.config);
 
   const ttl = parseTokenTtl(options.expires ?? options.ttl ?? DEFAULT_LEASE_TTL);
-  const created = createLease(resolveLeaseStorePath(options), {
+  const leaseStorePath = resolveLeaseStorePath(options);
+  const created = createLease(leaseStorePath, {
     label,
     path: prepared.resources[0]!.sourcePath,
     resources: prepared.resources,
     expiresAt: ttl.expiresAt,
     permissions,
   });
+  saveLeaseSecret(leaseSecretsPathForLeaseStore(leaseStorePath), created.record.id, created.token);
   const url = leaseUrl(prepared.config, created.record.id, created.token);
 
   if (options.json) {
@@ -100,7 +103,9 @@ export async function createFolderLease(inputPath: string | string[] | undefined
 
 export async function revokeFolderLease(id: string | undefined, options: LeaseCommandOptions = {}): Promise<void> {
   if (!id) throw new Error('Lease id is required.');
-  if (!revokeLease(resolveLeaseStorePath(options), id)) throw new Error(`Unknown lease: ${id}`);
+  const leaseStorePath = resolveLeaseStorePath(options);
+  if (!revokeLease(leaseStorePath, id)) throw new Error(`Unknown lease: ${id}`);
+  removeLeaseSecret(leaseSecretsPathForLeaseStore(leaseStorePath), id);
   console.log(chalk.green(`Lease ${id} revoked`));
 }
 

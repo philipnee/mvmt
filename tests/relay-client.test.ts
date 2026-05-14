@@ -219,6 +219,110 @@ describe('relay client options', () => {
       await once(local, 'close');
     }
   });
+
+  it('reassembles fragmented relay requests before forwarding to local mvmt', async () => {
+    let uploadedBody = '';
+    const local = createHttpServer((req, res) => {
+      if (req.method !== 'PUT' || req.url !== '/upload') {
+        res.statusCode = 404;
+        res.end('not found');
+        return;
+      }
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+      req.on('end', () => {
+        uploadedBody = Buffer.concat(chunks).toString('utf8');
+        res.statusCode = 201;
+        res.end('stored');
+      });
+    });
+    local.listen(0, '127.0.0.1');
+    await once(local, 'listening');
+    const localAddress = local.address();
+    if (!localAddress || typeof localAddress === 'string') throw new Error('local test server did not bind a TCP port');
+
+    let responseFrame: any;
+    const responseSeen = new Promise<void>((resolve) => {
+      const relay = net.createServer((socket) => {
+        let request = '';
+        let upgraded = false;
+        let buffer = Buffer.alloc(0);
+        socket.on('data', (chunk) => {
+          if (!upgraded) {
+            request += chunk.toString('utf8');
+            if (!request.includes('\r\n\r\n')) return;
+            upgraded = true;
+            const key = request.match(/^Sec-WebSocket-Key:\s*(.+)$/im)?.[1]?.trim();
+            const accept = createHash('sha1')
+              .update(`${key ?? ''}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+              .digest('base64');
+            socket.write([
+              'HTTP/1.1 101 Switching Protocols',
+              'Upgrade: websocket',
+              'Connection: Upgrade',
+              `Sec-WebSocket-Accept: ${accept}`,
+              '',
+              '',
+            ].join('\r\n'));
+            buffer = Buffer.concat([buffer, Buffer.from(request.split('\r\n\r\n')[1] ?? '', 'binary')]);
+          } else {
+            buffer = Buffer.concat([buffer, chunk]);
+          }
+          while (true) {
+            const parsed = parseTestFrame(buffer);
+            if (!parsed) return;
+            buffer = buffer.slice(parsed.consumed);
+            if (parsed.opcode !== 0x1) continue;
+            const message = JSON.parse(parsed.payload.toString('utf8'));
+            if (message.type === 'hello') {
+              const requestFrame = JSON.stringify({
+                type: 'request',
+                requestId: 'req-upload',
+                method: 'PUT',
+                path: '/upload',
+                headers: { 'content-type': 'text/plain' },
+                bodyBase64: Buffer.from('hello from relay').toString('base64'),
+              });
+              const splitAt = Math.floor(requestFrame.length / 2);
+              socket.write(Buffer.concat([
+                encodeTestFrame(requestFrame.slice(0, splitAt), { fin: false, opcode: 0x1 }),
+                encodeTestFrame(requestFrame.slice(splitAt), { fin: true, opcode: 0x0 }),
+              ]));
+            } else if (message.type === 'response' && message.requestId === 'req-upload') {
+              responseFrame = message;
+              resolve();
+            }
+          }
+        });
+      });
+      relay.listen(0, '127.0.0.1', async () => {
+        const relayAddress = relay.address();
+        if (!relayAddress || typeof relayAddress === 'string') throw new Error('relay test server did not bind a TCP port');
+        const handle = await startRelayClient({
+          relayUrl: `ws://127.0.0.1:${relayAddress.port}/connect`,
+          workspaceSlug: 'demo',
+          agentToken: 'agent-secret',
+          localPort: localAddress.port,
+          reconnectDelayMs: 10,
+          pingIntervalMs: 0,
+        });
+        responseSeen.finally(async () => {
+          await handle.close();
+          relay.close();
+        });
+      });
+    });
+
+    try {
+      await responseSeen;
+      expect(uploadedBody).toBe('hello from relay');
+      expect(responseFrame.status).toBe(201);
+      expect(Buffer.from(responseFrame.bodyBase64, 'base64').toString('utf8')).toBe('stored');
+    } finally {
+      local.close();
+      await once(local, 'close');
+    }
+  });
 });
 
 async function eventually(condition: () => boolean): Promise<void> {
@@ -230,11 +334,15 @@ async function eventually(condition: () => boolean): Promise<void> {
   expect(condition()).toBe(true);
 }
 
-function encodeTestFrame(message: string): Buffer {
+function encodeTestFrame(
+  message: string,
+  options: { fin?: boolean; opcode?: number } = {},
+): Buffer {
   const payload = Buffer.from(message, 'utf8');
-  if (payload.length < 126) return Buffer.concat([Buffer.from([0x81, payload.length]), payload]);
+  const firstByte = (options.fin ?? true ? 0x80 : 0) | (options.opcode ?? 0x1);
+  if (payload.length < 126) return Buffer.concat([Buffer.from([firstByte, payload.length]), payload]);
   const header = Buffer.alloc(4);
-  header[0] = 0x81;
+  header[0] = firstByte;
   header[1] = 126;
   header.writeUInt16BE(payload.length, 2);
   return Buffer.concat([header, payload]);

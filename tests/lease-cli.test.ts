@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { addPathsToLease, createFolderLease, listFolderLeases, revokeFolderLease } from '../src/cli/lease.js';
 import { readConfig } from '../src/config/loader.js';
 import { listLeases } from '../src/lease/store.js';
+import { findLeaseSecret, leaseSecretsPathForLeaseStore } from '../src/lease/secrets.js';
 
 describe('lease CLI helpers', () => {
   let tmp: string;
@@ -53,6 +54,9 @@ describe('lease CLI helpers', () => {
       uploadCount: 0,
     });
     expect(leases[0].expiresAt).toBeTruthy();
+    const secret = findLeaseSecret(leaseSecretsPathForLeaseStore(leaseStorePath), leases[0].id);
+    expect(secret?.token).toMatch(/^mvmt_l_/);
+    expect(await fs.readFile(leaseStorePath, 'utf-8')).not.toContain(secret!.token);
     expect(logSpy.mock.calls.flat().join('\n')).toContain('(24h default)');
   });
 
@@ -225,5 +229,6 @@ describe('lease CLI helpers', () => {
 
     await revokeFolderLease(id, { leaseStorePath });
     expect(listLeases(leaseStorePath)[0].revokedAt).toBeTruthy();
+    expect(findLeaseSecret(leaseSecretsPathForLeaseStore(leaseStorePath), id)).toBeUndefined();
   });
 });

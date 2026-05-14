@@ -11,6 +11,7 @@ export interface DashboardFileEntry {
   size: number;
   mtimeMs: number;
   writeAccess: boolean;
+  unavailable?: boolean;
 }
 
 export interface DashboardFileListing {
