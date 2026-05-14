@@ -11,7 +11,11 @@ const root = path.resolve(import.meta.dirname, '..');
 const cliArgs = ['--import', 'tsx', 'bin/mvmt.ts', '--no-update-check'];
 const serverOutput = new WeakMap<ChildProcessWithoutNullStreams, string>();
 
-describe('CLI usability', () => {
+// Every test here spawns the real CLI binary as a child process — often
+// several spawns per test — so the 5s default is too tight under CI
+// load. Scope the higher timeout to this exec-heavy suite rather than
+// loosening it globally for the fast unit-test files.
+describe('CLI usability', { timeout: 20_000 }, () => {
   it('shows examples in top-level help', async () => {
     const { stdout } = await runCli(['--help']);
 
@@ -422,6 +426,30 @@ describe('CLI usability', () => {
       })}\n`, 'utf-8');
       const { stdout: listWithUse } = await runCli(['token', '--config', configPath]);
       expect(listWithUse).toContain('12 minutes ago');
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('publishes and unpublishes a scoped API token', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'mvmt-cli-usability-'));
+    const configPath = path.join(tmp, 'config.yaml');
+    const mountRoot = path.join(tmp, 'notes');
+    try {
+      await fs.mkdir(mountRoot);
+      await saveConfig(configPath, parseConfig({
+        version: 1,
+        mounts: [{ name: 'notes', type: 'local_folder', path: '/notes', root: mountRoot }],
+      }));
+      await runCli(['token', 'add', 'codex', '--config', configPath, '--scope', 'notes:read']);
+
+      const { stdout: published } = await runCli(['token', 'publish', 'codex', '--config', configPath]);
+      expect(published).toContain("Token 'codex' published");
+      expect(readConfig(configPath).clients?.[0]).toMatchObject({ id: 'codex', published: true });
+
+      const { stdout: unpublished } = await runCli(['token', 'unpublish', 'codex', '--config', configPath]);
+      expect(unpublished).toContain("Token 'codex' unpublished");
+      expect(readConfig(configPath).clients?.[0]).toMatchObject({ id: 'codex', published: false });
     } finally {
       await fs.rm(tmp, { recursive: true, force: true });
     }

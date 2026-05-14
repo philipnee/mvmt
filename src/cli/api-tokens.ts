@@ -65,8 +65,15 @@ export interface ApiTokenInput {
   now?: number;
   clientBinding?: string | null;
   permissions: ApiTokenPermissionInput[];
+  // Pre-resolved permission entries, used by callers (the dashboard) that
+  // scope grants to files/folders rather than whole mounts. When present,
+  // `permissions` is ignored and these are stored verbatim.
+  resolvedPermissions?: PermissionConfig[];
   replacePermissions?: boolean;
   plaintextToken?: string;
+  // Exposure boundary for the new grant. Omit to leave it grandfathered
+  // as published; pass false for a capability-only grant.
+  published?: boolean;
 }
 
 export interface ApiTokenUpdateResult {
@@ -203,6 +210,37 @@ export async function removeApiToken(id: string | undefined, options: RemoveApiT
   }
 }
 
+export async function setApiTokenPublished(
+  id: string | undefined,
+  published: boolean,
+  options: ApiTokensCommandOptions = {},
+): Promise<void> {
+  try {
+    const configPath = resolveApiTokensConfigPath(options.config);
+    const config = loadConfig(configPath);
+    const tokenId = id ?? await promptForApiTokenId(
+      config,
+      published ? 'Publish which API token?' : 'Unpublish which API token?',
+    );
+
+    const result = await withConfigLock(configPath, async () => {
+      const latest = loadConfig(configPath);
+      const update = setApiTokenPublishedInConfig(latest, tokenId, published);
+      await saveConfig(configPath, update.config);
+      return update;
+    });
+    recordTokenLifecycle(configPath, 'token.edit', result.config, result.client);
+    if (published) {
+      console.log(chalk.green(`Token '${tokenId}' published — it now has a relay door.`));
+    } else {
+      console.log(chalk.green(`Token '${tokenId}' unpublished — local apps keep access, the relay door is closed.`));
+    }
+    console.log(chalk.dim('Running mvmt processes load API-token changes on the next auth request.'));
+  } catch (err) {
+    printApiTokenCommandError(err);
+  }
+}
+
 export async function rotateApiToken(id: string | undefined, options: RotateApiTokenOptions = {}): Promise<void> {
   try {
     const configPath = resolveApiTokensConfigPath(options.config);
@@ -262,7 +300,8 @@ export function addApiTokenToConfig(config: MvmtConfig, inputValue: ApiTokenInpu
   if (!name) throw new Error('API token display name cannot be empty.');
   const description = (inputValue.description ?? '').trim();
   const expiresAt = resolveExpiresAt(inputValue);
-  const permissions = applyPermissionInputs(config, [], inputValue.permissions);
+  const permissions = inputValue.resolvedPermissions
+    ?? applyPermissionInputs(config, [], inputValue.permissions);
   const plaintextToken = inputValue.plaintextToken ?? generateApiToken();
   const createdAt = new Date(inputValue.now ?? Date.now()).toISOString();
   const clientBinding = normalizeClientBinding(inputValue.clientBinding);
@@ -280,6 +319,7 @@ export function addApiTokenToConfig(config: MvmtConfig, inputValue: ApiTokenInpu
     },
     rawToolsEnabled: false,
     permissions,
+    ...(inputValue.published === undefined ? {} : { published: inputValue.published }),
   };
   const clients = [
     ...(config.clients ?? []),
@@ -365,6 +405,26 @@ export function rotateApiTokenInConfig(
   ];
   const nextConfig = ConfigSchema.parse({ ...config, clients });
   return { config: nextConfig, created: false, plaintextToken, client: nextClient };
+}
+
+// Sets the exposure boundary for an API-token grant. `published: false`
+// makes it capability-only (usable by local apps over 127.0.0.1, no
+// relay door); `published: true` gives it a relay door. Distinct from
+// removeApiTokenFromConfig, which deletes the grant entirely.
+export function setApiTokenPublishedInConfig(
+  config: MvmtConfig,
+  id: string,
+  published: boolean,
+): ApiTokenUpdateResult {
+  const tokenId = normalizeApiTokenId(id);
+  const existing = findTokenClient(config, tokenId);
+  const nextClient: ClientConfig = { ...existing, published };
+  const clients = [
+    ...(config.clients ?? []).filter((client) => client.id !== tokenId),
+    nextClient,
+  ];
+  const nextConfig = ConfigSchema.parse({ ...config, clients });
+  return { config: nextConfig, created: false, client: nextClient };
 }
 
 export function removeApiTokenFromConfig(config: MvmtConfig, id: string): MvmtConfig {

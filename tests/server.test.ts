@@ -17,7 +17,7 @@ import { parseConfig, readConfig, saveConfig } from '../src/config/loader.js';
 import { TextContextIndex } from '../src/context/text-index.js';
 import { OAuthStore } from '../src/server/oauth.js';
 import { ToolRouter } from '../src/server/router.js';
-import { addLeaseResources, createLease, listLeases, revokeLease } from '../src/lease/store.js';
+import { addLeaseResources, createLease, listLeases, revokeLease, setLeasePublished } from '../src/lease/store.js';
 import { findLeaseSecret, leaseSecretsPathForLeaseStore } from '../src/lease/secrets.js';
 import { createPrivilegedUser, removePrivilegedUser } from '../src/dashboard/users.js';
 import { createAuditLogger } from '../src/utils/audit.js';
@@ -194,6 +194,170 @@ describe('file lease downloads', () => {
       await server.close();
       fs.rmSync(tmp, { recursive: true, force: true });
     }
+  });
+});
+
+// The exposure boundary: a capability-only grant (explicitly
+// published:false) has no relay door. It still works for apps reaching
+// mvmt over 127.0.0.1; a relay-forwarded request for it is rejected.
+// Grants without an explicit published value are grandfathered as
+// published so existing tokens and leases keep working.
+describe('grant exposure boundary', () => {
+  async function withLeaseServer(
+    run: (ctx: { port: number; leaseStorePath: string; leaseId: string; token: string }) => Promise<void>,
+  ): Promise<void> {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-exposure-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const leaseStorePath = path.join(tmp, '.leases.json');
+    const filePath = path.join(tmp, 'payload.bin');
+    fs.writeFileSync(filePath, Buffer.from([1, 2, 3]));
+    const config = parseConfig({
+      version: 1,
+      mounts: [{ name: 'payload', type: 'local_folder', path: '/payload.bin', root: filePath }],
+    });
+    const lease = createLease(leaseStorePath, {
+      label: 'Payload',
+      path: '/payload.bin',
+      resources: [{ path: '/payload.bin', sourcePath: '/payload.bin', type: 'file' }],
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: config.mounts,
+      leaseStorePath,
+    });
+    try {
+      await run({ port: server.port, leaseStorePath, leaseId: lease.record.id, token: lease.token });
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+
+  const leaseUrl = (port: number, id: string, token: string) =>
+    `http://127.0.0.1:${port}/lease/${id}/files/payload.bin?token=${token}`;
+
+  it('rejects a relay-forwarded request for a capability-only lease', async () => {
+    await withLeaseServer(async ({ port, leaseStorePath, leaseId, token }) => {
+      setLeasePublished(leaseStorePath, leaseId, false);
+      const viaRelay = await fetch(leaseUrl(port, leaseId, token), {
+        headers: { 'X-MVMT-Transport': 'relay' },
+      });
+      expect(viaRelay.status).toBe(403);
+      expect((await viaRelay.json() as { error: string }).error).toBe('lease_not_published');
+    });
+  });
+
+  it('allows a localhost request for a capability-only lease', async () => {
+    await withLeaseServer(async ({ port, leaseStorePath, leaseId, token }) => {
+      setLeasePublished(leaseStorePath, leaseId, false);
+      const local = await fetch(leaseUrl(port, leaseId, token));
+      expect(local.status).toBe(200);
+    });
+  });
+
+  it('allows a relay-forwarded request for a published lease', async () => {
+    await withLeaseServer(async ({ port, leaseStorePath, leaseId, token }) => {
+      setLeasePublished(leaseStorePath, leaseId, true);
+      const viaRelay = await fetch(leaseUrl(port, leaseId, token), {
+        headers: { 'X-MVMT-Transport': 'relay' },
+      });
+      expect(viaRelay.status).toBe(200);
+    });
+  });
+
+  it('grandfathers a lease with no explicit published value as published', async () => {
+    await withLeaseServer(async ({ port, leaseId, token }) => {
+      const viaRelay = await fetch(leaseUrl(port, leaseId, token), {
+        headers: { 'X-MVMT-Transport': 'relay' },
+      });
+      expect(viaRelay.status).toBe(200);
+    });
+  });
+
+  async function withMcpServer(
+    published: boolean | undefined,
+    run: (ctx: { port: number; token: string }) => Promise<void>,
+  ): Promise<void> {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-exposure-mcp-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const root = path.join(tmp, 'workspace');
+    fs.mkdirSync(root, { recursive: true });
+    fs.writeFileSync(path.join(root, 'note.md'), 'hello');
+    const config = parseConfig({
+      version: 1,
+      mounts: [{ name: 'workspace', type: 'local_folder', path: '/workspace', root }],
+      clients: [
+        {
+          id: 'codex',
+          name: 'Codex CLI',
+          auth: { type: 'token', tokenHash: hashApiToken('codex-token') },
+          permissions: [{ path: '/workspace/**', actions: ['read'] }],
+          ...(published === undefined ? {} : { published }),
+        },
+      ],
+    });
+    const router = new ToolRouter();
+    await router.initialize();
+    const server = await startHttpServer(router, {
+      port: 0,
+      tokenPath,
+      leaseMounts: config.mounts,
+      clients: config.clients,
+    });
+    try {
+      await run({ port: server.port, token: 'codex-token' });
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+
+  const mcpInitialize = (port: number, token: string, viaRelay: boolean) =>
+    fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/json, text/event-stream',
+        'Content-Type': 'application/json',
+        ...(viaRelay ? { 'X-MVMT-Transport': 'relay' } : {}),
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 't', version: '0' } },
+      }),
+    });
+
+  it('rejects a relay-forwarded /mcp request for a capability-only token', async () => {
+    await withMcpServer(false, async ({ port, token }) => {
+      const viaRelay = await mcpInitialize(port, token, true);
+      expect(viaRelay.status).toBe(403);
+      expect((await viaRelay.json() as { error: string }).error).toBe('grant_not_published');
+    });
+  });
+
+  it('allows a localhost /mcp request for a capability-only token', async () => {
+    await withMcpServer(false, async ({ port, token }) => {
+      const local = await mcpInitialize(port, token, false);
+      expect(local.status).toBe(200);
+    });
+  });
+
+  it('allows a relay-forwarded /mcp request for a published token', async () => {
+    await withMcpServer(true, async ({ port, token }) => {
+      const viaRelay = await mcpInitialize(port, token, true);
+      expect(viaRelay.status).toBe(200);
+    });
+  });
+
+  it('grandfathers a token with no explicit published value as published', async () => {
+    await withMcpServer(undefined, async ({ port, token }) => {
+      const viaRelay = await mcpInitialize(port, token, true);
+      expect(viaRelay.status).toBe(200);
+    });
   });
 });
 
@@ -1004,6 +1168,90 @@ describe('dashboard access', () => {
     }
   });
 
+  // Creating a share link in the dashboard is the explicit publish
+  // gesture, so the lease is minted published. The publish endpoint then
+  // toggles the relay door without revoking the lease.
+  it('mints dashboard leases published and toggles the relay door via the publish endpoint', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-publish-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const leaseStorePath = path.join(tmp, '.leases.json');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    const root = path.join(tmp, 'read');
+    fs.mkdirSync(root, { recursive: true });
+    fs.writeFileSync(path.join(root, 'note.txt'), 'hello');
+    createPrivilegedUser(usersPath, { username: 'admin', password: 'correct horse battery staple' });
+    const config = parseConfig({
+      version: 1,
+      mounts: [{ name: 'read', type: 'local_folder', path: '/read', root }],
+    });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: config.mounts,
+      leaseStorePath,
+      privilegedUsersPath: usersPath,
+    });
+    try {
+      const cookie = await loginDashboard(server.port, 'admin', 'correct horse battery staple');
+      const create = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: '/read/note.txt', label: 'Note', mode: 'read', expires: '1h' }),
+      });
+      expect(create.status).toBe(201);
+      const createBody = await create.json() as { lease: { id: string; url: string; published?: boolean } };
+      // Dashboard-minted leases are explicitly published.
+      expect(createBody.lease.published).toBe(true);
+      expect(listLeases(leaseStorePath)[0]!.published).toBe(true);
+
+      const leaseId = createBody.lease.id;
+      const token = new URL(createBody.lease.url).searchParams.get('token');
+      const relayHeaders = { 'X-MVMT-Transport': 'relay' };
+
+      // Published: a relay-forwarded request works.
+      const beforeUnpublish = await fetch(
+        `http://127.0.0.1:${server.port}/lease/${leaseId}/files?token=${token}`,
+        { headers: relayHeaders },
+      );
+      expect(beforeUnpublish.status).toBe(200);
+
+      const unpublish = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases/${leaseId}/publish`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ published: false }),
+      });
+      expect(unpublish.status).toBe(200);
+      expect((await unpublish.json() as { lease: { published: boolean } }).lease.published).toBe(false);
+
+      // Capability-only now: relay is rejected, localhost still works.
+      const afterUnpublishRelay = await fetch(
+        `http://127.0.0.1:${server.port}/lease/${leaseId}/files?token=${token}`,
+        { headers: relayHeaders },
+      );
+      expect(afterUnpublishRelay.status).toBe(403);
+      const afterUnpublishLocal = await fetch(
+        `http://127.0.0.1:${server.port}/lease/${leaseId}/files?token=${token}`,
+      );
+      expect(afterUnpublishLocal.status).toBe(200);
+
+      // Re-publish restores the relay door.
+      const republish = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases/${leaseId}/publish`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ published: true }),
+      });
+      expect(republish.status).toBe(200);
+      const afterRepublish = await fetch(
+        `http://127.0.0.1:${server.port}/lease/${leaseId}/files?token=${token}`,
+        { headers: relayHeaders },
+      );
+      expect(afterRepublish.status).toBe(200);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   // The relay routes /t/{slug}/** to the agent. If we built share URLs
   // from baseUrlFor(req) we'd drop the workspace prefix and the public
   // link would 404 on the relay's catch-all error page. Make sure both
@@ -1363,6 +1611,17 @@ describe('dashboard access', () => {
       expect(html).toContain('Rename source');
       expect(html).toContain('Replace link');
       expect(html).toContain('You can copy this link again from the dashboard');
+      expect(html).toContain("'/dashboard/api/leases/' + encodeURIComponent(id) + '/publish'");
+      expect(html).toContain("publishBtn.textContent = isPublished ? 'Unpublish' : 'Publish'");
+      expect(html).toContain('id="mcp-modal"');
+      expect(html).toContain('data-view="mcp"');
+      expect(html).toContain('id="view-mcp-panel"');
+      expect(html).toContain('id="new-grant"');
+      expect(html).toContain("api('/dashboard/api/grants'");
+      expect(html).toContain('function submitMcpGrant()');
+      expect(html).toContain('function renderGrantRow(grant)');
+      // The old context-menu MCP entry point is gone — replaced by the tab.
+      expect(html).not.toContain('id="context-mcp"');
       expect(html).not.toContain('id="add-mount-settings"');
       expect(html).not.toContain('id="mounts-wrap"');
       expect(html).not.toContain('...(opts.headers || {})');
@@ -1554,6 +1813,233 @@ describe('dashboard access', () => {
         body: JSON.stringify({ username: 'sarah', password: 'correct horse battery staple' }),
       });
       expect(loginAgain.status).toBe(401);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  // The dashboard MCP-access tab mints clients[] API-token grants. A
+  // grant is either "all mounts" (one /** scope that tracks the mount
+  // list) or a per-mount selection. Creation is admin + config-path
+  // gated; the resulting grant honours the publish exposure boundary.
+  function mvmtGrantFixture(): { tmp: string; configPath: string; usersPath: string; tokenPath: string; leaseStorePath: string } {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-grant-test-'));
+    const configPath = path.join(tmp, 'config.yaml');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    const workspace = path.join(tmp, 'workspace');
+    const readonly = path.join(tmp, 'readonly');
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.mkdirSync(readonly, { recursive: true });
+    fs.writeFileSync(path.join(workspace, 'note.md'), 'hello');
+    createPrivilegedUser(usersPath, { username: 'admin', password: 'correct horse battery staple', admin: true });
+    createPrivilegedUser(usersPath, { username: 'member', password: 'correct horse battery staple' });
+    return {
+      tmp,
+      configPath,
+      usersPath,
+      tokenPath: path.join(tmp, '.session-token'),
+      leaseStorePath: path.join(tmp, '.leases.json'),
+    };
+  }
+
+  it('mints all-mounts and per-mount MCP grants from the dashboard and lists them', async () => {
+    const fx = mvmtGrantFixture();
+    await saveConfig(fx.configPath, parseConfig({
+      version: 1,
+      mounts: [
+        { name: 'workspace', type: 'local_folder', path: '/workspace', root: path.join(fx.tmp, 'workspace'), writeAccess: true },
+        { name: 'readonly', type: 'local_folder', path: '/readonly', root: path.join(fx.tmp, 'readonly') },
+      ],
+    }));
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath: fx.tokenPath,
+      configPath: fx.configPath,
+      leaseMounts: () => readConfig(fx.configPath).mounts,
+      clients: () => readConfig(fx.configPath).clients,
+      leaseStorePath: fx.leaseStorePath,
+      privilegedUsersPath: fx.usersPath,
+    });
+    try {
+      const cookie = await loginDashboard(server.port, 'admin', 'correct horse battery staple');
+      const post = (body: unknown) => fetch(`http://127.0.0.1:${server.port}/dashboard/api/grants`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      // All-mounts grant → one /** scope that tracks the mount list.
+      const all = await post({ label: 'Claude - everything', expires: 'never', published: true, allMounts: true });
+      expect(all.status).toBe(201);
+      const allBody = await all.json() as { grant: { id: string }; token: string; endpoint: string };
+      expect(allBody.token).toMatch(/^mvmt_t_/);
+      expect(allBody.endpoint).toMatch(/\/mcp$/);
+      const allClient = readConfig(fx.configPath).clients?.find((c) => c.id === allBody.grant.id);
+      expect(allClient?.permissions).toEqual([{ path: '/**', actions: ['search', 'read', 'write'] }]);
+      expect(allClient?.published).toBe(true);
+
+      // Per-mount grant → one resolved scope entry per selected mount.
+      const custom = await post({
+        label: 'Claude - workspace only',
+        published: false,
+        scopes: [{ path: '/workspace', mode: 'write' }, { path: '/readonly', mode: 'read' }],
+      });
+      expect(custom.status).toBe(201);
+      const customBody = await custom.json() as { grant: { id: string } };
+      const customClient = readConfig(fx.configPath).clients?.find((c) => c.id === customBody.grant.id);
+      expect(customClient?.permissions).toEqual([
+        { path: '/workspace/**', actions: ['search', 'read', 'write'] },
+        { path: '/readonly/**', actions: ['search', 'read'] },
+      ]);
+      expect(customClient?.published).toBe(false);
+
+      // GET lists both, with scope summaries and reach.
+      const list = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/grants`, { headers: { Cookie: cookie } });
+      expect(list.status).toBe(200);
+      const listBody = await list.json() as { canManage: boolean; grants: { id: string; scope: string; published: boolean }[] };
+      expect(listBody.canManage).toBe(true);
+      const allRow = listBody.grants.find((g) => g.id === allBody.grant.id);
+      const customRow = listBody.grants.find((g) => g.id === customBody.grant.id);
+      expect(allRow).toMatchObject({ scope: 'All mounts', published: true });
+      expect(customRow).toMatchObject({ scope: '2 mounts', published: false });
+    } finally {
+      await server.close();
+      fs.rmSync(fx.tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects invalid MCP grant requests and never writes a partial grant', async () => {
+    const fx = mvmtGrantFixture();
+    await saveConfig(fx.configPath, parseConfig({
+      version: 1,
+      mounts: [{ name: 'readonly', type: 'local_folder', path: '/readonly', root: path.join(fx.tmp, 'readonly') }],
+    }));
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath: fx.tokenPath,
+      configPath: fx.configPath,
+      leaseMounts: () => readConfig(fx.configPath).mounts,
+      clients: () => readConfig(fx.configPath).clients,
+      leaseStorePath: fx.leaseStorePath,
+      privilegedUsersPath: fx.usersPath,
+    });
+    try {
+      const adminCookie = await loginDashboard(server.port, 'admin', 'correct horse battery staple');
+      const post = (cookie: string, body: unknown) => fetch(`http://127.0.0.1:${server.port}/dashboard/api/grants`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      const noLabel = await post(adminCookie, { allMounts: true });
+      expect(noLabel.status).toBe(400);
+      expect((await noLabel.json() as { error: string }).error).toBe('label_required');
+
+      const noScope = await post(adminCookie, { label: 'x' });
+      expect(noScope.status).toBe(400);
+      expect((await noScope.json() as { error: string }).error).toBe('scope_required');
+
+      const outside = await post(adminCookie, { label: 'x', scopes: [{ path: '/not-a-mount', mode: 'read' }] });
+      expect(outside.status).toBe(400);
+
+      const writeReadOnly = await post(adminCookie, { label: 'x', scopes: [{ path: '/readonly', mode: 'write' }] });
+      expect(writeReadOnly.status).toBe(400);
+      expect((await writeReadOnly.json() as { error: string }).error).toBe('mount_read_only');
+
+      const memberCookie = await loginDashboard(server.port, 'member', 'correct horse battery staple');
+      const nonAdmin = await post(memberCookie, { label: 'x', allMounts: true });
+      expect(nonAdmin.status).toBe(403);
+
+      // A non-admin can still see the (empty) list — no silent dead-end.
+      const memberList = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/grants`, { headers: { Cookie: memberCookie } });
+      expect(memberList.status).toBe(200);
+      expect((await memberList.json() as { canManage: boolean }).canManage).toBe(false);
+
+      expect(readConfig(fx.configPath).clients ?? []).toEqual([]);
+    } finally {
+      await server.close();
+      fs.rmSync(fx.tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('publishes, unpublishes, and revokes an MCP grant from the dashboard', async () => {
+    const fx = mvmtGrantFixture();
+    await saveConfig(fx.configPath, parseConfig({
+      version: 1,
+      mounts: [{ name: 'workspace', type: 'local_folder', path: '/workspace', root: path.join(fx.tmp, 'workspace'), writeAccess: true }],
+    }));
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath: fx.tokenPath,
+      configPath: fx.configPath,
+      leaseMounts: () => readConfig(fx.configPath).mounts,
+      clients: () => readConfig(fx.configPath).clients,
+      leaseStorePath: fx.leaseStorePath,
+      privilegedUsersPath: fx.usersPath,
+    });
+    try {
+      const cookie = await loginDashboard(server.port, 'admin', 'correct horse battery staple');
+      const created = await (await fetch(`http://127.0.0.1:${server.port}/dashboard/api/grants`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label: 'Claude', published: false, allMounts: true }),
+      })).json() as { grant: { id: string }; token: string };
+      const id = created.grant.id;
+
+      const publish = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/grants/${id}/publish`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ published: true }),
+      });
+      expect(publish.status).toBe(200);
+      expect(readConfig(fx.configPath).clients?.[0]?.published).toBe(true);
+
+      const unpublish = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/grants/${id}/publish`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ published: false }),
+      });
+      expect(unpublish.status).toBe(200);
+      expect(readConfig(fx.configPath).clients?.[0]?.published).toBe(false);
+
+      const revoke = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/grants/${id}`, {
+        method: 'DELETE',
+        headers: { Cookie: cookie },
+      });
+      expect(revoke.status).toBe(200);
+      expect(readConfig(fx.configPath).clients ?? []).toEqual([]);
+
+      const revokeMissing = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/grants/grant-missing`, {
+        method: 'DELETE',
+        headers: { Cookie: cookie },
+      });
+      expect(revokeMissing.status).toBe(404);
+    } finally {
+      await server.close();
+      fs.rmSync(fx.tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses dashboard MCP grant creation when no configPath is wired', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-grant-noconfig-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    createPrivilegedUser(usersPath, { username: 'admin', password: 'correct horse battery staple', admin: true });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: [],
+      privilegedUsersPath: usersPath,
+    });
+    try {
+      const cookie = await loginDashboard(server.port, 'admin', 'correct horse battery staple');
+      const blocked = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/grants`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label: 'x', allMounts: true }),
+      });
+      expect(blocked.status).toBe(403);
     } finally {
       await server.close();
       fs.rmSync(tmp, { recursive: true, force: true });
@@ -2513,6 +2999,70 @@ describe('startHttpServer lifecycle', () => {
       expect(metadata.issuer).toBe('https://mvmt.example.com');
       expect(metadata.authorization_endpoint).toBe('https://mvmt.example.com/authorize');
       expect(JSON.stringify(metadata)).not.toContain('attacker');
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  // When mvmt is reached through a relay path prefix (e.g. /t/demo), the
+  // OAuth discovery chain must keep that prefix end to end. getBaseUrl()
+  // strips the path, which would point WWW-Authenticate, the metadata
+  // docs, and the resource/issuer at the relay root — where they 404 and
+  // the client (Claude) reports "couldn't reach the MCP server".
+  it('keeps the relay workspace prefix across the whole OAuth discovery chain', async () => {
+    const router = new ToolRouter();
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-oauth-prefix-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const server = await startHttpServer(router, {
+      port: 0,
+      tokenPath,
+      resolvePublicBaseUrl: () => 'https://mvmt-relay.fly.dev/t/demo',
+    });
+    const base = 'https://mvmt-relay.fly.dev/t/demo';
+    try {
+      // Step 1: the unauthenticated /mcp 401 points at the prefixed metadata.
+      const unauth = await fetch(`http://127.0.0.1:${server.port}/mcp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      expect(unauth.status).toBe(401);
+      expect(unauth.headers.get('www-authenticate'))
+        .toContain(`resource_metadata="${base}/.well-known/oauth-protected-resource"`);
+
+      // Step 2: protected-resource metadata advertises the prefixed resource.
+      const resourceMeta = await (await fetch(
+        `http://127.0.0.1:${server.port}/.well-known/oauth-protected-resource`,
+      )).json() as { resource: string; authorization_servers: string[] };
+      expect(resourceMeta.resource).toBe(`${base}/mcp`);
+      expect(resourceMeta.authorization_servers).toEqual([base]);
+
+      // Step 3: authorization-server metadata advertises prefixed endpoints.
+      const authMeta = await (await fetch(
+        `http://127.0.0.1:${server.port}/.well-known/oauth-authorization-server`,
+      )).json() as Record<string, string>;
+      expect(authMeta.issuer).toBe(base);
+      expect(authMeta.authorization_endpoint).toBe(`${base}/authorize`);
+      expect(authMeta.token_endpoint).toBe(`${base}/token`);
+      expect(authMeta.registration_endpoint).toBe(`${base}/register`);
+
+      // Step 4: the approval page form must POST relatively. An absolute
+      // action="/authorize" would submit to the relay root and 404.
+      const sessionToken = fs.readFileSync(tokenPath, 'utf-8').trim();
+      await fetch(`http://127.0.0.1:${server.port}/register`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${sessionToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client_id: 'test-client', redirect_uris: ['https://client.example/callback'] }),
+      });
+      const approvalPage = await (await fetch(
+        `http://127.0.0.1:${server.port}/authorize?response_type=code&client_id=test-client`
+        + `&redirect_uri=https%3A%2F%2Fclient.example%2Fcallback&resource=${encodeURIComponent(`${base}/mcp`)}`
+        + `&code_challenge=secret-challenge&code_challenge_method=S256`,
+      )).text();
+      expect(approvalPage).toContain('<form method="POST" action="authorize">');
+      expect(approvalPage).not.toContain('action="/authorize"');
     } finally {
       await server.close();
       fs.rmSync(tmp, { recursive: true, force: true });

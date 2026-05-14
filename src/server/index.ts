@@ -29,9 +29,10 @@ import {
   renderAuthorizePage,
 } from './oauth.js';
 import { rateLimit } from './rate-limit.js';
-import { ClientConfig, LocalFolderMountConfig } from '../config/schema.js';
+import { ClientConfig, LocalFolderMountConfig, PermissionConfig } from '../config/schema.js';
 import { readConfig, saveConfig, withConfigLock } from '../config/loader.js';
 import { addMountToConfig, editMountInConfig, MountInput, removeMountFromConfig } from '../cli/mounts.js';
+import { addApiTokenToConfig, removeApiTokenFromConfig, setApiTokenPublishedInConfig } from '../cli/api-tokens.js';
 import { resolveSetupPath } from '../connectors/setup-paths.js';
 import { listDashboardFiles, normalizeDashboardPath, resolveDashboardFileTarget } from '../dashboard/files.js';
 import {
@@ -50,15 +51,16 @@ import {
   leaseAllows,
   LeaseRecord,
   LeaseResource,
-  leaseResources,
   leaseUnavailableReason,
   listLeases,
   recordLeaseUse,
   revokeLease,
   rotateLeaseToken,
+  setLeasePublished,
   validateLeaseToken,
 } from '../lease/store.js';
 import { findLeaseSecret, leaseSecretsPathForLeaseStore, removeLeaseSecret, saveLeaseSecret } from '../lease/secrets.js';
+import { clientConfigToGrant, isGrantPublished, leaseGrantScope } from '../grant/model.js';
 import {
   attachClientIdentity,
   ClientIdentity,
@@ -239,11 +241,14 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   // Proxied/tunneled deployments should set resolvePublicBaseUrl so OAuth
   // resource audience checks do not depend on the request Host header.
   const baseUrlFor = (req: Request): string => getBaseUrl(req, resolvePublicBaseUrl?.());
-  // baseUrlFor() strips the path because OAuth issuer/audience checks need
-  // just protocol+host. User-facing share links must keep the workspace
-  // prefix (e.g. https://relay.example.com/t/demo) so the relay can route
-  // /lease/... back to the right agent — without it the public URL hits
-  // the relay's catch-all "no explicit mapping for /error" 404.
+  // baseUrlFor() returns just protocol+host — fine for origin comparison,
+  // but it strips any relay workspace prefix (e.g. /t/demo). Every URL
+  // we hand to a client or browser must keep that prefix so the relay
+  // can route it back to this agent — share links, and the OAuth issuer/
+  // metadata/endpoints/resource. Without the prefix those URLs hit the
+  // relay's catch-all "no explicit mapping for /error" 404 and the OAuth
+  // discovery chain dead-ends. When no relay URL is configured this
+  // falls back to baseUrlFor(), so local-only behaviour is unchanged.
   const userFacingBaseUrlFor = (req: Request): string => resolvePublicBaseUrl?.() ?? baseUrlFor(req);
   const app = express();
   app.use(express.json({ limit: '10mb' }));
@@ -311,7 +316,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     }
     const authHeader = firstHeaderValue(req.headers.authorization);
     if (!authHeader) {
-      const baseUrl = baseUrlFor(req);
+      const baseUrl = userFacingBaseUrlFor(req);
       res.setHeader(
         'WWW-Authenticate',
         `Bearer realm="mvmt", resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`,
@@ -321,7 +326,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       return;
     }
     if (!authHeader.startsWith('Bearer ')) {
-      const baseUrl = baseUrlFor(req);
+      const baseUrl = userFacingBaseUrlFor(req);
       res.setHeader(
         'WWW-Authenticate',
         `Bearer realm="mvmt", resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`,
@@ -335,7 +340,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     // copies the client-supplied `resource` into the token's `aud`;
     // we validate it here so a token minted for a different resource
     // cannot be replayed at this server.
-    const expectedAudience = `${baseUrlFor(req)}/mcp`;
+    const expectedAudience = `${userFacingBaseUrlFor(req)}/mcp`;
     const oauthAccessToken = oauth.validateAccessToken(authHeader, {
       expectedAudience,
       allowLegacyNoAudience: true,
@@ -372,13 +377,26 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       });
       return;
     }
+    if (identity && isRelayRequest(req) && !isGrantPublished(identity.published)) {
+      // Exposure boundary: a capability-only grant (explicitly published:
+      // false) has no relay door. The credential still works for local
+      // apps over 127.0.0.1; a relay-forwarded request for it is
+      // rejected. Grants without an explicit published value are
+      // grandfathered as published.
+      logHttpRequest(requestLog, req, 403, authLogKind(req), 'grant_not_published', identity.id);
+      res.status(403).json({
+        error: 'grant_not_published',
+        error_description: 'This grant is not published for relay access',
+      });
+      return;
+    }
     if (identity) {
       attachClientIdentity(req, identity);
       next();
       return;
     }
 
-    const baseUrl = baseUrlFor(req);
+    const baseUrl = userFacingBaseUrlFor(req);
     res.setHeader(
       'WWW-Authenticate',
       `Bearer realm="mvmt", resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`,
@@ -388,7 +406,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   };
 
   const authorizationServerMetadata = (req: Request, res: Response) => {
-    const baseUrl = baseUrlFor(req);
+    const baseUrl = userFacingBaseUrlFor(req);
     logHttpRequest(requestLog, req, 200, 'oauth.discovery');
     res.json({
       issuer: baseUrl,
@@ -406,7 +424,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   app.get('/.well-known/oauth-authorization-server/mcp', authorizationServerMetadata);
 
   const protectedResourceMetadata = (req: Request, res: Response) => {
-    const baseUrl = baseUrlFor(req);
+    const baseUrl = userFacingBaseUrlFor(req);
     logHttpRequest(requestLog, req, 200, 'oauth.resource');
     res.json({
       resource: `${baseUrl}/mcp`,
@@ -510,7 +528,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       res.status(400).type('text/plain').send(parsed.error);
       return;
     }
-    const canonicalResource = `${baseUrlFor(req)}/mcp`;
+    const canonicalResource = `${userFacingBaseUrlFor(req)}/mcp`;
     const { params, resourceDefaulted } = defaultAuthorizeResource(parsed, canonicalResource);
     if (!oauth.isRedirectUriAllowed(params.clientId, params.redirectUri)) {
       const rejectedHost = safeHost(params.redirectUri);
@@ -548,7 +566,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       res.status(400).type('text/plain').send(parsed.error);
       return;
     }
-    const canonicalResource = `${baseUrlFor(req)}/mcp`;
+    const canonicalResource = `${userFacingBaseUrlFor(req)}/mcp`;
     const { params, resourceDefaulted } = defaultAuthorizeResource(parsed, canonicalResource);
     if (!oauth.isRedirectUriAllowed(params.clientId, params.redirectUri)) {
       const rejectedHost = safeHost(params.redirectUri);
@@ -960,6 +978,9 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
         resources,
         expiresAt: ttl.expiresAt,
         permissions: [...permissions],
+        // Creating a share link in the dashboard is the explicit publish
+        // gesture — the lease is meant to be reachable over the relay.
+        published: true,
       });
       saveLeaseSecret(leaseSecretsPath, created.record.id, created.token);
       const url = leasePublicUrl(userFacingBaseUrlFor(req), created.record.id, created.token);
@@ -982,6 +1003,38 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     removeLeaseSecret(leaseSecretsPath, id);
     logHttpRequest(requestLog, req, 200, 'dashboard.leases', `revoked ${id}`);
     res.json({ ok: true });
+  });
+
+  // Toggles the exposure boundary for a lease. Unpublishing removes the
+  // relay door without revoking the lease — local apps can still reach
+  // it over 127.0.0.1. Distinct from revoke, which kills the lease.
+  app.post('/dashboard/api/leases/:id/publish', dashboardOriginMiddleware, dashboardAuthMiddleware, (req, res) => {
+    const id = firstStringQuery(req.params.id);
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const published = body.published === true;
+    if (!id) {
+      res.status(400).json({ error: 'id_required' });
+      return;
+    }
+    const lease = findLease(leaseStorePath, id);
+    if (!lease) {
+      logHttpRequest(requestLog, req, 404, 'dashboard.leases', 'unknown_lease');
+      res.status(404).json({ error: 'lease_not_found' });
+      return;
+    }
+    if (lease.revokedAt) {
+      logHttpRequest(requestLog, req, 410, 'dashboard.leases', 'revoked_lease');
+      res.status(410).json({ error: 'lease_revoked' });
+      return;
+    }
+    const updated = setLeasePublished(leaseStorePath, id, published);
+    if (!updated) {
+      logHttpRequest(requestLog, req, 404, 'dashboard.leases', 'unknown_lease');
+      res.status(404).json({ error: 'lease_not_found' });
+      return;
+    }
+    logHttpRequest(requestLog, req, 200, 'dashboard.leases', `${published ? 'published' : 'unpublished'} ${id}`);
+    res.json({ lease: updated });
   });
 
   // Rotates a lease's token, invalidating any previously-issued URL. Used
@@ -1111,6 +1164,161 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     }
   });
 
+  // MCP-access grants — clients[] API tokens the owner mints from the
+  // dashboard's MCP tab. A grant is either "all mounts" (one /** scope
+  // that follows the mount list) or a per-mount selection. Mutating
+  // endpoints are admin + local-only and need options.configPath; the
+  // list is readable by any signed-in dashboard user so a non-admin can
+  // see what exists without a silent dead-end.
+  const grantScopeSummary = (client: ClientConfig): string => {
+    const grant = clientConfigToGrant(client);
+    if (grant.scope.length === 1 && grant.scope[0]!.path === '/**') return 'All mounts';
+    if (grant.scope.length === 0) return 'No access';
+    return grant.scope.length === 1 ? '1 mount' : `${grant.scope.length} mounts`;
+  };
+
+  app.get('/dashboard/api/grants', dashboardOriginMiddleware, dashboardAuthMiddleware, (req, res) => {
+    const session = res.locals.dashboardSession as DashboardSession;
+    const tokenClients = resolveClients(options.clients).filter((client) => client.auth.type === 'token');
+    logHttpRequest(requestLog, req, 200, 'dashboard.grants');
+    res.json({
+      canManage: Boolean(options.configPath) && session.admin,
+      grants: tokenClients.map((client) => ({
+        id: client.id,
+        label: client.name,
+        scope: grantScopeSummary(client),
+        published: isGrantPublished(client.published),
+        expiresAt: client.expiresAt,
+        lastUsedAt: client.lastUsedAt,
+      })),
+    });
+  });
+
+  // Mint an MCP-access grant. `allMounts: true` stores a single /** scope
+  // that tracks the mount list; otherwise `scopes` is a per-mount list,
+  // each entry resolved against the configured mounts before it becomes
+  // a permission entry — a scope that does not land inside a mount is
+  // rejected, so a grant can never reach outside the namespace.
+  app.post('/dashboard/api/grants', dashboardOriginMiddleware, dashboardAuthMiddleware, dashboardLocalMiddleware, dashboardAdminMiddleware, async (req, res) => {
+    const configPath = requireConfigPath(req, res);
+    if (!configPath) return;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const label = typeof body.label === 'string' ? body.label.trim() : '';
+    const published = body.published === true;
+    const allMounts = body.allMounts === true;
+    const rawScopes = Array.isArray(body.scopes) ? body.scopes : [];
+    if (!label) {
+      res.status(400).json({ error: 'label_required' });
+      return;
+    }
+    if (!allMounts && rawScopes.length === 0) {
+      res.status(400).json({ error: 'scope_required' });
+      return;
+    }
+    try {
+      let permissions: PermissionConfig[];
+      if (allMounts) {
+        // One /** scope. Mount-level writeAccess still gates real writes,
+        // and the grant automatically follows mounts added later.
+        permissions = [{ path: '/**', actions: ['search', 'read', 'write'] }];
+      } else {
+        const mounts = resolveLeaseMounts(options.leaseMounts);
+        permissions = [];
+        for (const entry of rawScopes) {
+          const scope = (entry ?? {}) as Record<string, unknown>;
+          const scopePath = typeof scope.path === 'string' ? scope.path.trim() : '';
+          const mode = scope.mode === 'write' ? 'write' : 'read';
+          if (!scopePath) {
+            res.status(400).json({ error: 'scope_path_required' });
+            return;
+          }
+          const target = await resolveDashboardFileTarget(mounts, scopePath);
+          if (mode === 'write' && !target.writeAccess) {
+            res.status(400).json({ error: 'mount_read_only', detail: target.virtualPath });
+            return;
+          }
+          permissions.push({
+            path: target.type === 'file'
+              ? target.virtualPath
+              : `${stripTrailingSlashes(target.virtualPath)}/**`,
+            actions: mode === 'write' ? ['search', 'read', 'write'] : ['search', 'read'],
+          });
+        }
+      }
+      const expires = typeof body.expires === 'string' && body.expires ? body.expires : undefined;
+      const grantId = `grant-${randomUUID().slice(0, 8)}`;
+      const saved = await withConfigLock(configPath, async () => {
+        const current = readConfig(configPath);
+        const update = addApiTokenToConfig(current, {
+          id: grantId,
+          name: label,
+          // permissions is ignored when resolvedPermissions is present.
+          permissions: [],
+          resolvedPermissions: permissions,
+          ...(expires ? { expires } : {}),
+          published,
+        });
+        await saveConfig(configPath, update.config);
+        return update;
+      });
+      logHttpRequest(requestLog, req, 201, 'dashboard.grants', `created ${saved.client.id}`);
+      res.status(201).json({
+        grant: { id: saved.client.id, label: saved.client.name, published },
+        token: saved.plaintextToken,
+        endpoint: `${userFacingBaseUrlFor(req)}/mcp`,
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'grant_failed';
+      logHttpRequest(requestLog, req, 400, 'dashboard.grants', detail);
+      res.status(400).json({ error: 'grant_failed', detail });
+    }
+  });
+
+  // Toggle a grant's relay door. Unpublishing keeps the grant usable by
+  // local apps over 127.0.0.1; it just loses relay reachability.
+  app.post('/dashboard/api/grants/:id/publish', dashboardOriginMiddleware, dashboardAuthMiddleware, dashboardLocalMiddleware, dashboardAdminMiddleware, async (req, res) => {
+    const configPath = requireConfigPath(req, res);
+    if (!configPath) return;
+    const id = typeof req.params.id === 'string' ? req.params.id : '';
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const published = body.published === true;
+    try {
+      const saved = await withConfigLock(configPath, async () => {
+        const current = readConfig(configPath);
+        const update = setApiTokenPublishedInConfig(current, id, published);
+        await saveConfig(configPath, update.config);
+        return update;
+      });
+      logHttpRequest(requestLog, req, 200, 'dashboard.grants', `${published ? 'published' : 'unpublished'} ${id}`);
+      res.json({ grant: { id: saved.client.id, label: saved.client.name, published } });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'grant_not_found';
+      logHttpRequest(requestLog, req, 404, 'dashboard.grants', detail);
+      res.status(404).json({ error: 'grant_not_found', detail });
+    }
+  });
+
+  // Revoke a grant — removes the clients[] entry entirely. Distinct from
+  // unpublishing, which only closes the relay door.
+  app.delete('/dashboard/api/grants/:id', dashboardOriginMiddleware, dashboardAuthMiddleware, dashboardLocalMiddleware, dashboardAdminMiddleware, async (req, res) => {
+    const configPath = requireConfigPath(req, res);
+    if (!configPath) return;
+    const id = typeof req.params.id === 'string' ? req.params.id : '';
+    try {
+      await withConfigLock(configPath, async () => {
+        const current = readConfig(configPath);
+        const next = removeApiTokenFromConfig(current, id);
+        await saveConfig(configPath, next);
+      });
+      logHttpRequest(requestLog, req, 200, 'dashboard.grants', `revoked ${id}`);
+      res.json({ ok: true });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'grant_not_found';
+      logHttpRequest(requestLog, req, 404, 'dashboard.grants', detail);
+      res.status(404).json({ error: 'grant_not_found', detail });
+    }
+  });
+
   const authorizeLeaseRequest = (req: Request, res: Response): ReturnType<typeof findLease> => {
     const id = regexParam(req, 0) ?? firstStringQuery(req.params.id);
     const lease = id ? findLease(leaseStorePath, id) : undefined;
@@ -1131,6 +1339,16 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     if (unavailable) {
       logHttpRequest(requestLog, req, 410, 'lease.request', unavailable, lease.id);
       res.status(410).json({ error: `lease_${unavailable}` });
+      return undefined;
+    }
+
+    // Exposure boundary: a capability-only lease (explicitly published:
+    // false) has no relay door. It still works for local apps over
+    // 127.0.0.1; a relay-forwarded request for it is rejected. Leases
+    // without an explicit published value are grandfathered as published.
+    if (isRelayRequest(req) && !isGrantPublished(lease.published)) {
+      logHttpRequest(requestLog, req, 403, 'lease.request', 'not_published', lease.id);
+      res.status(403).json({ error: 'lease_not_published' });
       return undefined;
     }
     return lease;
@@ -1500,19 +1718,15 @@ function resolveLeaseMounts(value: HttpServerOptions['leaseMounts']): readonly L
 }
 
 function identityFromLease(lease: LeaseRecord): ClientIdentity {
+  // Scope resolution is delegated to the Grant read-model so leases and
+  // API tokens share one source of truth for path/action mapping.
   return {
     id: `lease:${lease.id}`,
     name: `Lease: ${lease.label}`,
     source: 'lease',
     rawToolsEnabled: false,
-    permissions: leaseAllows(lease, 'read')
-      ? leaseResources(lease).map((resource) => ({
-          path: resource.type === 'folder' ? `${stripTrailingSlashes(resource.sourcePath)}/**` : resource.sourcePath,
-          actions: leaseAllows(lease, 'write')
-            ? ['search' as const, 'read' as const, 'write' as const]
-            : ['search' as const, 'read' as const],
-        }))
-      : [],
+    permissions: leaseGrantScope(lease),
+    ...(lease.published === undefined ? {} : { published: lease.published }),
   };
 }
 
@@ -1545,8 +1759,16 @@ function remoteAddressFor(req: Request): string | undefined {
   return raw.startsWith('::ffff:') ? raw.slice(7) : raw;
 }
 
+// True when the request reached this server through the relay rather than
+// over localhost. The relay stamps every forwarded request with this
+// header; a request without it came in over 127.0.0.1, which only a
+// process already on this machine can do.
+function isRelayRequest(req: Request): boolean {
+  return firstHeaderValue(req.headers['x-mvmt-transport'])?.toLowerCase() === 'relay';
+}
+
 function isLocalDashboardRequest(req: Request): boolean {
-  if (firstHeaderValue(req.headers['x-mvmt-transport'])?.toLowerCase() === 'relay') return false;
+  if (isRelayRequest(req)) return false;
   const hostHeader = firstHeaderValue(req.headers.host);
   if (!hostHeader) return false;
   const bracketEnd = hostHeader.indexOf(']');
@@ -2362,7 +2584,8 @@ table.t{border-collapse:collapse;width:100%}
     <div class="finder">
       <aside class="finder-sidebar">
         <button type="button" class="nav-btn active" data-view="files"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>Files</span><span class="nav-count" id="sources-count"></span></button>
-        <button type="button" class="nav-btn" data-view="shares"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg><span>Shared</span><span class="nav-count" id="leases-count"></span></button>
+        <button type="button" class="nav-btn" data-view="shares"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg><span>Shared links</span><span class="nav-count" id="leases-count"></span></button>
+        <button type="button" class="nav-btn" data-view="mcp"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M4 17l6-6-6-6"/><path d="M12 19h8"/></svg><span>MCP access</span><span class="nav-count" id="grants-count"></span></button>
         <button type="button" class="nav-btn hidden" id="settings-nav" data-view="settings"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4z"/></svg><span>Settings</span></button>
       </aside>
       <section class="finder-main">
@@ -2370,10 +2593,12 @@ table.t{border-collapse:collapse;width:100%}
           <div class="toolbar-left">
             <div class="crumbs" id="crumbs" data-test="crumbs"></div>
             <div class="view-title hidden" id="shares-title"><h2>Shared links</h2></div>
+            <div class="view-title hidden" id="mcp-title"><h2>MCP access</h2></div>
             <div class="view-title hidden" id="settings-title"><h2>Local settings</h2></div>
           </div>
           <div class="toolbar-right">
             <button class="btn btn-primary btn-icon hidden" id="add-mount" type="button" title="Add local folder"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></button>
+            <button class="btn btn-primary btn-sm hidden" id="new-grant" type="button"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M12 5v14M5 12h14"/></svg><span>New MCP token</span></button>
             <button class="btn btn-sm hidden" id="share-selected" type="button"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.59 13.51l6.83 3.98M15.41 6.51l-6.82 3.98"/></svg><span>Share</span></button>
             <button class="btn btn-ghost btn-icon view-toggle active" id="view-list" type="button" title="List view"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/></svg></button>
             <button class="btn btn-ghost btn-icon view-toggle" id="view-grid" type="button" title="Icon view"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg></button>
@@ -2405,6 +2630,18 @@ table.t{border-collapse:collapse;width:100%}
           </div>
           <div class="tablewrap hidden" id="leases-wrap">
             <table class="t"><thead><tr><th>Label</th><th>Path</th><th>Permission</th><th>Status</th><th>Activity</th><th></th></tr></thead><tbody id="leases"></tbody></table>
+          </div>
+        </section>
+
+        <section class="view-panel hidden" id="view-mcp-panel">
+          <p class="muted" id="mcp-intro" style="margin:0 0 .75rem;font-size:.88rem;">MCP tokens let an agent — Claude, your own apps — reach your mounts over the MCP protocol. Each token's access is set when you create it.</p>
+          <div id="grants-empty" class="empty hidden">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l6-6-6-6"/><path d="M12 19h8"/></svg>
+            <strong>No MCP tokens</strong>
+            Create a token to give an agent access to your mounts.
+          </div>
+          <div class="tablewrap hidden" id="grants-wrap">
+            <table class="t"><thead><tr><th>Label</th><th>Access</th><th>Reach</th><th>Expires</th><th>Last used</th><th></th></tr></thead><tbody id="grants"></tbody></table>
           </div>
         </section>
 
@@ -2501,6 +2738,77 @@ table.t{border-collapse:collapse;width:100%}
         </div>
         <div class="modal-foot">
           <button class="btn btn-primary" type="button" id="lease-done">Done</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="mcp-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <div id="mcp-step-config">
+        <div class="modal-head">
+          <h2>New MCP token</h2>
+          <button class="btn btn-ghost btn-icon" type="button" id="mcp-modal-close" title="Close">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="modal-body">
+          <div class="form-grid">
+            <label for="mcp-label">Label</label>
+            <input id="mcp-label" placeholder="e.g. Claude on this laptop" required>
+            <label for="mcp-expires">Expires in</label>
+            <select id="mcp-expires">
+              <option value="never" selected>Never</option>
+              <option value="30d">30 days</option>
+              <option value="7d">7 days</option>
+              <option value="24h">24 hours</option>
+            </select>
+            <label for="mcp-published">Relay access</label>
+            <label id="mcp-published-field" style="display:flex;align-items:center;gap:.4rem;font-size:.88rem;color:var(--text);"><input id="mcp-published" type="checkbox" style="width:auto;"> Reachable over the relay (leave off for apps on this machine only)</label>
+            <label>Access</label>
+            <div>
+              <label style="display:flex;align-items:center;gap:.4rem;font-size:.88rem;color:var(--text);"><input type="radio" name="mcp-access-mode" value="all" checked style="width:auto;"> All mounts</label>
+              <label style="display:flex;align-items:center;gap:.4rem;font-size:.88rem;color:var(--text);margin-top:.25rem;"><input type="radio" name="mcp-access-mode" value="custom" style="width:auto;"> Choose mounts</label>
+            </div>
+          </div>
+          <div id="mcp-custom-scopes" class="hidden" style="margin-top:.6rem;border-top:1px solid var(--border);padding-top:.6rem;">
+            <p class="muted" style="margin:0 0 .5rem;font-size:.84rem;">Set what this token can do per mount. Read + write is offered only for writable mounts.</p>
+            <div id="mcp-scope-rows"></div>
+          </div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn" type="button" id="mcp-cancel">Cancel</button>
+          <button class="btn btn-primary" type="button" id="mcp-create">Create token</button>
+        </div>
+      </div>
+      <div id="mcp-step-success" class="hidden">
+        <div class="modal-body">
+          <div class="success-state">
+            <span class="check">
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 7"/></svg>
+            </span>
+            <h2>MCP access ready</h2>
+            <p class="muted" style="margin:.25rem 0 0;">Give the agent the endpoint and token below.</p>
+          </div>
+          <div class="form-grid" style="margin-top:.5rem;">
+            <label>Endpoint</label>
+            <div class="share-url" data-test="mcp-endpoint-card"><code id="mcp-created-endpoint"></code></div>
+            <label>Token</label>
+            <div class="share-url" data-test="mcp-token-card">
+              <code id="mcp-created-token"></code>
+              <button class="btn btn-primary btn-sm" type="button" id="mcp-copy-token">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                Copy
+              </button>
+            </div>
+          </div>
+          <p class="share-warning">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+            The token is shown once and is not stored in plaintext. If you lose it, rotate the grant with <code>mvmt token rotate</code>.
+          </p>
+        </div>
+        <div class="modal-foot">
+          <button class="btn btn-primary" type="button" id="mcp-done">Done</button>
         </div>
       </div>
     </div>
@@ -2617,6 +2925,8 @@ table.t{border-collapse:collapse;width:100%}
     leases: [],
     mounts: [],
     canManageMounts: false,
+    grants: [],
+    canManageGrants: false,
     localOwner: false,
     status: null,
     activeTab: 'active',
@@ -2819,6 +3129,7 @@ table.t{border-collapse:collapse;width:100%}
     var panels = {
       files: $('view-files-panel'),
       shares: $('view-shares-panel'),
+      mcp: $('view-mcp-panel'),
       settings: $('view-settings-panel'),
     };
     for (var key in panels) {
@@ -2832,11 +3143,14 @@ table.t{border-collapse:collapse;width:100%}
   function renderToolbar() {
     var files = state.view === 'files';
     var shares = state.view === 'shares';
+    var mcp = state.view === 'mcp';
     var settings = state.view === 'settings';
     $('crumbs').classList.toggle('hidden', !files);
     $('shares-title').classList.toggle('hidden', !shares);
+    $('mcp-title').classList.toggle('hidden', !mcp);
     $('settings-title').classList.toggle('hidden', !settings);
     $('add-mount').classList.toggle('hidden', !(files && state.canManageMounts));
+    $('new-grant').classList.toggle('hidden', !(mcp && state.canManageGrants));
     $('share-selected').classList.toggle('hidden', !(files && state.selectedEntry));
     $('view-list').classList.toggle('hidden', !files);
     $('view-grid').classList.toggle('hidden', !files);
@@ -3075,6 +3389,14 @@ table.t{border-collapse:collapse;width:100%}
     statusBadge.textContent = s.label;
     statusBadge.title = lease.expiresAt ? formatDate(lease.expiresAt) : '';
     statusCell.append(statusBadge);
+    if (lease.published === false) {
+      var localBadge = document.createElement('span');
+      localBadge.className = 'badge';
+      localBadge.textContent = 'Local only';
+      localBadge.title = 'Capability-only: reachable by local apps, not over the relay';
+      localBadge.style.marginLeft = '.35rem';
+      statusCell.append(localBadge);
+    }
 
     var usedCell = document.createElement('td');
     usedCell.setAttribute('data-label', 'Last used');
@@ -3111,6 +3433,28 @@ table.t{border-collapse:collapse;width:100%}
         });
       })(lease.id, lease.url || null);
       actions.append(copyBtn);
+
+      var publishBtn = document.createElement('button');
+      publishBtn.className = 'btn btn-sm';
+      publishBtn.type = 'button';
+      var isPublished = lease.published !== false;
+      publishBtn.textContent = isPublished ? 'Unpublish' : 'Publish';
+      publishBtn.title = isPublished
+        ? 'Remove the relay door; local apps keep access'
+        : 'Give this lease a relay door so it works over the public URL';
+      (function (id, publish) {
+        publishBtn.addEventListener('click', async function () {
+          try {
+            await api('/dashboard/api/leases/' + encodeURIComponent(id) + '/publish', {
+              method: 'POST',
+              body: JSON.stringify({ published: publish }),
+            });
+            await loadLeases();
+            toast(publish ? 'Lease published.' : 'Lease unpublished — local apps keep access.', 'success');
+          } catch (err) { showError(err); }
+        });
+      })(lease.id, !isPublished);
+      actions.append(publishBtn);
 
       var revoke = document.createElement('button');
       revoke.className = 'btn btn-danger btn-sm btn-icon';
@@ -3243,6 +3587,206 @@ table.t{border-collapse:collapse;width:100%}
       $('lease-step-config').classList.add('hidden');
       $('lease-step-success').classList.remove('hidden');
       await loadLeases();
+    } catch (err) { showError(err); }
+    finally { btn.disabled = false; }
+  }
+
+  // ---------- MCP access (clients[] API-token grants) ----------
+  async function loadGrants() {
+    var payload = await api('/dashboard/api/grants');
+    state.grants = payload.grants || [];
+    state.canManageGrants = !!payload.canManage;
+    renderGrants();
+  }
+
+  function renderGrants() {
+    $('grants-count').textContent = state.grants.length ? '(' + state.grants.length + ')' : '';
+    $('new-grant').classList.toggle('hidden', !(state.view === 'mcp' && state.canManageGrants));
+    var hasGrants = state.grants.length > 0;
+    $('grants-empty').classList.toggle('hidden', hasGrants);
+    $('grants-wrap').classList.toggle('hidden', !hasGrants);
+    var body = $('grants');
+    body.innerHTML = '';
+    for (var i = 0; i < state.grants.length; i += 1) body.append(renderGrantRow(state.grants[i]));
+  }
+
+  function renderGrantRow(grant) {
+    var row = document.createElement('tr');
+
+    var labelCell = document.createElement('td');
+    labelCell.setAttribute('data-label', 'Label');
+    labelCell.textContent = grant.label || grant.id;
+    labelCell.style.fontWeight = '500';
+
+    var accessCell = document.createElement('td');
+    accessCell.setAttribute('data-label', 'Access');
+    accessCell.textContent = grant.scope || '';
+
+    var reachCell = document.createElement('td');
+    reachCell.setAttribute('data-label', 'Reach');
+    var reachBadge = document.createElement('span');
+    reachBadge.className = 'badge ' + (grant.published ? 'active' : '');
+    reachBadge.textContent = grant.published ? 'Published' : 'Local only';
+    reachBadge.title = grant.published
+      ? 'Reachable over the relay'
+      : 'Reachable by apps on this machine only';
+    reachCell.append(reachBadge);
+
+    var expiresCell = document.createElement('td');
+    expiresCell.setAttribute('data-label', 'Expires');
+    expiresCell.textContent = grant.expiresAt ? formatDate(grant.expiresAt) : 'Never';
+
+    var usedCell = document.createElement('td');
+    usedCell.setAttribute('data-label', 'Last used');
+    usedCell.className = 'cell-num';
+    if (grant.lastUsedAt) { usedCell.textContent = relativeTime(grant.lastUsedAt); usedCell.title = formatDate(grant.lastUsedAt); }
+    else { usedCell.textContent = '—'; }
+
+    var actionCell = document.createElement('td');
+    actionCell.setAttribute('data-label', 'Actions');
+    if (state.canManageGrants) {
+      var actions = document.createElement('div');
+      actions.className = 'actions';
+
+      var publishBtn = document.createElement('button');
+      publishBtn.className = 'btn btn-sm';
+      publishBtn.type = 'button';
+      publishBtn.textContent = grant.published ? 'Unpublish' : 'Publish';
+      publishBtn.title = grant.published
+        ? 'Close the relay door; local apps keep access'
+        : 'Give this token a relay door';
+      (function (id, publish) {
+        publishBtn.addEventListener('click', async function () {
+          try {
+            await api('/dashboard/api/grants/' + encodeURIComponent(id) + '/publish', {
+              method: 'POST',
+              body: JSON.stringify({ published: publish }),
+            });
+            await loadGrants();
+            toast(publish ? 'Token published.' : 'Token unpublished — local apps keep access.', 'success');
+          } catch (err) { showError(err); }
+        });
+      })(grant.id, !grant.published);
+      actions.append(publishBtn);
+
+      var revokeBtn = document.createElement('button');
+      revokeBtn.className = 'btn btn-danger btn-sm btn-icon';
+      revokeBtn.type = 'button';
+      revokeBtn.title = 'Revoke';
+      revokeBtn.innerHTML = ICONS.trash;
+      (function (id) {
+        revokeBtn.addEventListener('click', async function () {
+          if (!confirm('Revoke this MCP token? Any agent using it loses access immediately.')) return;
+          try {
+            await api('/dashboard/api/grants/' + encodeURIComponent(id), { method: 'DELETE', body: '{}' });
+            await loadGrants();
+            toast('Token revoked.', 'success');
+          } catch (err) { showError(err); }
+        });
+      })(grant.id);
+      actions.append(revokeBtn);
+
+      actionCell.append(actions);
+    }
+
+    row.append(labelCell, accessCell, reachCell, expiresCell, usedCell, actionCell);
+    return row;
+  }
+
+  function buildMcpScopeRows() {
+    var container = $('mcp-scope-rows');
+    container.innerHTML = '';
+    for (var i = 0; i < state.mounts.length; i += 1) {
+      (function (mount) {
+        var row = document.createElement('div');
+        row.className = 'mcp-scope-row';
+        row.setAttribute('data-path', mount.path);
+        row.style.display = 'flex';
+        row.style.alignItems = 'center';
+        row.style.gap = '.5rem';
+        row.style.marginBottom = '.35rem';
+
+        var name = document.createElement('span');
+        name.textContent = mount.path;
+        name.style.flex = '1';
+        name.style.fontSize = '.88rem';
+
+        var select = document.createElement('select');
+        select.className = 'mcp-scope-mode';
+        select.style.width = 'auto';
+        var noneOpt = document.createElement('option');
+        noneOpt.value = 'none';
+        noneOpt.textContent = 'No access';
+        var readOpt = document.createElement('option');
+        readOpt.value = 'read';
+        readOpt.textContent = 'Read';
+        select.append(noneOpt, readOpt);
+        if (mount.writeAccess) {
+          var writeOpt = document.createElement('option');
+          writeOpt.value = 'write';
+          writeOpt.textContent = 'Read + write';
+          select.append(writeOpt);
+        }
+        // Pre-fill with the mount's natural level.
+        select.value = mount.writeAccess ? 'write' : 'read';
+
+        row.append(name, select);
+        container.append(row);
+      })(state.mounts[i]);
+    }
+  }
+
+  function syncMcpAccessMode() {
+    var custom = document.querySelector('input[name=mcp-access-mode]:checked');
+    $('mcp-custom-scopes').classList.toggle('hidden', !custom || custom.value !== 'custom');
+  }
+
+  function openMcpModal() {
+    $('mcp-step-config').classList.remove('hidden');
+    $('mcp-step-success').classList.add('hidden');
+    $('mcp-label').value = '';
+    $('mcp-expires').value = 'never';
+    $('mcp-published').checked = false;
+    var allRadio = document.querySelector('input[name=mcp-access-mode][value=all]');
+    if (allRadio) allRadio.checked = true;
+    buildMcpScopeRows();
+    syncMcpAccessMode();
+    $('mcp-modal').classList.remove('hidden');
+    setTimeout(function () { $('mcp-label').focus(); }, 0);
+  }
+
+  function closeMcpModal() { $('mcp-modal').classList.add('hidden'); }
+
+  async function submitMcpGrant() {
+    if (!$('mcp-label').value.trim()) { toast('Add a label first.', 'error'); $('mcp-label').focus(); return; }
+    var selected = document.querySelector('input[name=mcp-access-mode]:checked');
+    var allMounts = !selected || selected.value === 'all';
+    var requestBody = {
+      label: $('mcp-label').value.trim(),
+      expires: $('mcp-expires').value,
+      published: $('mcp-published').checked,
+      allMounts: allMounts,
+    };
+    if (!allMounts) {
+      var rows = $('mcp-scope-rows').querySelectorAll('.mcp-scope-row');
+      var scopes = [];
+      for (var i = 0; i < rows.length; i += 1) {
+        var mode = rows[i].querySelector('.mcp-scope-mode').value;
+        if (mode === 'none') continue;
+        scopes.push({ path: rows[i].getAttribute('data-path'), mode: mode });
+      }
+      if (scopes.length === 0) { toast('Give the token at least one mount.', 'error'); return; }
+      requestBody.scopes = scopes;
+    }
+    var btn = $('mcp-create');
+    btn.disabled = true;
+    try {
+      var payload = await api('/dashboard/api/grants', { method: 'POST', body: JSON.stringify(requestBody) });
+      $('mcp-created-endpoint').textContent = payload.endpoint || '';
+      $('mcp-created-token').textContent = payload.token || '';
+      $('mcp-step-config').classList.add('hidden');
+      $('mcp-step-success').classList.remove('hidden');
+      await loadGrants();
     } catch (err) { showError(err); }
     finally { btn.disabled = false; }
   }
@@ -3400,6 +3944,7 @@ table.t{border-collapse:collapse;width:100%}
     await reloadMounts();
     await loadFiles(state.currentPath);
     await loadLeases();
+    await loadGrants();
     await loadStatus();
   }
 
@@ -3500,6 +4045,20 @@ table.t{border-collapse:collapse;width:100%}
     catch (err) { showError(err); }
   });
   $('lease-modal').addEventListener('click', function (event) { if (event.target === $('lease-modal')) closeLeaseModal(); });
+  $('new-grant').addEventListener('click', function () { openMcpModal(); });
+  $('mcp-modal-close').addEventListener('click', closeMcpModal);
+  $('mcp-cancel').addEventListener('click', closeMcpModal);
+  $('mcp-done').addEventListener('click', closeMcpModal);
+  $('mcp-create').addEventListener('click', function () { submitMcpGrant().catch(showError); });
+  var mcpAccessRadios = document.querySelectorAll('input[name=mcp-access-mode]');
+  for (var mr = 0; mr < mcpAccessRadios.length; mr += 1) {
+    mcpAccessRadios[mr].addEventListener('change', syncMcpAccessMode);
+  }
+  $('mcp-copy-token').addEventListener('click', async function () {
+    try { await copyToClipboard($('mcp-created-token').textContent || ''); toast('Token copied to clipboard.', 'success'); }
+    catch (err) { showError(err); }
+  });
+  $('mcp-modal').addEventListener('click', function (event) { if (event.target === $('mcp-modal')) closeMcpModal(); });
   $('properties-modal-close').addEventListener('click', closePropertiesModal);
   $('properties-done').addEventListener('click', closePropertiesModal);
   $('properties-modal').addEventListener('click', function (event) { if (event.target === $('properties-modal')) closePropertiesModal(); });
@@ -3507,6 +4066,7 @@ table.t{border-collapse:collapse;width:100%}
     if (event.key === 'Escape') {
       if (!$('context-menu').classList.contains('hidden')) hideContextMenu();
       else if (!$('lease-modal').classList.contains('hidden')) closeLeaseModal();
+      else if (!$('mcp-modal').classList.contains('hidden')) closeMcpModal();
       else if (!$('properties-modal').classList.contains('hidden')) closePropertiesModal();
       else if (!$('mount-modal').classList.contains('hidden')) closeMountModal();
     }

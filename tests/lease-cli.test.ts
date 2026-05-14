@@ -2,7 +2,13 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { addPathsToLease, createFolderLease, listFolderLeases, revokeFolderLease } from '../src/cli/lease.js';
+import {
+  addPathsToLease,
+  createFolderLease,
+  listFolderLeases,
+  revokeFolderLease,
+  setFolderLeasePublished,
+} from '../src/cli/lease.js';
 import { readConfig } from '../src/config/loader.js';
 import { listLeases } from '../src/lease/store.js';
 import { findLeaseSecret, leaseSecretsPathForLeaseStore } from '../src/lease/secrets.js';
@@ -230,5 +236,28 @@ describe('lease CLI helpers', () => {
     await revokeFolderLease(id, { leaseStorePath });
     expect(listLeases(leaseStorePath)[0].revokedAt).toBeTruthy();
     expect(findLeaseSecret(leaseSecretsPathForLeaseStore(leaseStorePath), id)).toBeUndefined();
+  });
+
+  it('publishes and unpublishes a folder lease', async () => {
+    const folder = path.join(tmp, 'shared');
+    await fs.mkdir(folder);
+    await createFolderLease(folder, {
+      config: configPath,
+      leaseStorePath,
+      label: 'Shared folder',
+      expires: 'never',
+    });
+    const id = listLeases(leaseStorePath)[0].id;
+
+    await setFolderLeasePublished(id, false, { leaseStorePath });
+    expect(listLeases(leaseStorePath)[0].published).toBe(false);
+
+    await setFolderLeasePublished(id, true, { leaseStorePath });
+    expect(listLeases(leaseStorePath)[0].published).toBe(true);
+
+    await expect(setFolderLeasePublished('missing', true, { leaseStorePath }))
+      .rejects.toThrow(/Unknown lease/);
+    await expect(setFolderLeasePublished(undefined, true, { leaseStorePath }))
+      .rejects.toThrow(/Lease id is required/);
   });
 });

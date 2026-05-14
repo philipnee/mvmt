@@ -31,6 +31,10 @@ export interface LeaseRecord {
   revokedAt?: string;
   downloadCount: number;
   uploadCount: number;
+  // Exposure boundary for the capability/grant model. Absent means the
+  // lease predates the publish concept and is grandfathered as published
+  // so existing share links keep working — see isGrantPublished().
+  published?: boolean;
 }
 
 interface LeaseStoreFile {
@@ -50,7 +54,18 @@ export function defaultLeasesPath(tokenPath: string | undefined = TOKEN_PATH): s
 
 export function createLease(
   storePath: string,
-  input: { label: string; path?: string; resources?: LeaseResource[]; expiresAt?: string; permissions?: LeasePermission[] },
+  input: {
+    label: string;
+    path?: string;
+    resources?: LeaseResource[];
+    expiresAt?: string;
+    permissions?: LeasePermission[];
+    // Exposure boundary. Omit to leave the lease grandfathered as
+    // published; pass false for a capability-only lease that only local
+    // apps can reach. Callers minting through a deliberate "share"
+    // gesture (e.g. the dashboard) should pass true.
+    published?: boolean;
+  },
 ): CreatedLease {
   const store = readLeaseStore(storePath);
   const token = `mvmt_l_${crypto.randomBytes(32).toString('base64url')}`;
@@ -68,6 +83,7 @@ export function createLease(
     ...(input.expiresAt ? { expiresAt: input.expiresAt } : {}),
     downloadCount: 0,
     uploadCount: 0,
+    ...(input.published === undefined ? {} : { published: input.published }),
   };
   store.leases.push(record);
   writeLeaseStore(storePath, store);
@@ -112,6 +128,20 @@ export function rotateLeaseToken(storePath: string, id: string): CreatedLease | 
   store.leases[index] = next;
   writeLeaseStore(storePath, store);
   return { record: next, token };
+}
+
+// Sets the exposure boundary for a lease. `published: false` makes it
+// capability-only (no relay door, still usable by local apps);
+// `published: true` gives it a relay door. Distinct from revokeLease,
+// which kills the lease entirely.
+export function setLeasePublished(storePath: string, id: string, published: boolean): LeaseRecord | undefined {
+  const store = readLeaseStore(storePath);
+  const index = store.leases.findIndex((lease) => lease.id === id);
+  if (index < 0) return undefined;
+  const next: LeaseRecord = { ...store.leases[index]!, published };
+  store.leases[index] = next;
+  writeLeaseStore(storePath, store);
+  return next;
 }
 
 export function revokeLease(storePath: string, id: string): boolean {

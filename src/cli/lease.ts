@@ -18,6 +18,7 @@ import {
   leaseUnavailableReason,
   listLeases,
   revokeLease,
+  setLeasePublished,
 } from '../lease/store.js';
 import { leaseSecretsPathForLeaseStore, removeLeaseSecret, saveLeaseSecret } from '../lease/secrets.js';
 import { parseTokenTtl } from '../utils/token-ttl.js';
@@ -107,6 +108,22 @@ export async function revokeFolderLease(id: string | undefined, options: LeaseCo
   if (!revokeLease(leaseStorePath, id)) throw new Error(`Unknown lease: ${id}`);
   removeLeaseSecret(leaseSecretsPathForLeaseStore(leaseStorePath), id);
   console.log(chalk.green(`Lease ${id} revoked`));
+}
+
+export async function setFolderLeasePublished(
+  id: string | undefined,
+  published: boolean,
+  options: LeaseCommandOptions = {},
+): Promise<void> {
+  if (!id) throw new Error('Lease id is required.');
+  const leaseStorePath = resolveLeaseStorePath(options);
+  const updated = setLeasePublished(leaseStorePath, id, published);
+  if (!updated) throw new Error(`Unknown lease: ${id}`);
+  if (published) {
+    console.log(chalk.green(`Lease ${id} published — it now has a relay door.`));
+  } else {
+    console.log(chalk.green(`Lease ${id} unpublished — local apps keep access, the relay door is closed.`));
+  }
 }
 
 export async function addPathsToLease(
