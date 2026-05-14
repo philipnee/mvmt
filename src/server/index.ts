@@ -1974,7 +1974,8 @@ async function assertMountRootUsable(root: string): Promise<void> {
     // Dashboard mount management is local-admin-only. The selected local
     // root is intentionally user-controlled; this stat is the existence
     // check before saving it as a source.
-    const stat = await fsp.stat(resolvedRoot); // lgtm[js/path-injection]
+    // codeql[js/path-injection]
+    const stat = await fsp.stat(resolvedRoot);
     if (!stat.isDirectory() && !stat.isFile()) throw new Error('invalid_root');
   } catch {
     throw new Error('invalid_root');
