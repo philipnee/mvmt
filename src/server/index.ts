@@ -32,7 +32,7 @@ import { rateLimit } from './rate-limit.js';
 import { ClientConfig, LocalFolderMountConfig, PermissionConfig } from '../config/schema.js';
 import { readConfig, saveConfig, withConfigLock } from '../config/loader.js';
 import { addMountToConfig, editMountInConfig, MountInput, removeMountFromConfig } from '../cli/mounts.js';
-import { addApiTokenToConfig } from '../cli/api-tokens.js';
+import { addApiTokenToConfig, removeApiTokenFromConfig, setApiTokenPublishedInConfig } from '../cli/api-tokens.js';
 import { resolveSetupPath } from '../connectors/setup-paths.js';
 import { listDashboardFiles, normalizeDashboardPath, resolveDashboardFileTarget } from '../dashboard/files.js';
 import {
@@ -60,7 +60,7 @@ import {
   validateLeaseToken,
 } from '../lease/store.js';
 import { findLeaseSecret, leaseSecretsPathForLeaseStore, removeLeaseSecret, saveLeaseSecret } from '../lease/secrets.js';
-import { isGrantPublished, leaseGrantScope } from '../grant/model.js';
+import { clientConfigToGrant, isGrantPublished, leaseGrantScope } from '../grant/model.js';
 import {
   attachClientIdentity,
   ClientIdentity,
@@ -1161,51 +1161,86 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     }
   });
 
-  // Mint a per-file/folder MCP grant — a clients[] API token scoped to
-  // specific paths the owner picked in the dashboard. Each scope path is
-  // validated to live inside a configured mount before it becomes a
-  // permission entry. Like mount mutation, this is admin + local-only
-  // and needs options.configPath.
+  // MCP-access grants — clients[] API tokens the owner mints from the
+  // dashboard's MCP tab. A grant is either "all mounts" (one /** scope
+  // that follows the mount list) or a per-mount selection. Mutating
+  // endpoints are admin + local-only and need options.configPath; the
+  // list is readable by any signed-in dashboard user so a non-admin can
+  // see what exists without a silent dead-end.
+  const grantScopeSummary = (client: ClientConfig): string => {
+    const grant = clientConfigToGrant(client);
+    if (grant.scope.length === 1 && grant.scope[0]!.path === '/**') return 'All mounts';
+    if (grant.scope.length === 0) return 'No access';
+    return grant.scope.length === 1 ? '1 mount' : `${grant.scope.length} mounts`;
+  };
+
+  app.get('/dashboard/api/grants', dashboardOriginMiddleware, dashboardAuthMiddleware, (req, res) => {
+    const session = res.locals.dashboardSession as DashboardSession;
+    const tokenClients = resolveClients(options.clients).filter((client) => client.auth.type === 'token');
+    logHttpRequest(requestLog, req, 200, 'dashboard.grants');
+    res.json({
+      canManage: Boolean(options.configPath) && session.admin,
+      grants: tokenClients.map((client) => ({
+        id: client.id,
+        label: client.name,
+        scope: grantScopeSummary(client),
+        published: isGrantPublished(client.published),
+        expiresAt: client.expiresAt,
+        lastUsedAt: client.lastUsedAt,
+      })),
+    });
+  });
+
+  // Mint an MCP-access grant. `allMounts: true` stores a single /** scope
+  // that tracks the mount list; otherwise `scopes` is a per-mount list,
+  // each entry resolved against the configured mounts before it becomes
+  // a permission entry — a scope that does not land inside a mount is
+  // rejected, so a grant can never reach outside the namespace.
   app.post('/dashboard/api/grants', dashboardOriginMiddleware, dashboardAuthMiddleware, dashboardLocalMiddleware, dashboardAdminMiddleware, async (req, res) => {
     const configPath = requireConfigPath(req, res);
     if (!configPath) return;
     const body = (req.body ?? {}) as Record<string, unknown>;
     const label = typeof body.label === 'string' ? body.label.trim() : '';
     const published = body.published === true;
+    const allMounts = body.allMounts === true;
     const rawScopes = Array.isArray(body.scopes) ? body.scopes : [];
     if (!label) {
       res.status(400).json({ error: 'label_required' });
       return;
     }
-    if (rawScopes.length === 0) {
+    if (!allMounts && rawScopes.length === 0) {
       res.status(400).json({ error: 'scope_required' });
       return;
     }
     try {
-      const mounts = resolveLeaseMounts(options.leaseMounts);
-      const permissions: PermissionConfig[] = [];
-      for (const entry of rawScopes) {
-        const scope = (entry ?? {}) as Record<string, unknown>;
-        const scopePath = typeof scope.path === 'string' ? scope.path.trim() : '';
-        const mode = scope.mode === 'write' ? 'write' : 'read';
-        if (!scopePath) {
-          res.status(400).json({ error: 'scope_path_required' });
-          return;
+      let permissions: PermissionConfig[];
+      if (allMounts) {
+        // One /** scope. Mount-level writeAccess still gates real writes,
+        // and the grant automatically follows mounts added later.
+        permissions = [{ path: '/**', actions: ['search', 'read', 'write'] }];
+      } else {
+        const mounts = resolveLeaseMounts(options.leaseMounts);
+        permissions = [];
+        for (const entry of rawScopes) {
+          const scope = (entry ?? {}) as Record<string, unknown>;
+          const scopePath = typeof scope.path === 'string' ? scope.path.trim() : '';
+          const mode = scope.mode === 'write' ? 'write' : 'read';
+          if (!scopePath) {
+            res.status(400).json({ error: 'scope_path_required' });
+            return;
+          }
+          const target = await resolveDashboardFileTarget(mounts, scopePath);
+          if (mode === 'write' && !target.writeAccess) {
+            res.status(400).json({ error: 'mount_read_only', detail: target.virtualPath });
+            return;
+          }
+          permissions.push({
+            path: target.type === 'file'
+              ? target.virtualPath
+              : `${stripTrailingSlashes(target.virtualPath)}/**`,
+            actions: mode === 'write' ? ['search', 'read', 'write'] : ['search', 'read'],
+          });
         }
-        // Resolving against the configured mounts is the security gate:
-        // a path that does not land inside a mount throws and the grant
-        // is rejected, so a grant can never reach outside the namespace.
-        const target = await resolveDashboardFileTarget(mounts, scopePath);
-        if (mode === 'write' && !target.writeAccess) {
-          res.status(400).json({ error: 'mount_read_only', detail: target.virtualPath });
-          return;
-        }
-        permissions.push({
-          path: target.type === 'file'
-            ? target.virtualPath
-            : `${stripTrailingSlashes(target.virtualPath)}/**`,
-          actions: mode === 'write' ? ['search', 'read', 'write'] : ['search', 'read'],
-        });
       }
       const expires = typeof body.expires === 'string' && body.expires ? body.expires : undefined;
       const grantId = `grant-${randomUUID().slice(0, 8)}`;
@@ -1233,6 +1268,51 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       const detail = err instanceof Error ? err.message : 'grant_failed';
       logHttpRequest(requestLog, req, 400, 'dashboard.grants', detail);
       res.status(400).json({ error: 'grant_failed', detail });
+    }
+  });
+
+  // Toggle a grant's relay door. Unpublishing keeps the grant usable by
+  // local apps over 127.0.0.1; it just loses relay reachability.
+  app.post('/dashboard/api/grants/:id/publish', dashboardOriginMiddleware, dashboardAuthMiddleware, dashboardLocalMiddleware, dashboardAdminMiddleware, async (req, res) => {
+    const configPath = requireConfigPath(req, res);
+    if (!configPath) return;
+    const id = typeof req.params.id === 'string' ? req.params.id : '';
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const published = body.published === true;
+    try {
+      const saved = await withConfigLock(configPath, async () => {
+        const current = readConfig(configPath);
+        const update = setApiTokenPublishedInConfig(current, id, published);
+        await saveConfig(configPath, update.config);
+        return update;
+      });
+      logHttpRequest(requestLog, req, 200, 'dashboard.grants', `${published ? 'published' : 'unpublished'} ${id}`);
+      res.json({ grant: { id: saved.client.id, label: saved.client.name, published } });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'grant_not_found';
+      logHttpRequest(requestLog, req, 404, 'dashboard.grants', detail);
+      res.status(404).json({ error: 'grant_not_found', detail });
+    }
+  });
+
+  // Revoke a grant — removes the clients[] entry entirely. Distinct from
+  // unpublishing, which only closes the relay door.
+  app.delete('/dashboard/api/grants/:id', dashboardOriginMiddleware, dashboardAuthMiddleware, dashboardLocalMiddleware, dashboardAdminMiddleware, async (req, res) => {
+    const configPath = requireConfigPath(req, res);
+    if (!configPath) return;
+    const id = typeof req.params.id === 'string' ? req.params.id : '';
+    try {
+      await withConfigLock(configPath, async () => {
+        const current = readConfig(configPath);
+        const next = removeApiTokenFromConfig(current, id);
+        await saveConfig(configPath, next);
+      });
+      logHttpRequest(requestLog, req, 200, 'dashboard.grants', `revoked ${id}`);
+      res.json({ ok: true });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'grant_not_found';
+      logHttpRequest(requestLog, req, 404, 'dashboard.grants', detail);
+      res.status(404).json({ error: 'grant_not_found', detail });
     }
   });
 
@@ -2501,7 +2581,8 @@ table.t{border-collapse:collapse;width:100%}
     <div class="finder">
       <aside class="finder-sidebar">
         <button type="button" class="nav-btn active" data-view="files"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>Files</span><span class="nav-count" id="sources-count"></span></button>
-        <button type="button" class="nav-btn" data-view="shares"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg><span>Shared</span><span class="nav-count" id="leases-count"></span></button>
+        <button type="button" class="nav-btn" data-view="shares"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg><span>Shared links</span><span class="nav-count" id="leases-count"></span></button>
+        <button type="button" class="nav-btn" data-view="mcp"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M4 17l6-6-6-6"/><path d="M12 19h8"/></svg><span>MCP access</span><span class="nav-count" id="grants-count"></span></button>
         <button type="button" class="nav-btn hidden" id="settings-nav" data-view="settings"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4z"/></svg><span>Settings</span></button>
       </aside>
       <section class="finder-main">
@@ -2509,10 +2590,12 @@ table.t{border-collapse:collapse;width:100%}
           <div class="toolbar-left">
             <div class="crumbs" id="crumbs" data-test="crumbs"></div>
             <div class="view-title hidden" id="shares-title"><h2>Shared links</h2></div>
+            <div class="view-title hidden" id="mcp-title"><h2>MCP access</h2></div>
             <div class="view-title hidden" id="settings-title"><h2>Local settings</h2></div>
           </div>
           <div class="toolbar-right">
             <button class="btn btn-primary btn-icon hidden" id="add-mount" type="button" title="Add local folder"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></button>
+            <button class="btn btn-primary btn-sm hidden" id="new-grant" type="button"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M12 5v14M5 12h14"/></svg><span>New MCP token</span></button>
             <button class="btn btn-sm hidden" id="share-selected" type="button"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.59 13.51l6.83 3.98M15.41 6.51l-6.82 3.98"/></svg><span>Share</span></button>
             <button class="btn btn-ghost btn-icon view-toggle active" id="view-list" type="button" title="List view"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/></svg></button>
             <button class="btn btn-ghost btn-icon view-toggle" id="view-grid" type="button" title="Icon view"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg></button>
@@ -2547,6 +2630,18 @@ table.t{border-collapse:collapse;width:100%}
           </div>
         </section>
 
+        <section class="view-panel hidden" id="view-mcp-panel">
+          <p class="muted" id="mcp-intro" style="margin:0 0 .75rem;font-size:.88rem;">MCP tokens let an agent — Claude, your own apps — reach your mounts over the MCP protocol. Each token's access is set when you create it.</p>
+          <div id="grants-empty" class="empty hidden">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l6-6-6-6"/><path d="M12 19h8"/></svg>
+            <strong>No MCP tokens</strong>
+            Create a token to give an agent access to your mounts.
+          </div>
+          <div class="tablewrap hidden" id="grants-wrap">
+            <table class="t"><thead><tr><th>Label</th><th>Access</th><th>Reach</th><th>Expires</th><th>Last used</th><th></th></tr></thead><tbody id="grants"></tbody></table>
+          </div>
+        </section>
+
         <section class="view-panel hidden" id="view-settings-panel">
           <div class="settings-grid">
             <div class="settings-card">
@@ -2567,10 +2662,6 @@ table.t{border-collapse:collapse;width:100%}
     <button type="button" id="context-share" role="menuitem">
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.59 13.51l6.83 3.98M15.41 6.51l-6.82 3.98"/></svg>
       Share
-    </button>
-    <button type="button" id="context-mcp" class="hidden" role="menuitem">
-      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l6-6-6-6"/><path d="M12 19h8"/></svg>
-      Create MCP access
     </button>
     <button type="button" id="context-properties" role="menuitem">
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
@@ -2653,18 +2744,15 @@ table.t{border-collapse:collapse;width:100%}
     <div class="modal-card">
       <div id="mcp-step-config">
         <div class="modal-head">
-          <h2>Create MCP access</h2>
+          <h2>New MCP token</h2>
           <button class="btn btn-ghost btn-icon" type="button" id="mcp-modal-close" title="Close">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
           </button>
         </div>
         <div class="modal-body">
-          <p class="muted" style="margin:.25rem 0 1rem;font-size:.88rem;">An agent with this token can use the paths below over MCP, within the permission you set on each.</p>
-          <div id="mcp-scopes"></div>
-          <button class="btn btn-sm" type="button" id="mcp-add-scope" style="margin-top:.4rem;">Add path</button>
-          <div class="form-grid" style="margin-top:.85rem;">
+          <div class="form-grid">
             <label for="mcp-label">Label</label>
-            <input id="mcp-label" placeholder="e.g. Claude - workspace" required>
+            <input id="mcp-label" placeholder="e.g. Claude on this laptop" required>
             <label for="mcp-expires">Expires in</label>
             <select id="mcp-expires">
               <option value="never" selected>Never</option>
@@ -2673,12 +2761,21 @@ table.t{border-collapse:collapse;width:100%}
               <option value="24h">24 hours</option>
             </select>
             <label for="mcp-published">Relay access</label>
-            <label id="mcp-published-field" style="display:flex;align-items:center;gap:.4rem;font-size:.88rem;color:var(--text);"><input id="mcp-published" type="checkbox" style="width:auto;"> Reachable over the relay (uncheck for apps on this machine only)</label>
+            <label id="mcp-published-field" style="display:flex;align-items:center;gap:.4rem;font-size:.88rem;color:var(--text);"><input id="mcp-published" type="checkbox" style="width:auto;"> Reachable over the relay (leave off for apps on this machine only)</label>
+            <label>Access</label>
+            <div>
+              <label style="display:flex;align-items:center;gap:.4rem;font-size:.88rem;color:var(--text);"><input type="radio" name="mcp-access-mode" value="all" checked style="width:auto;"> All mounts</label>
+              <label style="display:flex;align-items:center;gap:.4rem;font-size:.88rem;color:var(--text);margin-top:.25rem;"><input type="radio" name="mcp-access-mode" value="custom" style="width:auto;"> Choose mounts</label>
+            </div>
+          </div>
+          <div id="mcp-custom-scopes" class="hidden" style="margin-top:.6rem;border-top:1px solid var(--border);padding-top:.6rem;">
+            <p class="muted" style="margin:0 0 .5rem;font-size:.84rem;">Set what this token can do per mount. Read + write is offered only for writable mounts.</p>
+            <div id="mcp-scope-rows"></div>
           </div>
         </div>
         <div class="modal-foot">
           <button class="btn" type="button" id="mcp-cancel">Cancel</button>
-          <button class="btn btn-primary" type="button" id="mcp-create">Create access</button>
+          <button class="btn btn-primary" type="button" id="mcp-create">Create token</button>
         </div>
       </div>
       <div id="mcp-step-success" class="hidden">
@@ -2825,6 +2922,8 @@ table.t{border-collapse:collapse;width:100%}
     leases: [],
     mounts: [],
     canManageMounts: false,
+    grants: [],
+    canManageGrants: false,
     localOwner: false,
     status: null,
     activeTab: 'active',
@@ -3027,6 +3126,7 @@ table.t{border-collapse:collapse;width:100%}
     var panels = {
       files: $('view-files-panel'),
       shares: $('view-shares-panel'),
+      mcp: $('view-mcp-panel'),
       settings: $('view-settings-panel'),
     };
     for (var key in panels) {
@@ -3040,11 +3140,14 @@ table.t{border-collapse:collapse;width:100%}
   function renderToolbar() {
     var files = state.view === 'files';
     var shares = state.view === 'shares';
+    var mcp = state.view === 'mcp';
     var settings = state.view === 'settings';
     $('crumbs').classList.toggle('hidden', !files);
     $('shares-title').classList.toggle('hidden', !shares);
+    $('mcp-title').classList.toggle('hidden', !mcp);
     $('settings-title').classList.toggle('hidden', !settings);
     $('add-mount').classList.toggle('hidden', !(files && state.canManageMounts));
+    $('new-grant').classList.toggle('hidden', !(mcp && state.canManageGrants));
     $('share-selected').classList.toggle('hidden', !(files && state.selectedEntry));
     $('view-list').classList.toggle('hidden', !files);
     $('view-grid').classList.toggle('hidden', !files);
@@ -3090,7 +3193,6 @@ table.t{border-collapse:collapse;width:100%}
     selectEntry(entry);
     var sourceEditable = canManageSourceEntry(entry);
     $('context-share').classList.toggle('hidden', !!entry.unavailable);
-    $('context-mcp').classList.toggle('hidden', !!entry.unavailable || !state.canManageMounts);
     $('context-rename-source').classList.toggle('hidden', !sourceEditable);
     $('context-remove-source').classList.toggle('hidden', !sourceEditable);
     var menu = $('context-menu');
@@ -3486,87 +3588,202 @@ table.t{border-collapse:collapse;width:100%}
     finally { btn.disabled = false; }
   }
 
-  // ---------- MCP access (per-file/folder API-token grants) ----------
-  function addMcpScopeRow(scopePath, mode) {
-    var row = document.createElement('div');
-    row.className = 'mcp-scope-row';
-    row.style.display = 'flex';
-    row.style.gap = '.4rem';
-    row.style.marginBottom = '.4rem';
-
-    var pathInput = document.createElement('input');
-    pathInput.type = 'text';
-    pathInput.className = 'mcp-scope-path';
-    pathInput.placeholder = '/source/path';
-    pathInput.value = scopePath || '';
-    pathInput.style.flex = '1';
-
-    var modeSelect = document.createElement('select');
-    modeSelect.className = 'mcp-scope-mode';
-    modeSelect.style.width = 'auto';
-    var readOpt = document.createElement('option');
-    readOpt.value = 'read';
-    readOpt.textContent = 'Read';
-    var writeOpt = document.createElement('option');
-    writeOpt.value = 'write';
-    writeOpt.textContent = 'Read + write';
-    modeSelect.append(readOpt, writeOpt);
-    modeSelect.value = mode === 'write' ? 'write' : 'read';
-
-    var removeBtn = document.createElement('button');
-    removeBtn.type = 'button';
-    removeBtn.className = 'btn btn-ghost btn-icon';
-    removeBtn.title = 'Remove path';
-    removeBtn.innerHTML = ICONS.trash;
-    removeBtn.addEventListener('click', function () {
-      if ($('mcp-scopes').children.length > 1) row.remove();
-    });
-
-    row.append(pathInput, modeSelect, removeBtn);
-    $('mcp-scopes').append(row);
+  // ---------- MCP access (clients[] API-token grants) ----------
+  async function loadGrants() {
+    var payload = await api('/dashboard/api/grants');
+    state.grants = payload.grants || [];
+    state.canManageGrants = !!payload.canManage;
+    renderGrants();
   }
 
-  function openMcpModal(entry) {
-    hideContextMenu();
+  function renderGrants() {
+    $('grants-count').textContent = state.grants.length ? '(' + state.grants.length + ')' : '';
+    $('new-grant').classList.toggle('hidden', !(state.view === 'mcp' && state.canManageGrants));
+    var hasGrants = state.grants.length > 0;
+    $('grants-empty').classList.toggle('hidden', hasGrants);
+    $('grants-wrap').classList.toggle('hidden', !hasGrants);
+    var body = $('grants');
+    body.innerHTML = '';
+    for (var i = 0; i < state.grants.length; i += 1) body.append(renderGrantRow(state.grants[i]));
+  }
+
+  function renderGrantRow(grant) {
+    var row = document.createElement('tr');
+
+    var labelCell = document.createElement('td');
+    labelCell.setAttribute('data-label', 'Label');
+    labelCell.textContent = grant.label || grant.id;
+    labelCell.style.fontWeight = '500';
+
+    var accessCell = document.createElement('td');
+    accessCell.setAttribute('data-label', 'Access');
+    accessCell.textContent = grant.scope || '';
+
+    var reachCell = document.createElement('td');
+    reachCell.setAttribute('data-label', 'Reach');
+    var reachBadge = document.createElement('span');
+    reachBadge.className = 'badge ' + (grant.published ? 'active' : '');
+    reachBadge.textContent = grant.published ? 'Published' : 'Local only';
+    reachBadge.title = grant.published
+      ? 'Reachable over the relay'
+      : 'Reachable by apps on this machine only';
+    reachCell.append(reachBadge);
+
+    var expiresCell = document.createElement('td');
+    expiresCell.setAttribute('data-label', 'Expires');
+    expiresCell.textContent = grant.expiresAt ? formatDate(grant.expiresAt) : 'Never';
+
+    var usedCell = document.createElement('td');
+    usedCell.setAttribute('data-label', 'Last used');
+    usedCell.className = 'cell-num';
+    if (grant.lastUsedAt) { usedCell.textContent = relativeTime(grant.lastUsedAt); usedCell.title = formatDate(grant.lastUsedAt); }
+    else { usedCell.textContent = '—'; }
+
+    var actionCell = document.createElement('td');
+    actionCell.setAttribute('data-label', 'Actions');
+    if (state.canManageGrants) {
+      var actions = document.createElement('div');
+      actions.className = 'actions';
+
+      var publishBtn = document.createElement('button');
+      publishBtn.className = 'btn btn-sm';
+      publishBtn.type = 'button';
+      publishBtn.textContent = grant.published ? 'Unpublish' : 'Publish';
+      publishBtn.title = grant.published
+        ? 'Close the relay door; local apps keep access'
+        : 'Give this token a relay door';
+      (function (id, publish) {
+        publishBtn.addEventListener('click', async function () {
+          try {
+            await api('/dashboard/api/grants/' + encodeURIComponent(id) + '/publish', {
+              method: 'POST',
+              body: JSON.stringify({ published: publish }),
+            });
+            await loadGrants();
+            toast(publish ? 'Token published.' : 'Token unpublished — local apps keep access.', 'success');
+          } catch (err) { showError(err); }
+        });
+      })(grant.id, !grant.published);
+      actions.append(publishBtn);
+
+      var revokeBtn = document.createElement('button');
+      revokeBtn.className = 'btn btn-danger btn-sm btn-icon';
+      revokeBtn.type = 'button';
+      revokeBtn.title = 'Revoke';
+      revokeBtn.innerHTML = ICONS.trash;
+      (function (id) {
+        revokeBtn.addEventListener('click', async function () {
+          if (!confirm('Revoke this MCP token? Any agent using it loses access immediately.')) return;
+          try {
+            await api('/dashboard/api/grants/' + encodeURIComponent(id), { method: 'DELETE', body: '{}' });
+            await loadGrants();
+            toast('Token revoked.', 'success');
+          } catch (err) { showError(err); }
+        });
+      })(grant.id);
+      actions.append(revokeBtn);
+
+      actionCell.append(actions);
+    }
+
+    row.append(labelCell, accessCell, reachCell, expiresCell, usedCell, actionCell);
+    return row;
+  }
+
+  function buildMcpScopeRows() {
+    var container = $('mcp-scope-rows');
+    container.innerHTML = '';
+    for (var i = 0; i < state.mounts.length; i += 1) {
+      (function (mount) {
+        var row = document.createElement('div');
+        row.className = 'mcp-scope-row';
+        row.setAttribute('data-path', mount.path);
+        row.style.display = 'flex';
+        row.style.alignItems = 'center';
+        row.style.gap = '.5rem';
+        row.style.marginBottom = '.35rem';
+
+        var name = document.createElement('span');
+        name.textContent = mount.path;
+        name.style.flex = '1';
+        name.style.fontSize = '.88rem';
+
+        var select = document.createElement('select');
+        select.className = 'mcp-scope-mode';
+        select.style.width = 'auto';
+        var noneOpt = document.createElement('option');
+        noneOpt.value = 'none';
+        noneOpt.textContent = 'No access';
+        var readOpt = document.createElement('option');
+        readOpt.value = 'read';
+        readOpt.textContent = 'Read';
+        select.append(noneOpt, readOpt);
+        if (mount.writeAccess) {
+          var writeOpt = document.createElement('option');
+          writeOpt.value = 'write';
+          writeOpt.textContent = 'Read + write';
+          select.append(writeOpt);
+        }
+        // Pre-fill with the mount's natural level.
+        select.value = mount.writeAccess ? 'write' : 'read';
+
+        row.append(name, select);
+        container.append(row);
+      })(state.mounts[i]);
+    }
+  }
+
+  function syncMcpAccessMode() {
+    var custom = document.querySelector('input[name=mcp-access-mode]:checked');
+    $('mcp-custom-scopes').classList.toggle('hidden', !custom || custom.value !== 'custom');
+  }
+
+  function openMcpModal() {
     $('mcp-step-config').classList.remove('hidden');
     $('mcp-step-success').classList.add('hidden');
-    $('mcp-scopes').innerHTML = '';
-    addMcpScopeRow(entry ? entry.path : '', entry && entry.writeAccess ? 'write' : 'read');
-    $('mcp-label').value = entry ? ('Agent access — ' + (entry.name || entry.path)) : '';
+    $('mcp-label').value = '';
     $('mcp-expires').value = 'never';
     $('mcp-published').checked = false;
+    var allRadio = document.querySelector('input[name=mcp-access-mode][value=all]');
+    if (allRadio) allRadio.checked = true;
+    buildMcpScopeRows();
+    syncMcpAccessMode();
     $('mcp-modal').classList.remove('hidden');
-    setTimeout(function () { $('mcp-label').focus(); $('mcp-label').select(); }, 0);
+    setTimeout(function () { $('mcp-label').focus(); }, 0);
   }
 
   function closeMcpModal() { $('mcp-modal').classList.add('hidden'); }
 
   async function submitMcpGrant() {
-    var rows = $('mcp-scopes').querySelectorAll('.mcp-scope-row');
-    var scopes = [];
-    for (var i = 0; i < rows.length; i += 1) {
-      var pathValue = rows[i].querySelector('.mcp-scope-path').value.trim();
-      if (!pathValue) continue;
-      scopes.push({ path: pathValue, mode: rows[i].querySelector('.mcp-scope-mode').value });
-    }
-    if (scopes.length === 0) { toast('Add at least one path.', 'error'); return; }
     if (!$('mcp-label').value.trim()) { toast('Add a label first.', 'error'); $('mcp-label').focus(); return; }
+    var selected = document.querySelector('input[name=mcp-access-mode]:checked');
+    var allMounts = !selected || selected.value === 'all';
+    var requestBody = {
+      label: $('mcp-label').value.trim(),
+      expires: $('mcp-expires').value,
+      published: $('mcp-published').checked,
+      allMounts: allMounts,
+    };
+    if (!allMounts) {
+      var rows = $('mcp-scope-rows').querySelectorAll('.mcp-scope-row');
+      var scopes = [];
+      for (var i = 0; i < rows.length; i += 1) {
+        var mode = rows[i].querySelector('.mcp-scope-mode').value;
+        if (mode === 'none') continue;
+        scopes.push({ path: rows[i].getAttribute('data-path'), mode: mode });
+      }
+      if (scopes.length === 0) { toast('Give the token at least one mount.', 'error'); return; }
+      requestBody.scopes = scopes;
+    }
     var btn = $('mcp-create');
     btn.disabled = true;
     try {
-      var payload = await api('/dashboard/api/grants', {
-        method: 'POST',
-        body: JSON.stringify({
-          label: $('mcp-label').value.trim(),
-          expires: $('mcp-expires').value,
-          published: $('mcp-published').checked,
-          scopes: scopes,
-        }),
-      });
+      var payload = await api('/dashboard/api/grants', { method: 'POST', body: JSON.stringify(requestBody) });
       $('mcp-created-endpoint').textContent = payload.endpoint || '';
       $('mcp-created-token').textContent = payload.token || '';
       $('mcp-step-config').classList.add('hidden');
       $('mcp-step-success').classList.remove('hidden');
+      await loadGrants();
     } catch (err) { showError(err); }
     finally { btn.disabled = false; }
   }
@@ -3724,6 +3941,7 @@ table.t{border-collapse:collapse;width:100%}
     await reloadMounts();
     await loadFiles(state.currentPath);
     await loadLeases();
+    await loadGrants();
     await loadStatus();
   }
 
@@ -3799,10 +4017,6 @@ table.t{border-collapse:collapse;width:100%}
     var entry = state.contextEntry || state.selectedEntry;
     if (entry) openLeaseModal(entry);
   });
-  $('context-mcp').addEventListener('click', function () {
-    var entry = state.contextEntry || state.selectedEntry;
-    if (entry) openMcpModal(entry);
-  });
   $('context-properties').addEventListener('click', function () {
     var entry = state.contextEntry || state.selectedEntry;
     if (entry) openPropertiesModal(entry);
@@ -3828,11 +4042,15 @@ table.t{border-collapse:collapse;width:100%}
     catch (err) { showError(err); }
   });
   $('lease-modal').addEventListener('click', function (event) { if (event.target === $('lease-modal')) closeLeaseModal(); });
+  $('new-grant').addEventListener('click', function () { openMcpModal(); });
   $('mcp-modal-close').addEventListener('click', closeMcpModal);
   $('mcp-cancel').addEventListener('click', closeMcpModal);
   $('mcp-done').addEventListener('click', closeMcpModal);
-  $('mcp-add-scope').addEventListener('click', function () { addMcpScopeRow('', 'read'); });
   $('mcp-create').addEventListener('click', function () { submitMcpGrant().catch(showError); });
+  var mcpAccessRadios = document.querySelectorAll('input[name=mcp-access-mode]');
+  for (var mr = 0; mr < mcpAccessRadios.length; mr += 1) {
+    mcpAccessRadios[mr].addEventListener('change', syncMcpAccessMode);
+  }
   $('mcp-copy-token').addEventListener('click', async function () {
     try { await copyToClipboard($('mcp-created-token').textContent || ''); toast('Token copied to clipboard.', 'success'); }
     catch (err) { showError(err); }

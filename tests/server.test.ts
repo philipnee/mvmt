@@ -1614,9 +1614,14 @@ describe('dashboard access', () => {
       expect(html).toContain("'/dashboard/api/leases/' + encodeURIComponent(id) + '/publish'");
       expect(html).toContain("publishBtn.textContent = isPublished ? 'Unpublish' : 'Publish'");
       expect(html).toContain('id="mcp-modal"');
-      expect(html).toContain('id="context-mcp"');
+      expect(html).toContain('data-view="mcp"');
+      expect(html).toContain('id="view-mcp-panel"');
+      expect(html).toContain('id="new-grant"');
       expect(html).toContain("api('/dashboard/api/grants'");
       expect(html).toContain('function submitMcpGrant()');
+      expect(html).toContain('function renderGrantRow(grant)');
+      // The old context-menu MCP entry point is gone — replaced by the tab.
+      expect(html).not.toContain('id="context-mcp"');
       expect(html).not.toContain('id="add-mount-settings"');
       expect(html).not.toContain('id="mounts-wrap"');
       expect(html).not.toContain('...(opts.headers || {})');
@@ -1814,126 +1819,110 @@ describe('dashboard access', () => {
     }
   });
 
-  // The dashboard "Create MCP access" flow mints a clients[] API-token
-  // grant scoped to specific files/folders. It is admin + config-path
-  // gated, validates every scope path against the configured mounts, and
-  // honours the publish exposure boundary on the resulting grant.
-  it('mints a per-file/folder MCP grant from the dashboard', async () => {
+  // The dashboard MCP-access tab mints clients[] API-token grants. A
+  // grant is either "all mounts" (one /** scope that tracks the mount
+  // list) or a per-mount selection. Creation is admin + config-path
+  // gated; the resulting grant honours the publish exposure boundary.
+  function mvmtGrantFixture(): { tmp: string; configPath: string; usersPath: string; tokenPath: string; leaseStorePath: string } {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-grant-test-'));
-    const tokenPath = path.join(tmp, '.session-token');
-    const leaseStorePath = path.join(tmp, '.leases.json');
-    const usersPath = path.join(tmp, '.privileged-users.json');
     const configPath = path.join(tmp, 'config.yaml');
-    const root = path.join(tmp, 'workspace');
-    fs.mkdirSync(path.join(root, 'drafts'), { recursive: true });
-    fs.writeFileSync(path.join(root, 'note.md'), 'hello');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    const workspace = path.join(tmp, 'workspace');
+    const readonly = path.join(tmp, 'readonly');
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.mkdirSync(readonly, { recursive: true });
+    fs.writeFileSync(path.join(workspace, 'note.md'), 'hello');
     createPrivilegedUser(usersPath, { username: 'admin', password: 'correct horse battery staple', admin: true });
-    await saveConfig(configPath, parseConfig({
-      version: 1,
-      mounts: [{ name: 'workspace', type: 'local_folder', path: '/workspace', root, writeAccess: true }],
-    }));
+    createPrivilegedUser(usersPath, { username: 'member', password: 'correct horse battery staple' });
+    return {
+      tmp,
+      configPath,
+      usersPath,
+      tokenPath: path.join(tmp, '.session-token'),
+      leaseStorePath: path.join(tmp, '.leases.json'),
+    };
+  }
 
+  it('mints all-mounts and per-mount MCP grants from the dashboard and lists them', async () => {
+    const fx = mvmtGrantFixture();
+    await saveConfig(fx.configPath, parseConfig({
+      version: 1,
+      mounts: [
+        { name: 'workspace', type: 'local_folder', path: '/workspace', root: path.join(fx.tmp, 'workspace'), writeAccess: true },
+        { name: 'readonly', type: 'local_folder', path: '/readonly', root: path.join(fx.tmp, 'readonly') },
+      ],
+    }));
     const server = await startHttpServer(new ToolRouter(), {
       port: 0,
-      tokenPath,
-      configPath,
-      leaseMounts: () => readConfig(configPath).mounts,
-      clients: () => readConfig(configPath).clients,
-      leaseStorePath,
-      privilegedUsersPath: usersPath,
+      tokenPath: fx.tokenPath,
+      configPath: fx.configPath,
+      leaseMounts: () => readConfig(fx.configPath).mounts,
+      clients: () => readConfig(fx.configPath).clients,
+      leaseStorePath: fx.leaseStorePath,
+      privilegedUsersPath: fx.usersPath,
     });
     try {
       const cookie = await loginDashboard(server.port, 'admin', 'correct horse battery staple');
-
-      // Capability-only grant: read on the whole mount, write on a subfolder.
-      const create = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/grants`, {
+      const post = (body: unknown) => fetch(`http://127.0.0.1:${server.port}/dashboard/api/grants`, {
         method: 'POST',
         headers: { Cookie: cookie, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          label: 'Claude - workspace',
-          expires: 'never',
-          published: false,
-          scopes: [
-            { path: '/workspace', mode: 'read' },
-            { path: '/workspace/drafts', mode: 'write' },
-          ],
-        }),
+        body: JSON.stringify(body),
       });
-      expect(create.status).toBe(201);
-      const created = await create.json() as { grant: { id: string; published: boolean }; token: string; endpoint: string };
-      expect(created.token).toMatch(/^mvmt_t_/);
-      expect(created.endpoint).toMatch(/\/mcp$/);
-      expect(created.grant.published).toBe(false);
 
-      // The grant landed in clients[] with the resolved per-path scope.
-      const client = readConfig(configPath).clients?.find((c) => c.id === created.grant.id);
-      expect(client).toBeTruthy();
-      expect(client?.published).toBe(false);
-      expect(client?.permissions).toEqual([
-        { path: '/workspace/**', actions: ['search', 'read'] },
-        { path: '/workspace/drafts/**', actions: ['search', 'read', 'write'] },
+      // All-mounts grant → one /** scope that tracks the mount list.
+      const all = await post({ label: 'Claude - everything', expires: 'never', published: true, allMounts: true });
+      expect(all.status).toBe(201);
+      const allBody = await all.json() as { grant: { id: string }; token: string; endpoint: string };
+      expect(allBody.token).toMatch(/^mvmt_t_/);
+      expect(allBody.endpoint).toMatch(/\/mcp$/);
+      const allClient = readConfig(fx.configPath).clients?.find((c) => c.id === allBody.grant.id);
+      expect(allClient?.permissions).toEqual([{ path: '/**', actions: ['search', 'read', 'write'] }]);
+      expect(allClient?.published).toBe(true);
+
+      // Per-mount grant → one resolved scope entry per selected mount.
+      const custom = await post({
+        label: 'Claude - workspace only',
+        published: false,
+        scopes: [{ path: '/workspace', mode: 'write' }, { path: '/readonly', mode: 'read' }],
+      });
+      expect(custom.status).toBe(201);
+      const customBody = await custom.json() as { grant: { id: string } };
+      const customClient = readConfig(fx.configPath).clients?.find((c) => c.id === customBody.grant.id);
+      expect(customClient?.permissions).toEqual([
+        { path: '/workspace/**', actions: ['search', 'read', 'write'] },
+        { path: '/readonly/**', actions: ['search', 'read'] },
       ]);
+      expect(customClient?.published).toBe(false);
 
-      // Capability-only: works over localhost, rejected over the relay.
-      const localMcp = await fetch(`http://127.0.0.1:${server.port}/mcp`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${created.token}`,
-          Accept: 'application/json, text/event-stream',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          jsonrpc: '2.0', id: 1, method: 'initialize',
-          params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 't', version: '0' } },
-        }),
-      });
-      expect(localMcp.status).toBe(200);
-
-      const relayMcp = await fetch(`http://127.0.0.1:${server.port}/mcp`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${created.token}`,
-          Accept: 'application/json, text/event-stream',
-          'Content-Type': 'application/json',
-          'X-MVMT-Transport': 'relay',
-        },
-        body: JSON.stringify({
-          jsonrpc: '2.0', id: 1, method: 'initialize',
-          params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 't', version: '0' } },
-        }),
-      });
-      expect(relayMcp.status).toBe(403);
-      expect((await relayMcp.json() as { error: string }).error).toBe('grant_not_published');
+      // GET lists both, with scope summaries and reach.
+      const list = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/grants`, { headers: { Cookie: cookie } });
+      expect(list.status).toBe(200);
+      const listBody = await list.json() as { canManage: boolean; grants: { id: string; scope: string; published: boolean }[] };
+      expect(listBody.canManage).toBe(true);
+      const allRow = listBody.grants.find((g) => g.id === allBody.grant.id);
+      const customRow = listBody.grants.find((g) => g.id === customBody.grant.id);
+      expect(allRow).toMatchObject({ scope: 'All mounts', published: true });
+      expect(customRow).toMatchObject({ scope: '2 mounts', published: false });
     } finally {
       await server.close();
-      fs.rmSync(tmp, { recursive: true, force: true });
+      fs.rmSync(fx.tmp, { recursive: true, force: true });
     }
   });
 
-  it('rejects dashboard MCP grants that fall outside a mount, on read-only writes, or without admin/config', async () => {
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-grant-reject-test-'));
-    const tokenPath = path.join(tmp, '.session-token');
-    const leaseStorePath = path.join(tmp, '.leases.json');
-    const usersPath = path.join(tmp, '.privileged-users.json');
-    const configPath = path.join(tmp, 'config.yaml');
-    const root = path.join(tmp, 'readonly');
-    fs.mkdirSync(root, { recursive: true });
-    fs.writeFileSync(path.join(root, 'note.md'), 'hello');
-    createPrivilegedUser(usersPath, { username: 'admin', password: 'correct horse battery staple', admin: true });
-    createPrivilegedUser(usersPath, { username: 'member', password: 'correct horse battery staple' });
-    await saveConfig(configPath, parseConfig({
+  it('rejects invalid MCP grant requests and never writes a partial grant', async () => {
+    const fx = mvmtGrantFixture();
+    await saveConfig(fx.configPath, parseConfig({
       version: 1,
-      mounts: [{ name: 'readonly', type: 'local_folder', path: '/readonly', root }],
+      mounts: [{ name: 'readonly', type: 'local_folder', path: '/readonly', root: path.join(fx.tmp, 'readonly') }],
     }));
-
     const server = await startHttpServer(new ToolRouter(), {
       port: 0,
-      tokenPath,
-      configPath,
-      leaseMounts: () => readConfig(configPath).mounts,
-      clients: () => readConfig(configPath).clients,
-      leaseStorePath,
-      privilegedUsersPath: usersPath,
+      tokenPath: fx.tokenPath,
+      configPath: fx.configPath,
+      leaseMounts: () => readConfig(fx.configPath).mounts,
+      clients: () => readConfig(fx.configPath).clients,
+      leaseStorePath: fx.leaseStorePath,
+      privilegedUsersPath: fx.usersPath,
     });
     try {
       const adminCookie = await loginDashboard(server.port, 'admin', 'correct horse battery staple');
@@ -1943,13 +1932,13 @@ describe('dashboard access', () => {
         body: JSON.stringify(body),
       });
 
-      const noLabel = await post(adminCookie, { scopes: [{ path: '/readonly', mode: 'read' }] });
+      const noLabel = await post(adminCookie, { allMounts: true });
       expect(noLabel.status).toBe(400);
       expect((await noLabel.json() as { error: string }).error).toBe('label_required');
 
-      const noScopes = await post(adminCookie, { label: 'x', scopes: [] });
-      expect(noScopes.status).toBe(400);
-      expect((await noScopes.json() as { error: string }).error).toBe('scope_required');
+      const noScope = await post(adminCookie, { label: 'x' });
+      expect(noScope.status).toBe(400);
+      expect((await noScope.json() as { error: string }).error).toBe('scope_required');
 
       const outside = await post(adminCookie, { label: 'x', scopes: [{ path: '/not-a-mount', mode: 'read' }] });
       expect(outside.status).toBe(400);
@@ -1959,13 +1948,76 @@ describe('dashboard access', () => {
       expect((await writeReadOnly.json() as { error: string }).error).toBe('mount_read_only');
 
       const memberCookie = await loginDashboard(server.port, 'member', 'correct horse battery staple');
-      const nonAdmin = await post(memberCookie, { label: 'x', scopes: [{ path: '/readonly', mode: 'read' }] });
+      const nonAdmin = await post(memberCookie, { label: 'x', allMounts: true });
       expect(nonAdmin.status).toBe(403);
 
-      expect(readConfig(configPath).clients ?? []).toEqual([]);
+      // A non-admin can still see the (empty) list — no silent dead-end.
+      const memberList = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/grants`, { headers: { Cookie: memberCookie } });
+      expect(memberList.status).toBe(200);
+      expect((await memberList.json() as { canManage: boolean }).canManage).toBe(false);
+
+      expect(readConfig(fx.configPath).clients ?? []).toEqual([]);
     } finally {
       await server.close();
-      fs.rmSync(tmp, { recursive: true, force: true });
+      fs.rmSync(fx.tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('publishes, unpublishes, and revokes an MCP grant from the dashboard', async () => {
+    const fx = mvmtGrantFixture();
+    await saveConfig(fx.configPath, parseConfig({
+      version: 1,
+      mounts: [{ name: 'workspace', type: 'local_folder', path: '/workspace', root: path.join(fx.tmp, 'workspace'), writeAccess: true }],
+    }));
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath: fx.tokenPath,
+      configPath: fx.configPath,
+      leaseMounts: () => readConfig(fx.configPath).mounts,
+      clients: () => readConfig(fx.configPath).clients,
+      leaseStorePath: fx.leaseStorePath,
+      privilegedUsersPath: fx.usersPath,
+    });
+    try {
+      const cookie = await loginDashboard(server.port, 'admin', 'correct horse battery staple');
+      const created = await (await fetch(`http://127.0.0.1:${server.port}/dashboard/api/grants`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label: 'Claude', published: false, allMounts: true }),
+      })).json() as { grant: { id: string }; token: string };
+      const id = created.grant.id;
+
+      const publish = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/grants/${id}/publish`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ published: true }),
+      });
+      expect(publish.status).toBe(200);
+      expect(readConfig(fx.configPath).clients?.[0]?.published).toBe(true);
+
+      const unpublish = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/grants/${id}/publish`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ published: false }),
+      });
+      expect(unpublish.status).toBe(200);
+      expect(readConfig(fx.configPath).clients?.[0]?.published).toBe(false);
+
+      const revoke = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/grants/${id}`, {
+        method: 'DELETE',
+        headers: { Cookie: cookie },
+      });
+      expect(revoke.status).toBe(200);
+      expect(readConfig(fx.configPath).clients ?? []).toEqual([]);
+
+      const revokeMissing = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/grants/grant-missing`, {
+        method: 'DELETE',
+        headers: { Cookie: cookie },
+      });
+      expect(revokeMissing.status).toBe(404);
+    } finally {
+      await server.close();
+      fs.rmSync(fx.tmp, { recursive: true, force: true });
     }
   });
 
@@ -1985,7 +2037,7 @@ describe('dashboard access', () => {
       const blocked = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/grants`, {
         method: 'POST',
         headers: { Cookie: cookie, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ label: 'x', scopes: [{ path: '/x', mode: 'read' }] }),
+        body: JSON.stringify({ label: 'x', allMounts: true }),
       });
       expect(blocked.status).toBe(403);
     } finally {
