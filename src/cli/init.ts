@@ -1,11 +1,8 @@
-import { checkbox, confirm, input, select } from '@inquirer/prompts';
+import { confirm, input, select } from '@inquirer/prompts';
 import chalk from 'chalk';
 import { getConfigPath, saveConfig } from '../config/loader.js';
 import {
-  DEFAULT_PATTERN_REDACTOR_PATTERNS,
   MvmtConfig,
-  PatternRedactorPatternConfig,
-  PluginConfig,
   TunnelConfig,
 } from '../config/schema.js';
 import { getSetupRegistry } from '../connectors/setup-registry.js';
@@ -57,8 +54,6 @@ export async function setupConfig(
     }
   }
 
-  const plugins = await promptForPlugins();
-
   const portAnswer = await input({
     message: 'Server port',
     default: '4141',
@@ -70,7 +65,7 @@ export async function setupConfig(
   const port = Number(portAnswer);
   const access = await promptForAccess(port);
 
-  let config = buildConfig({ port, access, plugins });
+  let config = buildConfig({ port, access });
   for (const applySelection of applySelections) {
     config = applySelection(config);
   }
@@ -94,7 +89,6 @@ export async function init(options: SetupConfigOptions = {}): Promise<void> {
 export interface BuildConfigInput {
   port: number;
   access?: { access: 'local' | 'tunnel'; tunnel?: TunnelConfig };
-  plugins?: PluginConfig[];
 }
 
 export function buildConfig(input: BuildConfigInput): MvmtConfig {
@@ -109,64 +103,7 @@ export function buildConfig(input: BuildConfigInput): MvmtConfig {
     },
     proxy: [],
     mounts: [],
-    plugins: input.plugins ?? [],
   };
-}
-
-async function promptForPlugins(): Promise<PluginConfig[]> {
-  console.log('\nSecurity plugins\n');
-  const selected = await checkbox<'pattern-redactor'>({
-    message: 'Security plugins to enable:',
-    choices: [
-      {
-        name: 'Pattern-based redactor - best-effort regex redaction for outbound tool results',
-        value: 'pattern-redactor',
-        checked: true,
-      },
-    ],
-  });
-
-  if (!selected.includes('pattern-redactor')) return [];
-
-  const mode = await select<'warn' | 'redact' | 'block'>({
-    message: 'What should the pattern-based redactor do when a configured pattern matches?',
-    choices: [
-      { name: 'Redact matches before returning tool output (recommended)', value: 'redact' },
-      { name: 'Warn only; return output unchanged', value: 'warn' },
-      { name: 'Block the whole tool result', value: 'block' },
-    ],
-  });
-
-  const patterns = await checkbox<PatternRedactorPatternConfig>({
-    message: 'Which default patterns should it use?',
-    choices: DEFAULT_PATTERN_REDACTOR_PATTERNS.map((pattern) => ({
-      name: pattern.name,
-      value: pattern,
-      checked: true,
-    })),
-    validate: (value) => (value.length > 0 ? true : 'Select at least one pattern or disable the plugin.'),
-  });
-
-  const maxBytesAnswer = await input({
-    message: 'Max bytes to scan per text result',
-    default: String(1024 * 1024),
-    validate: (value) => {
-      const maxBytes = Number(value);
-      return Number.isInteger(maxBytes) && maxBytes >= 1024 && maxBytes <= 10 * 1024 * 1024
-        ? true
-        : 'Enter a value from 1024 to 10485760';
-    },
-  });
-
-  return [
-    {
-      name: 'pattern-redactor',
-      enabled: true,
-      mode,
-      maxBytes: Number(maxBytesAnswer),
-      patterns: patterns.length > 0 ? patterns : DEFAULT_PATTERN_REDACTOR_PATTERNS,
-    },
-  ];
 }
 
 async function promptForAccess(port: number): Promise<{ access: 'local' | 'tunnel'; tunnel?: TunnelConfig }> {

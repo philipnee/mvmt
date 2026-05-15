@@ -131,12 +131,6 @@ Mount access has two layers of path filtering: per-mount `exclude`/`protect` pat
 - Remote mvmt mounts are not shipped.
 - Audit log rotation is manual.
 
-## Pattern Redaction
-
-The built-in `pattern-redactor` plugin is defense in depth for outbound tool results.
-
-It is not the primary security boundary. If a client must not see data, do not mount that path for the client.
-
 ## Near-Term Security Priorities
 
 - Admin UI for mounts, client policy, and audit visibility.

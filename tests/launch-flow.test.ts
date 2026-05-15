@@ -65,7 +65,7 @@ describe('first 10 minute workflow', () => {
         mounts: config.mounts,
         indexPath: defaultTextIndexPath(configPath),
       });
-      const router = new ToolRouter(undefined, [], { contextIndex: index });
+      const router = new ToolRouter(undefined, { contextIndex: index });
       await router.initialize();
       const server = await startHttpServer(router, {
         port: 0,

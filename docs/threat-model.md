@@ -51,8 +51,9 @@ mount table plus scoped API-token permissions, not the client or model.
 - Plaintext localhost traffic. Use tunnel HTTPS only when remote access is
   needed.
 - A compromised tunnel provider, DNS account, or machine running the tunnel.
-- Pattern redaction as a hard boundary. Redaction is defense in depth, not a
-  substitute for mounts and permissions.
+- Secrets that are intentionally left inside readable scope. mvmt does not
+  inspect or rewrite file contents; use mount scope, `exclude`, `protect`, and
+  narrow client permissions to keep sensitive data out of reach.
 
 ## Token Model
 
@@ -94,8 +95,7 @@ Audit logging helps answer:
 
 - which client called a tool;
 - which path or query was requested;
-- whether the call failed or was denied;
-- whether a redaction plugin matched output.
+- whether the call failed or was denied.
 
 Audit log rotation is manual today.
 

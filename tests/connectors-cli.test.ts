@@ -12,7 +12,6 @@ const baseConfig: MvmtConfig = {
   },
   proxy: [],
   mounts: [],
-  plugins: [],
 };
 
 describe('connector setup helpers', () => {

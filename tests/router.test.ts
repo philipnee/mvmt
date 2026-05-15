@@ -19,7 +19,7 @@ describe('ToolRouter', () => {
   it('exposes text index tools by path/action permission', async () => {
     const { index, tmp } = await createTextIndexFixture();
     try {
-      const router = new ToolRouter(undefined, [], { contextIndex: index });
+      const router = new ToolRouter(undefined, { contextIndex: index });
       await router.initialize();
 
       const tools = router.getAllTools(client('codex', false, [
@@ -40,7 +40,7 @@ describe('ToolRouter', () => {
   it('initializes context tools only once', async () => {
     const { index, tmp } = await createTextIndexFixture();
     try {
-      const router = new ToolRouter(undefined, [], { contextIndex: index });
+      const router = new ToolRouter(undefined, { contextIndex: index });
       await router.initialize();
       await router.initialize();
 
@@ -59,7 +59,7 @@ describe('ToolRouter', () => {
   it('normalizes permission paths with trailing slashes without regex backtracking', async () => {
     const { index, tmp } = await createTextIndexFixture();
     try {
-      const router = new ToolRouter(undefined, [], { contextIndex: index });
+      const router = new ToolRouter(undefined, { contextIndex: index });
       await router.initialize();
       const identity = client('codex', false, [{ path: '/workspace/**////', actions: ['read'] }]);
 
@@ -76,7 +76,7 @@ describe('ToolRouter', () => {
   it('allows targeted reads with an exact file permission', async () => {
     const { index, tmp } = await createTextIndexFixture();
     try {
-      const router = new ToolRouter(undefined, [], { contextIndex: index });
+      const router = new ToolRouter(undefined, { contextIndex: index });
       await router.initialize();
       const identity = client('codex', false, [{ path: '/workspace/note.md', actions: ['read'] }]);
 
@@ -100,7 +100,7 @@ describe('ToolRouter', () => {
     const { index, tmp } = await createTextIndexFixture();
     const audit = { record: vi.fn() };
     try {
-      const router = new ToolRouter(audit, [], { contextIndex: index });
+      const router = new ToolRouter(audit, { contextIndex: index });
       await router.initialize();
 
       const result = await router.callTool('write', { path: '/workspace/new.md', content: 'new' }, client('chatgpt', false, [
@@ -125,7 +125,7 @@ describe('ToolRouter', () => {
   it('allows writes when client and mount permissions allow them', async () => {
     const { index, tmp } = await createTextIndexFixture();
     try {
-      const router = new ToolRouter(undefined, [], { contextIndex: index });
+      const router = new ToolRouter(undefined, { contextIndex: index });
       await router.initialize();
       const identity = client('codex', false, [{ path: '/workspace/**', actions: ['read', 'write'] }]);
 
@@ -144,7 +144,7 @@ describe('ToolRouter', () => {
   it('exposes remove as the destructive text index tool', async () => {
     const { index, tmp } = await createTextIndexFixture();
     try {
-      const router = new ToolRouter(undefined, [], { contextIndex: index });
+      const router = new ToolRouter(undefined, { contextIndex: index });
       await router.initialize();
       const identity = client('codex', false, [{ path: '/workspace/**', actions: ['write'] }]);
 
@@ -157,79 +157,6 @@ describe('ToolRouter', () => {
     }
   });
 
-  it('applies result plugins before returning mount output', async () => {
-    const { index, tmp } = await createTextIndexFixture();
-    try {
-      const router = new ToolRouter(
-        undefined,
-        [
-          {
-            id: 'test-plugin',
-            displayName: 'test plugin',
-            process: vi.fn((context) => ({
-              result: {
-                ...context.result,
-                content: [{ type: 'text' as const, text: 'scrubbed' }],
-              },
-            })),
-          },
-        ],
-        { contextIndex: index },
-      );
-      await router.initialize();
-
-      await expect(router.callTool('read', { path: '/workspace/note.md' })).resolves.toEqual({
-        content: [{ type: 'text', text: 'scrubbed' }],
-      });
-    } finally {
-      await fs.rm(tmp, { recursive: true, force: true });
-    }
-  });
-
-  it('records plugin redaction counts in the audit log', async () => {
-    const { index, tmp } = await createTextIndexFixture();
-    const audit = { record: vi.fn() };
-    try {
-      const router = new ToolRouter(
-        audit,
-        [
-          {
-            id: 'pattern-redactor',
-            displayName: 'pattern redactor',
-            process: vi.fn((context) => ({
-              result: context.result,
-              auditEvents: [
-                {
-                  pluginId: 'pattern-redactor',
-                  mode: 'redact',
-                  matches: [{ pattern: 'openai-keys', count: 1 }],
-                },
-              ],
-            })),
-          },
-        ],
-        { contextIndex: index },
-      );
-      await router.initialize();
-
-      await router.callTool('read', { path: '/workspace/note.md' });
-
-      expect(audit.record).toHaveBeenCalledWith(
-        expect.objectContaining({
-          redactions: [
-            {
-              pluginId: 'pattern-redactor',
-              mode: 'redact',
-              pattern: 'openai-keys',
-              count: 1,
-            },
-          ],
-        }),
-      );
-    } finally {
-      await fs.rm(tmp, { recursive: true, force: true });
-    }
-  });
 });
 
 function client(

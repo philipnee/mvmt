@@ -83,4 +83,4 @@ Before adding a provider, answer these questions in code and docs:
 - What does `mvmt doctor` verify?
 - What appears in the audit log?
 
-If the safest answer is "exclude that data from scope," prefer scope controls over redaction.
+If the safest answer is "exclude that data from scope," prefer scope controls over post-processing filters.

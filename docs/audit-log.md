@@ -23,14 +23,6 @@ Example mount-tool call:
   "clientId": "chatgpt",
   "argKeys": ["query", "limit"],
   "argPreview": "{\"query\":\"meeting notes\",\"limit\":10}",
-  "redactions": [
-    {
-      "pluginId": "pattern-redactor",
-      "mode": "redact",
-      "pattern": "openai-keys",
-      "count": 1
-    }
-  ],
   "isError": false,
   "durationMs": 34
 }
@@ -44,7 +36,6 @@ Example mount-tool call:
 | `clientId` | Present when HTTP auth resolved to a configured or legacy client identity. |
 | `argKeys` | Argument key names, without values. |
 | `argPreview` | Truncated JSON of the arguments, max 512 characters. Can contain values. |
-| `redactions` | Present when `pattern-redactor` matched. |
 | `isError` | `true` if the tool returned an error or the call threw. |
 | `deniedReason` | Present when mvmt denied a tool call before data access. |
 | `durationMs` | Time from call start to result, in milliseconds. |

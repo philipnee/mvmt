@@ -95,45 +95,4 @@ describe('init helpers', () => {
     });
   });
 
-  it('records selected security plugins', () => {
-    const config = buildConfig({
-      port: 4141,
-      plugins: [
-        {
-          name: 'pattern-redactor',
-          enabled: true,
-          mode: 'redact',
-          maxBytes: 1024 * 1024,
-          patterns: [
-            {
-              name: 'emails',
-              regex: '\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b',
-              flags: 'gi',
-              replacement: '[REDACTED:EMAIL]',
-              enabled: true,
-            },
-          ],
-        },
-      ],
-    });
-
-    expect(config.plugins).toEqual([
-      {
-        name: 'pattern-redactor',
-        enabled: true,
-        mode: 'redact',
-        maxBytes: 1024 * 1024,
-        patterns: [
-          {
-            name: 'emails',
-            regex: '\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b',
-            flags: 'gi',
-            replacement: '[REDACTED:EMAIL]',
-            enabled: true,
-          },
-        ],
-      },
-    ]);
-  });
-
 });

@@ -1,7 +1,6 @@
 import { CallToolResult } from '../connectors/types.js';
 import { normalizePathSeparators, stripTrailingSlashes } from '../context/mount-registry.js';
 import { TextContextIndex } from '../context/text-index.js';
-import { PatternRedactorAuditEvent, ToolResultPlugin } from '../plugins/types.js';
 import { AuditLogger, summarizeArgs } from '../utils/audit.js';
 import { ClientIdentity } from './client-identity.js';
 import { accessDeniedResult } from './context-tools/helpers.js';
@@ -27,7 +26,6 @@ export class ToolRouter {
 
   constructor(
     private readonly audit?: AuditLogger,
-    private readonly plugins: ToolResultPlugin[] = [],
     options: ToolRouterOptions = {},
   ) {
     this.contextIndex = options.contextIndex;
@@ -64,7 +62,6 @@ export class ToolRouter {
     identity?: ClientIdentity,
   ): Promise<CallToolResult> {
     const start = Date.now();
-    const redactions: NonNullable<import('../utils/audit.js').AuditEntry['redactions']> = [];
     let result: CallToolResult | undefined;
     let threw = false;
     let deniedReason: string | undefined;
@@ -77,17 +74,6 @@ export class ToolRouter {
       }
 
       result = await this.dispatchContextTool(name, args, identity);
-      for (const plugin of this.plugins) {
-        const output = await plugin.process({
-          connectorId: 'mvmt',
-          toolName: name,
-          originalName: name,
-          args,
-          result,
-        });
-        result = output.result;
-        redactions.push(...flattenRedactionEvents(output.auditEvents ?? []));
-      }
       return result;
     } catch (err) {
       threw = true;
@@ -103,7 +89,6 @@ export class ToolRouter {
         start,
         result,
         threw,
-        redactions,
         identity,
         deniedReason ?? (result?.isError ? deniedReasonFromResult(result) : undefined),
       );
@@ -154,7 +139,6 @@ export class ToolRouter {
     start: number,
     result: CallToolResult | undefined,
     threw: boolean,
-    redactions: NonNullable<import('../utils/audit.js').AuditEntry['redactions']>,
     identity?: ClientIdentity,
     deniedReason?: string,
   ): void {
@@ -174,7 +158,6 @@ export class ToolRouter {
       ...(identity ? { clientId: identity.id } : {}),
       argKeys,
       argPreview,
-      ...(redactions.length > 0 ? { redactions } : {}),
       isError: threw || Boolean(result?.isError),
       ...(deniedReason ? { deniedReason } : {}),
       durationMs: Date.now() - start,
@@ -239,18 +222,4 @@ function deniedReasonFromResult(result: CallToolResult): string | undefined {
   const text = extractToolText(result);
   const match = text.match(/^Error: access denied \((.+)\)\.?$/);
   return match?.[1] ?? errorTextFromResult(result);
-}
-
-function flattenRedactionEvents(
-  events: PatternRedactorAuditEvent[],
-): NonNullable<import('../utils/audit.js').AuditEntry['redactions']> {
-  return events.flatMap((event) =>
-    event.matches.map((match) => ({
-      pluginId: event.pluginId,
-      mode: event.mode,
-      pattern: match.pattern,
-      count: match.count,
-      ...(event.truncated ? { truncated: true } : {}),
-    })),
-  );
 }

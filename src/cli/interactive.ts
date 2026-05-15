@@ -20,7 +20,6 @@ import {
 import { applyTunnelConfig, printTunnelEnabledWithNoTokens, promptForTunnelConfig } from './tunnel.js';
 import { LoadedConnector } from './connector-loader.js';
 import { TunnelController } from './tunnel-controller.js';
-import { ToolResultPlugin } from '../plugins/types.js';
 import { addPathsToLease, createFolderLease, listFolderLeases, revokeFolderLease } from './lease.js';
 import { DEFAULT_LEASE_TTL, defaultLeasesPath, leaseUnavailableReason, listLeases } from '../lease/store.js';
 import { loadConfig } from '../config/loader.js';
@@ -76,7 +75,6 @@ export interface InteractivePromptState {
   port: number;
   tunnel: TunnelController;
   loaded: LoadedConnector[];
-  plugins: ToolResultPlugin[];
   totalTools: number;
   audit: InteractiveAuditLogger;
   shutdown: () => Promise<void>;
@@ -769,30 +767,11 @@ async function promptForInteractiveTokenId(config: MvmtConfig, message: string):
   });
 }
 
-function printPluginSummary(plugins: ToolResultPlugin[]): void {
-  console.log(chalk.bold('plugins'));
-  if (plugins.length === 0) {
-    console.log(`  ${chalk.dim('none')}`);
-    return;
-  }
-  for (const plugin of plugins) {
-    console.log(`  ${chalk.green('ok')} ${plugin.id}`);
-  }
-}
-
 export function formatAuditEntry(entry: AuditEntry): string {
   const status = entry.isError ? chalk.red('ERR') : chalk.green('OK ');
   const time = chalk.dim(new Date(entry.ts).toLocaleTimeString());
   const args = entry.argKeys.length > 0 ? chalk.dim(` args=${entry.argKeys.join(',')}`) : '';
-  const redactions =
-    entry.redactions && entry.redactions.length > 0
-      ? chalk.yellow(
-          ` redactions=${entry.redactions
-            .map((item) => `${item.pattern}:${item.count}`)
-            .join(',')}`,
-        )
-      : '';
-  return `${time} ${status} ${chalk.cyan(entry.connectorId)} ${entry.tool}${args}${redactions} ${chalk.dim(`${entry.durationMs}ms`)}`;
+  return `${time} ${status} ${chalk.cyan(entry.connectorId)} ${entry.tool}${args} ${chalk.dim(`${entry.durationMs}ms`)}`;
 }
 
 export function formatHttpRequestEntry(entry: HttpRequestLogEntry): string {

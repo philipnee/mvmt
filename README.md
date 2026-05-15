@@ -85,7 +85,6 @@ On first run, mvmt creates:
 It then walks through:
 
 - adding local folder mounts;
-- optionally enabling the pattern redactor;
 - starting the MCP server.
 
 For a one-off read-only folder without changing saved config:
@@ -214,7 +213,6 @@ mvmt serve -i
 | Stdio mode | supported |
 | OAuth/PKCE for web clients | supported, including Dynamic Client Registration |
 | Tunnel mode | supported for personal remote access |
-| Pattern redactor plugin | supported |
 | Legacy proxy connector config | accepted by the schema for compatibility, ignored by the mount-only CLI runtime |
 | Admin UI | not shipped |
 | API-token issuance | supported for bearer-token clients |
@@ -368,11 +366,6 @@ mounts:
       - .aws/**
     writeAccess: true
     enabled: true
-
-plugins:
-  - name: pattern-redactor
-    enabled: true
-    mode: redact
 ```
 
 Mount fields:
@@ -566,8 +559,6 @@ Every data operation is gated by path and action.
   `writeAccess`.
 - Unknown OAuth clients are quarantined once API-token/OAuth policy exists.
 - Browser-origin checks block drive-by browser requests from non-local origins.
-- The optional pattern redactor can warn, redact, or block configured regex
-  matches before output reaches clients.
 - Tool calls are appended to `~/.mvmt/audit.log`.
 
 Authentication controls who connects. Mounts and client policy control what they
