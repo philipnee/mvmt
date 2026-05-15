@@ -30,6 +30,7 @@ export interface LeaseRecord {
   lastUsedAt?: string;
   revokedAt?: string;
   downloadCount: number;
+  maxDownloads?: number;
   uploadCount: number;
   // Exposure boundary for the capability/grant model. Absent means the
   // lease predates the publish concept and is grandfathered as published
@@ -60,6 +61,7 @@ export function createLease(
     resources?: LeaseResource[];
     expiresAt?: string;
     permissions?: LeasePermission[];
+    maxDownloads?: number;
     // Exposure boundary. Omit to leave the lease grandfathered as
     // published; pass false for a capability-only lease that only local
     // apps can reach. Callers minting through a deliberate "share"
@@ -71,6 +73,9 @@ export function createLease(
   const token = `mvmt_l_${crypto.randomBytes(32).toString('base64url')}`;
   const resources = normalizeLeaseResources(input.resources, input.path);
   if (resources.length === 0) throw new Error('lease must include at least one resource');
+  if (input.maxDownloads !== undefined && !validDownloadLimit(input.maxDownloads)) {
+    throw new Error('maxDownloads must be a positive safe integer');
+  }
   const path = input.path ?? resources[0]!.sourcePath;
   const record: LeaseRecord = {
     id: uniqueLeaseId(store),
@@ -82,6 +87,7 @@ export function createLease(
     createdAt: new Date().toISOString(),
     ...(input.expiresAt ? { expiresAt: input.expiresAt } : {}),
     downloadCount: 0,
+    ...(input.maxDownloads === undefined ? {} : { maxDownloads: input.maxDownloads }),
     uploadCount: 0,
     ...(input.published === undefined ? {} : { published: input.published }),
   };
@@ -170,13 +176,32 @@ export function recordLeaseUse(storePath: string, id: string, options: { downloa
   writeLeaseStore(storePath, store);
 }
 
+export function reserveLeaseDownload(storePath: string, id: string): LeaseRecord | 'download_limit_reached' | undefined {
+  const store = readLeaseStore(storePath);
+  const index = store.leases.findIndex((lease) => lease.id === id);
+  if (index < 0) return undefined;
+  const lease = store.leases[index]!;
+  if (lease.maxDownloads !== undefined && lease.downloadCount >= lease.maxDownloads) {
+    return 'download_limit_reached';
+  }
+  const next: LeaseRecord = {
+    ...lease,
+    lastUsedAt: new Date().toISOString(),
+    downloadCount: lease.downloadCount + 1,
+  };
+  store.leases[index] = next;
+  writeLeaseStore(storePath, store);
+  return next;
+}
+
 export function validateLeaseToken(lease: LeaseRecord, token: string | undefined): boolean {
   return Boolean(token && verifyApiToken(token, lease.tokenHash));
 }
 
-export function leaseUnavailableReason(lease: LeaseRecord, now = Date.now()): 'expired' | 'revoked' | undefined {
+export function leaseUnavailableReason(lease: LeaseRecord, now = Date.now()): 'expired' | 'revoked' | 'download_limit_reached' | undefined {
   if (lease.revokedAt) return 'revoked';
   if (isExpired(lease.expiresAt, now)) return 'expired';
+  if (lease.maxDownloads !== undefined && lease.downloadCount >= lease.maxDownloads) return 'download_limit_reached';
   return undefined;
 }
 
@@ -199,12 +224,23 @@ function readLeaseStore(storePath: string): LeaseStoreFile {
         resources: normalizeLeaseResources((lease as Partial<LeaseRecord>).resources, lease.path),
         permissions: lease.permissions?.filter(isLeasePermission) ?? ['read'],
         downloadCount: lease.downloadCount ?? 0,
+        ...normalizeMaxDownloads(lease.maxDownloads),
         uploadCount: lease.uploadCount ?? 0,
       })),
     };
   } catch {
     return emptyStore();
   }
+}
+
+function normalizeMaxDownloads(value: unknown): { maxDownloads?: number } {
+  return typeof value === 'number' && validDownloadLimit(value)
+    ? { maxDownloads: value }
+    : {};
+}
+
+function validDownloadLimit(value: number): boolean {
+  return Number.isSafeInteger(value) && value > 0;
 }
 
 function writeLeaseStore(storePath: string, store: LeaseStoreFile): void {

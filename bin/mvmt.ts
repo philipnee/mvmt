@@ -205,6 +205,7 @@ leaseCommand
   .option('--upload', 'Shortcut for --mode upload')
   .option('--expires <duration>', 'Lease lifetime, such as 24h, 7d, or never')
   .option('--ttl <duration>', 'Alias for --expires')
+  .option('--downloads <count>', 'Maximum successful file downloads; use -1 for unlimited')
   .option('--json', 'Output as JSON')
   .addHelpText('after', examples([
     ['mvmt lease create ~/Documents/Taxes ~/Receipts --label "Sarah - tax docs"', 'create a 24h shared link for multiple paths'],
@@ -212,9 +213,11 @@ leaseCommand
     ['mvmt lease create ~/Documents/Shared --label "Writable folder" --mode write', 'create a writable shared link'],
     ['mvmt lease create ~/DropBox --label "Sarah uploads" --mode upload', 'create an upload-only folder link'],
     ['mvmt lease create ~/DropBox --label "Sarah exchange" --mode two-way', 'create a browse + upload folder link'],
+    ['mvmt lease create ~/secret.txt --label "Invite" --downloads 1 --expires 1h', 'create a one-time download link'],
+    ['mvmt lease create ~/Photos --label "Family photos" --downloads -1', 'share with unlimited downloads'],
     ['mvmt lease create ~/Photos --label "Family photos" --expires never', 'share until revoked'],
   ]))
-  .action(async (paths: string[], options: { config?: string; label?: string; mode?: string; upload?: boolean; expires?: string; ttl?: string; json?: boolean }, command: Command) => {
+  .action(async (paths: string[], options: { config?: string; label?: string; mode?: string; upload?: boolean; expires?: string; ttl?: string; downloads?: string; json?: boolean }, command: Command) => {
     await createFolderLease(paths, withInheritedConfig(options, command));
   });
 
