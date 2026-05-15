@@ -447,9 +447,13 @@ describe('CLI usability', { timeout: 20_000 }, () => {
       expect(published).toContain("Token 'codex' published");
       expect(readConfig(configPath).clients?.[0]).toMatchObject({ id: 'codex', published: true });
 
-      const { stdout: unpublished } = await runCli(['token', 'unpublish', 'codex', '--config', configPath]);
+      const { stdout: unpublished } = await runCli(['tokens', 'unpublish', 'codex', '--config', configPath]);
       expect(unpublished).toContain("Token 'codex' unpublished");
       expect(readConfig(configPath).clients?.[0]).toMatchObject({ id: 'codex', published: false });
+
+      const { stdout: republished } = await runCli(['tokens', 'publish', 'codex', '--config', configPath]);
+      expect(republished).toContain("Token 'codex' published");
+      expect(readConfig(configPath).clients?.[0]).toMatchObject({ id: 'codex', published: true });
     } finally {
       await fs.rm(tmp, { recursive: true, force: true });
     }

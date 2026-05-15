@@ -243,7 +243,7 @@ leaseCommand
 
 leaseCommand
   .command('publish <id>')
-  .description('Give a shared link a relay door so it works over the public URL')
+  .description('Allow a shared link to be used through a public tunnel')
   .option('-c, --config <path>', 'Config file path')
   .action(async (id: string, options: { config?: string }, command: Command) => {
     await setFolderLeasePublished(id, true, withInheritedConfig(options, command));
@@ -251,7 +251,7 @@ leaseCommand
 
 leaseCommand
   .command('unpublish <id>')
-  .description('Close the relay door for a shared link; local apps keep access')
+  .description('Restrict a shared link to apps on this machine; block public tunnels')
   .option('-c, --config <path>', 'Config file path')
   .action(async (id: string, options: { config?: string }, command: Command) => {
     await setFolderLeasePublished(id, false, withInheritedConfig(options, command));
@@ -449,7 +449,7 @@ tokenCommand
 
 tokenCommand
   .command('publish [id]')
-  .description('Give a scoped MCP/API token a relay door so remote agents can use it')
+  .description('Allow a scoped MCP/API token to be used through a public tunnel')
   .option('-c, --config <path>', 'Config file path')
   .action(async (id: string | undefined, options: { config?: string }, command: Command) => {
     await setApiTokenPublished(id, true, withInheritedConfig(options, command));
@@ -457,7 +457,7 @@ tokenCommand
 
 tokenCommand
   .command('unpublish [id]')
-  .description('Close the relay door for a token; local apps keep access')
+  .description('Restrict a token to apps on this machine; block public tunnels')
   .option('-c, --config <path>', 'Config file path')
   .action(async (id: string | undefined, options: { config?: string }, command: Command) => {
     await setApiTokenPublished(id, false, withInheritedConfig(options, command));
@@ -559,6 +559,22 @@ apiTokensCommand
   .option('-y, --yes', 'Remove without prompting for confirmation')
   .action(async (id: string | undefined, options: { config?: string; yes?: boolean }, command: Command) => {
     await removeApiToken(id, withInheritedConfig(options, command));
+  });
+
+apiTokensCommand
+  .command('publish [id]')
+  .description('Allow a scoped MCP/API token to be used through a public tunnel')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (id: string | undefined, options: { config?: string }, command: Command) => {
+    await setApiTokenPublished(id, true, withInheritedConfig(options, command));
+  });
+
+apiTokensCommand
+  .command('unpublish [id]')
+  .description('Restrict a token to apps on this machine; block public tunnels')
+  .option('-c, --config <path>', 'Config file path')
+  .action(async (id: string | undefined, options: { config?: string }, command: Command) => {
+    await setApiTokenPublished(id, false, withInheritedConfig(options, command));
   });
 
 const tunnelCommand = program

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
+import { request as httpRequest } from 'node:http';
 import { createServer } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -26,6 +27,44 @@ import { ensureSigningKey, generateSessionToken, rotateSigningKey } from '../src
 
 function req(origin?: string): Request {
   return { headers: origin === undefined ? {} : { origin } } as unknown as Request;
+}
+
+function requestWithHost(
+  port: number,
+  requestPath: string,
+  host: string,
+  options: { method?: string; headers?: Record<string, string>; body?: string } = {},
+): Promise<{ status: number; body: string; json: () => unknown }> {
+  const body = options.body ?? '';
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({
+      hostname: '127.0.0.1',
+      port,
+      path: requestPath,
+      method: options.method ?? 'GET',
+      headers: {
+        ...(options.headers ?? {}),
+        Host: host,
+        ...(body ? { 'Content-Length': Buffer.byteLength(body).toString() } : {}),
+      },
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (chunk: Buffer | string) => {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      });
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf-8');
+        resolve({
+          status: res.statusCode ?? 0,
+          body: text,
+          json: () => JSON.parse(text),
+        });
+      });
+    });
+    req.on('error', reject);
+    if (body) req.write(body);
+    req.end();
+  });
 }
 
 describe('buildOriginCheck', () => {
@@ -198,8 +237,8 @@ describe('file lease downloads', () => {
 });
 
 // The exposure boundary: a capability-only grant (explicitly
-// published:false) has no relay door. It still works for apps reaching
-// mvmt over 127.0.0.1; a relay-forwarded request for it is rejected.
+// published:false) is local-only. It still works for apps reaching
+// mvmt over 127.0.0.1; a public-tunnel request for it is rejected.
 // Grants without an explicit published value are grandfathered as
 // published so existing tokens and leases keep working.
 describe('grant exposure boundary', () => {
@@ -238,6 +277,8 @@ describe('grant exposure boundary', () => {
   const leaseUrl = (port: number, id: string, token: string) =>
     `http://127.0.0.1:${port}/lease/${id}/files/payload.bin?token=${token}`;
 
+  const publicHostHeaders = { Host: 'public.example.test' };
+
   it('rejects a relay-forwarded request for a capability-only lease', async () => {
     await withLeaseServer(async ({ port, leaseStorePath, leaseId, token }) => {
       setLeasePublished(leaseStorePath, leaseId, false);
@@ -246,6 +287,16 @@ describe('grant exposure boundary', () => {
       });
       expect(viaRelay.status).toBe(403);
       expect((await viaRelay.json() as { error: string }).error).toBe('lease_not_published');
+    });
+  });
+
+  it('rejects a public-host request for a capability-only lease', async () => {
+    await withLeaseServer(async ({ port, leaseStorePath, leaseId, token }) => {
+      setLeasePublished(leaseStorePath, leaseId, false);
+      const url = new URL(leaseUrl(port, leaseId, token));
+      const viaPublicTunnel = await requestWithHost(port, `${url.pathname}${url.search}`, publicHostHeaders.Host);
+      expect(viaPublicTunnel.status).toBe(403);
+      expect((viaPublicTunnel.json() as { error: string }).error).toBe('lease_not_published');
     });
   });
 
@@ -314,48 +365,67 @@ describe('grant exposure boundary', () => {
     }
   }
 
-  const mcpInitialize = (port: number, token: string, viaRelay: boolean) =>
-    fetch(`http://127.0.0.1:${port}/mcp`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: 'application/json, text/event-stream',
-        'Content-Type': 'application/json',
-        ...(viaRelay ? { 'X-MVMT-Transport': 'relay' } : {}),
-      },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'initialize',
-        params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 't', version: '0' } },
-      }),
+  const mcpInitialize = async (
+    port: number,
+    token: string,
+    options: { viaRelay?: boolean; host?: string } = {},
+  ): Promise<{ status: number; json: () => Promise<unknown> }> => {
+    const body = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 't', version: '0' } },
     });
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/json, text/event-stream',
+      'Content-Type': 'application/json',
+      ...(options.viaRelay ? { 'X-MVMT-Transport': 'relay' } : {}),
+    };
+    if (options.host) {
+      const response = await requestWithHost(port, '/mcp', options.host, { method: 'POST', headers, body });
+      return { status: response.status, json: async () => response.json() };
+    }
+    return fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: 'POST',
+      headers,
+      body,
+    });
+  };
 
   it('rejects a relay-forwarded /mcp request for a capability-only token', async () => {
     await withMcpServer(false, async ({ port, token }) => {
-      const viaRelay = await mcpInitialize(port, token, true);
+      const viaRelay = await mcpInitialize(port, token, { viaRelay: true });
       expect(viaRelay.status).toBe(403);
       expect((await viaRelay.json() as { error: string }).error).toBe('grant_not_published');
     });
   });
 
+  it('rejects a public-host /mcp request for a capability-only token', async () => {
+    await withMcpServer(false, async ({ port, token }) => {
+      const viaPublicTunnel = await mcpInitialize(port, token, { host: 'public.example.test' });
+      expect(viaPublicTunnel.status).toBe(403);
+      expect((await viaPublicTunnel.json() as { error: string }).error).toBe('grant_not_published');
+    });
+  });
+
   it('allows a localhost /mcp request for a capability-only token', async () => {
     await withMcpServer(false, async ({ port, token }) => {
-      const local = await mcpInitialize(port, token, false);
+      const local = await mcpInitialize(port, token);
       expect(local.status).toBe(200);
     });
   });
 
   it('allows a relay-forwarded /mcp request for a published token', async () => {
     await withMcpServer(true, async ({ port, token }) => {
-      const viaRelay = await mcpInitialize(port, token, true);
+      const viaRelay = await mcpInitialize(port, token, { viaRelay: true });
       expect(viaRelay.status).toBe(200);
     });
   });
 
   it('grandfathers a token with no explicit published value as published', async () => {
     await withMcpServer(undefined, async ({ port, token }) => {
-      const viaRelay = await mcpInitialize(port, token, true);
+      const viaRelay = await mcpInitialize(port, token, { viaRelay: true });
       expect(viaRelay.status).toBe(200);
     });
   });
@@ -1170,8 +1240,8 @@ describe('dashboard access', () => {
 
   // Creating a share link in the dashboard is the explicit publish
   // gesture, so the lease is minted published. The publish endpoint then
-  // toggles the relay door without revoking the lease.
-  it('mints dashboard leases published and toggles the relay door via the publish endpoint', async () => {
+  // toggles public-tunnel exposure without revoking the lease.
+  it('mints dashboard leases published and toggles public-tunnel exposure via the publish endpoint', async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-publish-test-'));
     const tokenPath = path.join(tmp, '.session-token');
     const leaseStorePath = path.join(tmp, '.leases.json');
@@ -1223,6 +1293,15 @@ describe('dashboard access', () => {
       expect(unpublish.status).toBe(200);
       expect((await unpublish.json() as { lease: { published: boolean } }).lease.published).toBe(false);
 
+      const malformedPublish = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases/${leaseId}/publish`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      expect(malformedPublish.status).toBe(400);
+      expect((await malformedPublish.json() as { error: string }).error).toBe('published_required');
+      expect(listLeases(leaseStorePath)[0]!.published).toBe(false);
+
       // Capability-only now: relay is rejected, localhost still works.
       const afterUnpublishRelay = await fetch(
         `http://127.0.0.1:${server.port}/lease/${leaseId}/files?token=${token}`,
@@ -1234,7 +1313,7 @@ describe('dashboard access', () => {
       );
       expect(afterUnpublishLocal.status).toBe(200);
 
-      // Re-publish restores the relay door.
+      // Re-publish restores public-tunnel reachability.
       const republish = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases/${leaseId}/publish`, {
         method: 'POST',
         headers: { Cookie: cookie, 'Content-Type': 'application/json' },
@@ -1903,6 +1982,12 @@ describe('dashboard access', () => {
       const customRow = listBody.grants.find((g) => g.id === customBody.grant.id);
       expect(allRow).toMatchObject({ scope: 'All mounts', published: true });
       expect(customRow).toMatchObject({ scope: '2 mounts', published: false });
+
+      const remoteList = await requestWithHost(server.port, '/dashboard/api/grants', 'public.example.test', {
+        headers: { Cookie: cookie },
+      });
+      expect(remoteList.status).toBe(200);
+      expect((remoteList.json() as { canManage: boolean }).canManage).toBe(false);
     } finally {
       await server.close();
       fs.rmSync(fx.tmp, { recursive: true, force: true });
@@ -2001,6 +2086,15 @@ describe('dashboard access', () => {
         body: JSON.stringify({ published: false }),
       });
       expect(unpublish.status).toBe(200);
+      expect(readConfig(fx.configPath).clients?.[0]?.published).toBe(false);
+
+      const malformedPublish = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/grants/${id}/publish`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      expect(malformedPublish.status).toBe(400);
+      expect((await malformedPublish.json() as { error: string }).error).toBe('published_required');
       expect(readConfig(fx.configPath).clients?.[0]?.published).toBe(false);
 
       const revoke = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/grants/${id}`, {

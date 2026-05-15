@@ -120,9 +120,9 @@ export async function setFolderLeasePublished(
   const updated = setLeasePublished(leaseStorePath, id, published);
   if (!updated) throw new Error(`Unknown lease: ${id}`);
   if (published) {
-    console.log(chalk.green(`Lease ${id} published — it now has a relay door.`));
+    console.log(chalk.green(`Lease ${id} published - it can now be reached through a public tunnel.`));
   } else {
-    console.log(chalk.green(`Lease ${id} unpublished — local apps keep access, the relay door is closed.`));
+    console.log(chalk.green(`Lease ${id} unpublished - apps on this machine keep access; public tunnels are blocked.`));
   }
 }
 
