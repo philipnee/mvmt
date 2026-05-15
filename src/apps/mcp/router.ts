@@ -1,7 +1,7 @@
 import { CallToolResult } from '../../connectors/types.js';
-import { normalizePathSeparators, stripTrailingSlashes } from '../../context/mount-registry.js';
 import { TextContextIndex } from '../../context/text-index.js';
 import { ClientIdentity } from '../../core/auth/client-identity.js';
+import { actionAvailable, pathAllowed, pathMayExposeEntry, type PermissionAction } from '../../core/auth/permissions.js';
 import { AuditLogger, summarizeArgs } from '../../utils/audit.js';
 import { accessDeniedResult } from './tools/helpers.js';
 import {
@@ -10,7 +10,6 @@ import {
   isContextToolName,
   type ContextToolName,
   type NamespacedTool,
-  type PermissionAction,
 } from './tools/index.js';
 
 export type { NamespacedTool } from './tools/index.js';
@@ -163,47 +162,6 @@ export class ToolRouter {
       durationMs: Date.now() - start,
     });
   }
-}
-
-function pathAllowed(inputPath: string, action: PermissionAction, identity?: ClientIdentity): boolean {
-  if (!identity || identity.isLegacyDefault) return true;
-  const normalized = normalizePermissionPath(inputPath);
-  return identity.permissions.some((permission) => (
-    permission.actions.includes(action) && pathMatchesPermission(normalized, permission.path)
-  ));
-}
-
-function pathMayExposeEntry(inputPath: string, action: PermissionAction, identity?: ClientIdentity): boolean {
-  if (!identity || identity.isLegacyDefault) return true;
-  const normalized = normalizePermissionPath(inputPath);
-  return identity.permissions.some((permission) => {
-    if (!permission.actions.includes(action)) return false;
-    if (pathMatchesPermission(normalized, permission.path)) return true;
-    const base = permission.path.endsWith('/**')
-      ? normalizePermissionPath(permission.path.slice(0, -3))
-      : normalizePermissionPath(permission.path);
-    return base === normalized || base.startsWith(`${normalized}/`);
-  });
-}
-
-function actionAvailable(action: PermissionAction, identity?: ClientIdentity): boolean {
-  return !identity || identity.isLegacyDefault || identity.permissions.some((permission) => permission.actions.includes(action));
-}
-
-function pathMatchesPermission(inputPath: string, pattern: string): boolean {
-  const normalizedPattern = normalizePermissionPath(pattern);
-  if (normalizedPattern === '/**') return true;
-  if (normalizedPattern.endsWith('/**')) {
-    const base = normalizedPattern.slice(0, -3);
-    return inputPath === base || inputPath.startsWith(`${base}/`);
-  }
-  return inputPath === normalizedPattern;
-}
-
-function normalizePermissionPath(inputPath: string): string {
-  const trimmed = stripTrailingSlashes(normalizePathSeparators(inputPath.trim()));
-  if (!trimmed || trimmed === '/') return '/';
-  return trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
 }
 
 function extractToolText(raw: CallToolResult): string {

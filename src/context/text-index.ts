@@ -51,7 +51,7 @@ const TEXT_EXTENSIONS = new Set([
   '.zsh',
 ]);
 
-const MAX_TEXT_BYTES = 2 * 1024 * 1024;
+export const MAX_TEXT_BYTES = 2 * 1024 * 1024;
 const CHUNK_SIZE = 1600;
 const CHUNK_OVERLAP = 200;
 const DEFAULT_MAX_INDEXED_FILES = 5_000;
@@ -447,7 +447,7 @@ function chunkText(
   return { chunks, truncated };
 }
 
-function isTextPath(inputPath: string): boolean {
+export function isTextPath(inputPath: string): boolean {
   return TEXT_EXTENSIONS.has(path.extname(inputPath).toLowerCase());
 }
 

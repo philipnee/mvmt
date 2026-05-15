@@ -144,6 +144,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
       clients: createLiveClientsResolver(configPath, config, textIndex),
       leaseMounts: createLiveMountsResolver(configPath, config, textIndex),
       configPath,
+      audit,
       allowLegacyDefaultClient: () => config.server.access !== 'tunnel' || legacyTunnelOverrideEnabled(),
       // HTTP requests are always persisted to ~/.mvmt/audit.log so that
       // dashboard logins, mount changes, lease creation, and lease URL

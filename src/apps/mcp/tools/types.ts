@@ -1,9 +1,9 @@
 import { CallToolResult } from '../../../connectors/types.js';
-import { PermissionConfig } from '../../../config/schema.js';
 import { TextContextIndex } from '../../../context/text-index.js';
 import { ClientIdentity } from '../../../core/auth/client-identity.js';
+import type { PermissionAction } from '../../../core/auth/permissions.js';
 
-export type PermissionAction = PermissionConfig['actions'][number];
+export type { PermissionAction } from '../../../core/auth/permissions.js';
 export type ContextToolName = 'search' | 'list' | 'read' | 'write' | 'remove';
 
 export interface NamespacedTool {
