@@ -377,16 +377,17 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       });
       return;
     }
-    if (identity && isRelayRequest(req) && !isGrantPublished(identity.published)) {
+    if (identity && !isLocalRequest(req) && !isGrantPublished(identity.published)) {
       // Exposure boundary: a capability-only grant (explicitly published:
-      // false) has no relay door. The credential still works for local
-      // apps over 127.0.0.1; a relay-forwarded request for it is
-      // rejected. Grants without an explicit published value are
-      // grandfathered as published.
+      // false) is reachable only by apps on this machine. Any request
+      // arriving through a public tunnel - the mvmt relay, Cloudflare,
+      // pinggy, localhost.run, a custom tunnel - is rejected. Grants
+      // without an explicit published value are grandfathered as
+      // published.
       logHttpRequest(requestLog, req, 403, authLogKind(req), 'grant_not_published', identity.id);
       res.status(403).json({
         error: 'grant_not_published',
-        error_description: 'This grant is not published for relay access',
+        error_description: 'This grant is not published for remote access',
       });
       return;
     }
@@ -763,7 +764,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   };
 
   const dashboardLocalMiddleware: express.RequestHandler = (req, res, next) => {
-    if (!isLocalDashboardRequest(req)) {
+    if (!isLocalRequest(req)) {
       logHttpRequest(requestLog, req, 403, 'dashboard.local', 'local_required');
       res.status(403).json({ error: 'local_dashboard_required' });
       return;
@@ -814,7 +815,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     dashboardSessions.set(session.id, session);
     res.setHeader('Set-Cookie', dashboardSessionCookie(session, req));
     logHttpRequest(requestLog, req, 200, 'dashboard.login', 'ok', user.username);
-    res.json({ user: { ...publicDashboardUser(user), admin: Boolean(user.admin) }, localOwner: isLocalDashboardRequest(req) });
+    res.json({ user: { ...publicDashboardUser(user), admin: Boolean(user.admin) }, localOwner: isLocalRequest(req) });
   });
 
   app.post('/dashboard/api/logout', dashboardOriginMiddleware, dashboardAuthMiddleware, (req, res) => {
@@ -827,7 +828,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
 
   app.get('/dashboard/api/me', dashboardOriginMiddleware, dashboardAuthMiddleware, (req, res) => {
     const session = res.locals.dashboardSession as DashboardSession;
-    res.json({ user: { username: session.username, admin: session.admin }, localOwner: isLocalDashboardRequest(req) });
+    res.json({ user: { username: session.username, admin: session.admin }, localOwner: isLocalRequest(req) });
   });
 
   app.get('/dashboard/api/status', dashboardOriginMiddleware, dashboardAuthMiddleware, dashboardLocalMiddleware, (req, res) => {
@@ -837,7 +838,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     let tunnel: { configured: boolean; provider?: string; publicUrl?: string; canReconfigure: boolean } = {
       configured: Boolean(configuredPublicBase),
       ...(publicDashboardUrl ? { publicUrl: publicDashboardUrl } : {}),
-      canReconfigure: Boolean(options.configPath) && session.admin && isLocalDashboardRequest(req),
+      canReconfigure: Boolean(options.configPath) && session.admin && isLocalRequest(req),
     };
     if (options.configPath) {
       try {
@@ -846,7 +847,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
           configured: config.server.access === 'tunnel' && Boolean(config.server.tunnel),
           ...(config.server.tunnel?.provider ? { provider: config.server.tunnel.provider } : {}),
           ...(publicDashboardUrl ? { publicUrl: publicDashboardUrl } : {}),
-          canReconfigure: Boolean(options.configPath) && session.admin && isLocalDashboardRequest(req),
+          canReconfigure: Boolean(options.configPath) && session.admin && isLocalRequest(req),
         };
       } catch {
         // Keep the runtime-only status if the config cannot be read.
@@ -865,7 +866,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
 
   app.get('/dashboard/api/mounts', dashboardOriginMiddleware, dashboardAuthMiddleware, (req, res) => {
     const session = res.locals.dashboardSession as DashboardSession;
-    const canManage = Boolean(options.configPath) && session.admin && isLocalDashboardRequest(req);
+    const canManage = Boolean(options.configPath) && session.admin && isLocalRequest(req);
     const mounts = resolveLeaseMounts(options.leaseMounts);
     logHttpRequest(requestLog, req, 200, 'dashboard.mounts');
     res.json({
@@ -911,7 +912,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       const session = res.locals.dashboardSession as DashboardSession;
       const mounts = resolveLeaseMounts(options.leaseMounts);
       let listing = await listDashboardFiles(mounts, requestPath);
-      if (normalizeDashboardPath(requestPath) === '/' && session.admin && isLocalDashboardRequest(req)) {
+      if (normalizeDashboardPath(requestPath) === '/' && session.admin && isLocalRequest(req)) {
         listing = withUnavailableRootMounts(listing, mounts);
       }
       logHttpRequest(requestLog, req, 200, 'dashboard.files', listing.path);
@@ -1005,17 +1006,23 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     res.json({ ok: true });
   });
 
-  // Toggles the exposure boundary for a lease. Unpublishing removes the
-  // relay door without revoking the lease — local apps can still reach
+  // Toggles the exposure boundary for a lease. Unpublishing blocks public
+  // tunnels without revoking the lease; local apps can still reach
   // it over 127.0.0.1. Distinct from revoke, which kills the lease.
   app.post('/dashboard/api/leases/:id/publish', dashboardOriginMiddleware, dashboardAuthMiddleware, (req, res) => {
     const id = firstStringQuery(req.params.id);
     const body = (req.body ?? {}) as Record<string, unknown>;
-    const published = body.published === true;
     if (!id) {
       res.status(400).json({ error: 'id_required' });
       return;
     }
+    // Require an explicit boolean so a missing or malformed body cannot
+    // silently unpublish; an unpublish is a real exposure change.
+    if (typeof body.published !== 'boolean') {
+      res.status(400).json({ error: 'published_required' });
+      return;
+    }
+    const published = body.published;
     const lease = findLease(leaseStorePath, id);
     if (!lease) {
       logHttpRequest(requestLog, req, 404, 'dashboard.leases', 'unknown_lease');
@@ -1182,7 +1189,11 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     const tokenClients = resolveClients(options.clients).filter((client) => client.auth.type === 'token');
     logHttpRequest(requestLog, req, 200, 'dashboard.grants');
     res.json({
-      canManage: Boolean(options.configPath) && session.admin,
+      // Minting grants writes to config and is local-only (see the
+      // dashboardLocalMiddleware on POST /dashboard/api/grants), so the
+      // local check must be part of canManage; otherwise a remote admin
+      // sees a "New MCP token" button whose POST is then blocked.
+      canManage: Boolean(options.configPath) && session.admin && isLocalRequest(req),
       grants: tokenClients.map((client) => ({
         id: client.id,
         label: client.name,
@@ -1274,14 +1285,20 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     }
   });
 
-  // Toggle a grant's relay door. Unpublishing keeps the grant usable by
-  // local apps over 127.0.0.1; it just loses relay reachability.
+  // Toggle a grant's public-tunnel exposure. Unpublishing keeps the grant
+  // usable by local apps over 127.0.0.1; it just loses remote reachability.
   app.post('/dashboard/api/grants/:id/publish', dashboardOriginMiddleware, dashboardAuthMiddleware, dashboardLocalMiddleware, dashboardAdminMiddleware, async (req, res) => {
     const configPath = requireConfigPath(req, res);
     if (!configPath) return;
     const id = typeof req.params.id === 'string' ? req.params.id : '';
     const body = (req.body ?? {}) as Record<string, unknown>;
-    const published = body.published === true;
+    // Require an explicit boolean so a missing or malformed body cannot
+    // silently unpublish; an unpublish is a real exposure change.
+    if (typeof body.published !== 'boolean') {
+      res.status(400).json({ error: 'published_required' });
+      return;
+    }
+    const published = body.published;
     try {
       const saved = await withConfigLock(configPath, async () => {
         const current = readConfig(configPath);
@@ -1298,8 +1315,8 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     }
   });
 
-  // Revoke a grant — removes the clients[] entry entirely. Distinct from
-  // unpublishing, which only closes the relay door.
+  // Revoke a grant: removes the clients[] entry entirely. Distinct from
+  // unpublishing, which only blocks public tunnels.
   app.delete('/dashboard/api/grants/:id', dashboardOriginMiddleware, dashboardAuthMiddleware, dashboardLocalMiddleware, dashboardAdminMiddleware, async (req, res) => {
     const configPath = requireConfigPath(req, res);
     if (!configPath) return;
@@ -1343,10 +1360,11 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     }
 
     // Exposure boundary: a capability-only lease (explicitly published:
-    // false) has no relay door. It still works for local apps over
-    // 127.0.0.1; a relay-forwarded request for it is rejected. Leases
-    // without an explicit published value are grandfathered as published.
-    if (isRelayRequest(req) && !isGrantPublished(lease.published)) {
+    // false) is reachable only by apps on this machine. Any request
+    // through a public tunnel - the mvmt relay, Cloudflare, pinggy,
+    // localhost.run, a custom tunnel - is rejected. Leases without an
+    // explicit published value are grandfathered as published.
+    if (!isLocalRequest(req) && !isGrantPublished(lease.published)) {
       logHttpRequest(requestLog, req, 403, 'lease.request', 'not_published', lease.id);
       res.status(403).json({ error: 'lease_not_published' });
       return undefined;
@@ -1759,15 +1777,20 @@ function remoteAddressFor(req: Request): string | undefined {
   return raw.startsWith('::ffff:') ? raw.slice(7) : raw;
 }
 
-// True when the request reached this server through the relay rather than
-// over localhost. The relay stamps every forwarded request with this
-// header; a request without it came in over 127.0.0.1, which only a
-// process already on this machine can do.
+// True when the request was forwarded by the mvmt relay, which stamps
+// this header on every request it proxies.
 function isRelayRequest(req: Request): boolean {
   return firstHeaderValue(req.headers['x-mvmt-transport'])?.toLowerCase() === 'relay';
 }
 
-function isLocalDashboardRequest(req: Request): boolean {
+// True only for a request that genuinely originated on this machine.
+// A tunnel (mvmt relay, Cloudflare, pinggy, localhost.run, custom)
+// connects to 127.0.0.1 just like a local app, so the socket address is
+// not a reliable signal. Two things distinguish a real local request:
+// the mvmt relay stamps x-mvmt-transport, and every other public tunnel
+// forwards the original public Host header rather than 127.0.0.1. A
+// request missing a Host header is treated as non-local (stricter).
+function isLocalRequest(req: Request): boolean {
   if (isRelayRequest(req)) return false;
   const hostHeader = firstHeaderValue(req.headers.host);
   if (!hostHeader) return false;
@@ -2763,8 +2786,8 @@ table.t{border-collapse:collapse;width:100%}
               <option value="7d">7 days</option>
               <option value="24h">24 hours</option>
             </select>
-            <label for="mcp-published">Relay access</label>
-            <label id="mcp-published-field" style="display:flex;align-items:center;gap:.4rem;font-size:.88rem;color:var(--text);"><input id="mcp-published" type="checkbox" style="width:auto;"> Reachable over the relay (leave off for apps on this machine only)</label>
+            <label for="mcp-published">Public tunnel access</label>
+            <label id="mcp-published-field" style="display:flex;align-items:center;gap:.4rem;font-size:.88rem;color:var(--text);"><input id="mcp-published" type="checkbox" style="width:auto;"> Reachable through public tunnels (leave off for apps on this machine only)</label>
             <label>Access</label>
             <div>
               <label style="display:flex;align-items:center;gap:.4rem;font-size:.88rem;color:var(--text);"><input type="radio" name="mcp-access-mode" value="all" checked style="width:auto;"> All mounts</label>
@@ -3440,8 +3463,8 @@ table.t{border-collapse:collapse;width:100%}
       var isPublished = lease.published !== false;
       publishBtn.textContent = isPublished ? 'Unpublish' : 'Publish';
       publishBtn.title = isPublished
-        ? 'Remove the relay door; local apps keep access'
-        : 'Give this lease a relay door so it works over the public URL';
+        ? 'Block public tunnels; apps on this machine keep access'
+        : 'Allow this lease through public tunnels';
       (function (id, publish) {
         publishBtn.addEventListener('click', async function () {
           try {
@@ -3450,7 +3473,7 @@ table.t{border-collapse:collapse;width:100%}
               body: JSON.stringify({ published: publish }),
             });
             await loadLeases();
-            toast(publish ? 'Lease published.' : 'Lease unpublished — local apps keep access.', 'success');
+            toast(publish ? 'Lease published.' : 'Lease unpublished - apps on this machine keep access.', 'success');
           } catch (err) { showError(err); }
         });
       })(lease.id, !isPublished);
@@ -3628,7 +3651,7 @@ table.t{border-collapse:collapse;width:100%}
     reachBadge.className = 'badge ' + (grant.published ? 'active' : '');
     reachBadge.textContent = grant.published ? 'Published' : 'Local only';
     reachBadge.title = grant.published
-      ? 'Reachable over the relay'
+      ? 'Reachable through public tunnels'
       : 'Reachable by apps on this machine only';
     reachCell.append(reachBadge);
 
@@ -3653,8 +3676,8 @@ table.t{border-collapse:collapse;width:100%}
       publishBtn.type = 'button';
       publishBtn.textContent = grant.published ? 'Unpublish' : 'Publish';
       publishBtn.title = grant.published
-        ? 'Close the relay door; local apps keep access'
-        : 'Give this token a relay door';
+        ? 'Block public tunnels; apps on this machine keep access'
+        : 'Allow this token through public tunnels';
       (function (id, publish) {
         publishBtn.addEventListener('click', async function () {
           try {
@@ -3663,7 +3686,7 @@ table.t{border-collapse:collapse;width:100%}
               body: JSON.stringify({ published: publish }),
             });
             await loadGrants();
-            toast(publish ? 'Token published.' : 'Token unpublished — local apps keep access.', 'success');
+            toast(publish ? 'Token published.' : 'Token unpublished - apps on this machine keep access.', 'success');
           } catch (err) { showError(err); }
         });
       })(grant.id, !grant.published);

@@ -231,9 +231,9 @@ export async function setApiTokenPublished(
     });
     recordTokenLifecycle(configPath, 'token.edit', result.config, result.client);
     if (published) {
-      console.log(chalk.green(`Token '${tokenId}' published — it now has a relay door.`));
+      console.log(chalk.green(`Token '${tokenId}' published - it can now be used through a public tunnel.`));
     } else {
-      console.log(chalk.green(`Token '${tokenId}' unpublished — local apps keep access, the relay door is closed.`));
+      console.log(chalk.green(`Token '${tokenId}' unpublished - apps on this machine keep access; public tunnels are blocked.`));
     }
     console.log(chalk.dim('Running mvmt processes load API-token changes on the next auth request.'));
   } catch (err) {
@@ -408,9 +408,9 @@ export function rotateApiTokenInConfig(
 }
 
 // Sets the exposure boundary for an API-token grant. `published: false`
-// makes it capability-only (usable by local apps over 127.0.0.1, no
-// relay door); `published: true` gives it a relay door. Distinct from
-// removeApiTokenFromConfig, which deletes the grant entirely.
+// makes it capability-only: usable only by apps on this machine, never
+// through a public tunnel. `published: true` allows remote access.
+// Distinct from removeApiTokenFromConfig, which deletes the grant.
 export function setApiTokenPublishedInConfig(
   config: MvmtConfig,
   id: string,
