@@ -2403,6 +2403,111 @@ describe('startHttpServer lifecycle', () => {
     }
   });
 
+  it('logs the authenticated MCP client for successful requests', async () => {
+    const router = new ToolRouter();
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const requestLogs: Array<{ kind: string; path: string; status: number; clientId?: string; ip?: string }> = [];
+    const server = await startHttpServer(router, {
+      port: 0,
+      tokenPath,
+      clients: [
+        {
+          id: 'claude',
+          name: 'Claude Desktop',
+          auth: { type: 'token', tokenHash: hashApiToken('claude-token') },
+          rawToolsEnabled: true,
+          permissions: [],
+        },
+      ],
+      requestLog: (entry) => requestLogs.push(entry),
+    });
+
+    try {
+      await initializeMcpSession(server.port, 'claude-token');
+
+      expect(requestLogs).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'mcp.request',
+            path: '/mcp',
+            status: 200,
+            clientId: 'claude',
+            ip: '127.0.0.1',
+          }),
+        ]),
+      );
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('logs relay-forwarded MCP requests with the original remote address when provided', async () => {
+    const router = new ToolRouter();
+    await router.initialize();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
+    const tokenPath = path.join(tmp, '.mvmt', '.session-token');
+    const requestLogs: Array<{ kind: string; path: string; status: number; clientId?: string; ip?: string }> = [];
+    const server = await startHttpServer(router, {
+      port: 0,
+      tokenPath,
+      clients: [
+        {
+          id: 'claude',
+          name: 'Claude Desktop',
+          auth: { type: 'token', tokenHash: hashApiToken('claude-token') },
+          rawToolsEnabled: true,
+          permissions: [],
+          published: true,
+        },
+      ],
+      requestLog: (entry) => requestLogs.push(entry),
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${server.port}/mcp`, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer claude-token',
+          Accept: 'application/json, text/event-stream',
+          'Content-Type': 'application/json',
+          'X-MVMT-Transport': 'relay',
+          'Fly-Client-IP': '203.0.113.10',
+          'X-Forwarded-For': '198.51.100.20, 10.0.0.5',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: {
+            protocolVersion: '2025-03-26',
+            capabilities: {},
+            clientInfo: { name: 'mvmt-relay-log-test', version: '0.0.0' },
+          },
+        }),
+      });
+      expect(response.status).toBe(200);
+      await response.text();
+
+      expect(requestLogs).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'mcp.request',
+            path: '/mcp',
+            status: 200,
+            clientId: 'claude',
+            ip: '203.0.113.10',
+          }),
+        ]),
+      );
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('blocks cross-origin browser requests to OAuth endpoints', async () => {
     const router = new ToolRouter();
     await router.initialize();

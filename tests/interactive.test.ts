@@ -50,13 +50,6 @@ describe('InteractiveAuditLogger', () => {
     expect(output[0]).toContain('GET /test');
   });
 
-  it('streams HTTP entries only to writer', () => {
-    const entry = { ts: new Date().toISOString(), kind: 'test', method: 'GET', path: '/test', status: 200 };
-    logger.streamHttp(entry);
-    expect(inner.recordHttp).not.toHaveBeenCalled();
-    expect(output.length).toBe(1);
-    expect(output[0]).toContain('GET /test');
-  });
 });
 
 describe('Formatting helpers', () => {
@@ -84,12 +77,14 @@ describe('Formatting helpers', () => {
       path: '/mcp',
       status: 200,
       clientId: 'test-client',
+      ip: '127.0.0.1',
       detail: 'test-detail'
     };
     const formatted = formatHttpRequestEntry(entry);
     expect(formatted).toContain('200');
     expect(formatted).toContain('mcp.request POST /mcp');
     expect(formatted).toContain('client=test-client');
+    expect(formatted).toContain('from=127.0.0.1');
     expect(formatted).toContain('test-detail');
   });
 });

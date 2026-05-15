@@ -148,12 +148,11 @@ export async function start(options: StartOptions = {}): Promise<void> {
       // HTTP requests are always persisted to ~/.mvmt/audit.log so that
       // dashboard logins, mount changes, lease creation, and lease URL
       // fetches show up in the same audit trail as MCP tool calls. In
-      // interactive mode they also stream to the TUI; in --verbose they
-      // additionally mirror to logger.debug.
+      // interactive mode the InteractiveAuditLogger also streams to the TUI;
+      // in --verbose they additionally mirror to logger.debug.
       requestLog: (entry) => {
         audit.recordHttp(entry);
-        if (interactiveMode) (audit as InteractiveAuditLogger).streamHttp(entry);
-        else if (options.verbose) logger.debug(formatHttpRequestEntry(entry));
+        if (!interactiveMode && options.verbose) logger.debug(formatHttpRequestEntry(entry));
       },
     });
     cleanupTasks.push(() => httpServer.close());

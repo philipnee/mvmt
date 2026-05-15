@@ -47,15 +47,6 @@ export class InteractiveAuditLogger implements AuditLogger {
     }
   }
 
-  // Streams an HTTP entry to the TUI without re-persisting. Used when the
-  // request handler has already called the underlying recordHttp via the
-  // requestLog wiring in start.ts.
-  streamHttp(entry: HttpRequestLogEntry): void {
-    if (this.liveLogs && this.writer) {
-      this.writer(formatHttpRequestEntry(entry));
-    }
-  }
-
   setLiveLogs(enabled: boolean): void {
     this.liveLogs = enabled;
   }
@@ -783,6 +774,7 @@ export function formatHttpRequestEntry(entry: HttpRequestLogEntry): string {
         : chalk.green(String(entry.status));
   const time = chalk.dim(new Date(entry.ts).toLocaleTimeString());
   const client = entry.clientId ? chalk.dim(` client=${entry.clientId}`) : '';
+  const ip = entry.ip ? chalk.dim(` from=${entry.ip}`) : '';
   const detail = entry.detail ? chalk.dim(` ${entry.detail}`) : '';
-  return `${time} ${status} ${chalk.magenta(entry.kind)} ${entry.method} ${entry.path}${client}${detail}`;
+  return `${time} ${status} ${chalk.magenta(entry.kind)} ${entry.method} ${entry.path}${client}${ip}${detail}`;
 }

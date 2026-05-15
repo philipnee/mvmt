@@ -1772,6 +1772,7 @@ function logHttpRequest(
 ): void {
   if (!requestLog) return;
   const ip = remoteAddressFor(req);
+  const resolvedClientId = clientId ?? clientIdForRequestLog(req);
   requestLog({
     ts: new Date().toISOString(),
     kind,
@@ -1779,16 +1780,41 @@ function logHttpRequest(
     path: req.path,
     status,
     ...(detail ? { detail } : {}),
-    ...(clientId ? { clientId } : {}),
+    ...(resolvedClientId ? { clientId: resolvedClientId } : {}),
     ...(ip ? { ip } : {}),
   });
 }
 
+function clientIdForRequestLog(req: Request): string | undefined {
+  const identity = readClientIdentity(req);
+  if (identity) return identity.id;
+  const dashboardSession = req.res?.locals?.dashboardSession as Partial<DashboardSession> | undefined;
+  return typeof dashboardSession?.username === 'string' ? dashboardSession.username : undefined;
+}
+
 function remoteAddressFor(req: Request): string | undefined {
+  const relayAddress = relayRemoteAddressFor(req);
+  if (relayAddress) return relayAddress;
   const raw = req.socket?.remoteAddress;
   if (!raw) return undefined;
   // Strip the IPv4-mapped IPv6 prefix so logs show 127.0.0.1 instead of ::ffff:127.0.0.1.
   return raw.startsWith('::ffff:') ? raw.slice(7) : raw;
+}
+
+function relayRemoteAddressFor(req: Request): string | undefined {
+  if (!isRelayRequest(req)) return undefined;
+  return firstForwardedAddress(
+    firstHeaderValue(req.headers['x-mvmt-relay-client-ip'])
+      ?? firstHeaderValue(req.headers['fly-client-ip'])
+      ?? firstHeaderValue(req.headers['x-forwarded-for']),
+  );
+}
+
+function firstForwardedAddress(value: string | undefined): string | undefined {
+  const first = value?.split(',')[0]?.trim();
+  if (!first) return undefined;
+  const cleaned = first.replace(/[\u0000-\u001F\u007F]/g, '').slice(0, 128);
+  return cleaned || undefined;
 }
 
 // True when the request was forwarded by the mvmt relay, which stamps
