@@ -6,7 +6,7 @@ import {
   leaseRecordToGrant,
 } from '../src/grant/model.js';
 import { ClientConfig } from '../src/config/schema.js';
-import { LeaseRecord } from '../src/lease/store.js';
+import { LeaseRecord } from '../src/core/leases/store.js';
 
 const TOKEN_VERIFIER = 'scrypt:v1:c2FsdHNhbHRzYWx0c2FsdA:aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g';
 

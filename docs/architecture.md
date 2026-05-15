@@ -99,6 +99,36 @@ Authentication answers who is calling.
 
 Mount and client policy answer what that caller may access.
 
+## Source Layout
+
+This is a layout step, not an app-registry step. Routes still live in
+`src/server/index.ts`; what has moved is the canonical location of pieces
+that already had a clear shape:
+
+```text
+src/apps/mcp             MCP protocol router and tool modules (full move)
+src/apps/dashboard       dashboard helper modules used by routes in server/
+src/apps/file-inspector  experimental filesystem stub module (no HTTP route)
+src/core/leases          lease model, store, secrets, and file access
+src/core/auth            ClientIdentity and auth resolution
+```
+
+Intent: `apps/*` is for code that belongs to one application surface;
+`core/*` is the shared substrate that any app may consume. Mount
+resolution, path policy, storage, leases, auth, and audit should stay in
+core so apps don't drift on access rules.
+
+What this layout does *not* yet do: there's no `Application` interface, no
+app registry, and HTTP route composition is unchanged. `apps/dashboard` is
+a helpers directory, not the dashboard app itself — the routes and HTML
+are still inside `src/server/index.ts`. `apps/file-inspector` is a
+standalone module exercised by tests but not wired through HTTP.
+
+Old paths under `src/dashboard/`, `src/lease/`,
+`src/server/context-tools/`, and `src/server/client-identity.ts` remain as
+one-line re-export shims so existing import sites keep working without
+lockstep updates.
+
 ## Tool Surface
 
 The mount runtime exposes five tools:

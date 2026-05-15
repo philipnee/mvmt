@@ -10,8 +10,8 @@ import {
   setFolderLeasePublished,
 } from '../src/cli/lease.js';
 import { readConfig } from '../src/config/loader.js';
-import { listLeases } from '../src/lease/store.js';
-import { findLeaseSecret, leaseSecretsPathForLeaseStore } from '../src/lease/secrets.js';
+import { listLeases } from '../src/core/leases/store.js';
+import { findLeaseSecret, leaseSecretsPathForLeaseStore } from '../src/core/leases/secrets.js';
 
 describe('lease CLI helpers', () => {
   let tmp: string;

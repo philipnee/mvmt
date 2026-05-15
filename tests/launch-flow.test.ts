@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { readConfig } from '../src/config/loader.js';
 import { defaultTextIndexPath, TextContextIndex } from '../src/context/text-index.js';
 import { startHttpServer } from '../src/server/index.js';
-import { ToolRouter } from '../src/server/router.js';
+import { ToolRouter } from '../src/apps/mcp/router.js';
 
 const execFileAsync = promisify(execFile);
 const root = path.resolve(import.meta.dirname, '..');

@@ -7,7 +7,7 @@ import {
   removePrivilegedUser,
   setPrivilegedUserAdmin,
   setPrivilegedUserPassword,
-} from '../dashboard/users.js';
+} from '../apps/dashboard/users.js';
 
 export interface PrivilegedUserCommandOptions {
   json?: boolean;

@@ -17,10 +17,10 @@ import {
 import { parseConfig, readConfig, saveConfig } from '../src/config/loader.js';
 import { TextContextIndex } from '../src/context/text-index.js';
 import { OAuthStore } from '../src/server/oauth.js';
-import { ToolRouter } from '../src/server/router.js';
-import { addLeaseResources, createLease, listLeases, revokeLease, setLeasePublished } from '../src/lease/store.js';
-import { findLeaseSecret, leaseSecretsPathForLeaseStore } from '../src/lease/secrets.js';
-import { createPrivilegedUser, removePrivilegedUser } from '../src/dashboard/users.js';
+import { ToolRouter } from '../src/apps/mcp/router.js';
+import { addLeaseResources, createLease, listLeases, revokeLease, setLeasePublished } from '../src/core/leases/store.js';
+import { findLeaseSecret, leaseSecretsPathForLeaseStore } from '../src/core/leases/secrets.js';
+import { createPrivilegedUser, removePrivilegedUser } from '../src/apps/dashboard/users.js';
 import { createAuditLogger } from '../src/utils/audit.js';
 import { hashApiToken } from '../src/utils/api-token-hash.js';
 import { ensureSigningKey, generateSessionToken, rotateSigningKey } from '../src/utils/token.js';
