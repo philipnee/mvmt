@@ -17,7 +17,7 @@ import {
   removePrivilegedUser,
   setPrivilegedUserPassword,
   verifyPrivilegedUserPassword,
-} from '../src/dashboard/users.js';
+} from '../src/apps/dashboard/users.js';
 
 describe('privileged dashboard users', () => {
   let tmp: string;

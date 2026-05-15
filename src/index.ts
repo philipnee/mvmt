@@ -30,6 +30,6 @@ export { configExists, expandHome, getConfigPath, loadConfig, parseConfig, readC
 export type { CallToolResult } from './connectors/types.js';
 export { createMcpServer, startHttpServer, startStdioServer } from './server/index.js';
 export type { HttpServerOptions, StartedHttpServer } from './server/index.js';
-export { ToolRouter } from './server/router.js';
-export type { NamespacedTool } from './server/router.js';
+export { ToolRouter } from './apps/mcp/router.js';
+export type { NamespacedTool } from './apps/mcp/router.js';
 export { getControlSocketPath, sendJsonControlRequest, startJsonControlServer, streamJsonControl } from './utils/control.js';

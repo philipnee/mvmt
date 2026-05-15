@@ -10,12 +10,12 @@ Scope: local-first mount runtime, CLI command layer, text index, router, tests, 
 ### 1. Router initialization is not idempotent
 
 - Problem: `ToolRouter.initialize()` appends context tool definitions every time it is called.
-- Evidence from the code: `src/server/router.ts` pushes into `this.contextToolDefinitions` without checking whether initialization already happened.
+- Evidence from the code: `src/apps/mcp/router.ts` pushes into `this.contextToolDefinitions` without checking whether initialization already happened.
 - User/developer impact: repeated initialization in a long-running process or test helper can expose duplicate tools and make behavior depend on call order.
 - Risk level: Medium.
 - Proposed fix: make initialization idempotent by tracking whether the router has already initialized.
 - Acceptance criteria: calling `initialize()` twice returns the same tool list as calling it once.
-- Files likely involved: `src/server/router.ts`, `tests/router.test.ts`.
+- Files likely involved: `src/apps/mcp/router.ts`, `tests/router.test.ts`.
 - Status: Completed.
 
 ### 2. `expected_hash` writes can create a missing file
@@ -43,12 +43,12 @@ Scope: local-first mount runtime, CLI command layer, text index, router, tests, 
 ### 4. Tool argument validation silently ignores invalid arrays
 
 - Problem: optional string array inputs accept any non-array as undefined and drop non-string array values.
-- Evidence from the code: `optionalStringArray()` in `src/server/router.ts` filters invalid entries instead of rejecting them.
+- Evidence from the code: `optionalStringArray()` in the MCP app tool helpers filters invalid entries instead of rejecting them.
 - User/developer impact: malformed client calls can behave like broader default calls, making debugging harder.
 - Risk level: Medium.
 - Proposed fix: return a structured tool error when `mounts` is present but is not an array of non-empty strings.
 - Acceptance criteria: `search({ mounts: "notes" })` and mixed arrays return `isError: true`.
-- Files likely involved: `src/server/router.ts`, `tests/router.test.ts`.
+- Files likely involved: `src/apps/mcp/tools/helpers.ts`, `tests/router.test.ts`.
 - Status: Backlog.
 
 ### 5. Index snapshot parsing is unvalidated
@@ -87,12 +87,12 @@ Scope: local-first mount runtime, CLI command layer, text index, router, tests, 
 ### 8. Router mixes permission checks, dispatch, and auditing
 
 - Problem: `ToolRouter` has multiple reasons to change.
-- Evidence from the code: `src/server/router.ts` parses arguments, checks permissions, dispatches storage calls, and records audit entries.
+- Evidence from the code: `src/apps/mcp/router.ts` parses arguments, checks permissions, dispatches storage calls, and records audit entries.
 - User/developer impact: small changes to one concern are harder to review and test in isolation.
 - Risk level: Medium.
 - Proposed fix: split context tool definitions and handlers into per-tool modules with a small registry.
-- Acceptance criteria: router tests remain behavior-focused; adding a new tool requires adding a module and registering it in `src/server/context-tools/index.ts`.
-- Files likely involved: `src/server/router.ts`, `src/server/context-tools/*`, `tests/router.test.ts`.
+- Acceptance criteria: router tests remain behavior-focused; adding a new tool requires adding a module and registering it in `src/apps/mcp/tools/index.ts`.
+- Files likely involved: `src/apps/mcp/router.ts`, `src/apps/mcp/tools/*`, `tests/router.test.ts`.
 - Status: Completed for context tool definitions and handlers. Permission helpers and audit remain in `ToolRouter`.
 
 ### 9. CLI command registration is concentrated in one large file

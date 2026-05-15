@@ -19,8 +19,8 @@ import {
   listLeases,
   revokeLease,
   setLeasePublished,
-} from '../lease/store.js';
-import { leaseSecretsPathForLeaseStore, removeLeaseSecret, saveLeaseSecret } from '../lease/secrets.js';
+} from '../core/leases/store.js';
+import { leaseSecretsPathForLeaseStore, removeLeaseSecret, saveLeaseSecret } from '../core/leases/secrets.js';
 import { parseTokenTtl } from '../utils/token-ttl.js';
 import { normalizeTunnelBaseUrl } from '../utils/tunnel.js';
 

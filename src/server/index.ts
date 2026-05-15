@@ -13,7 +13,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { ToolRouter } from './router.js';
+import { ToolRouter } from '../apps/mcp/router.js';
 import { log } from '../utils/logger.js';
 import { defaultClientsPath, defaultRefreshTokensPath, defaultSigningKeyPath, ensureSessionToken, ensureSigningKey, readSigningKey, TOKEN_PATH, validateSessionToken } from '../utils/token.js';
 import { verifyApiToken } from '../utils/api-token-hash.js';
@@ -34,15 +34,15 @@ import { readConfig, saveConfig, withConfigLock } from '../config/loader.js';
 import { addMountToConfig, editMountInConfig, MountInput, removeMountFromConfig } from '../cli/mounts.js';
 import { addApiTokenToConfig, removeApiTokenFromConfig, setApiTokenPublishedInConfig } from '../cli/api-tokens.js';
 import { resolveSetupPath } from '../connectors/setup-paths.js';
-import { listDashboardFiles, normalizeDashboardPath, resolveDashboardFileTarget } from '../dashboard/files.js';
+import { listDashboardFiles, normalizeDashboardPath, resolveDashboardFileTarget } from '../apps/dashboard/files.js';
 import {
   defaultPrivilegedUsersPath,
   findPrivilegedUser,
   PrivilegedUser,
   recordPrivilegedUserLogin,
   verifyPrivilegedUserPassword,
-} from '../dashboard/users.js';
-import { listLeaseDirectory, resolveLeaseFileTarget, resolveLeaseUploadTarget } from '../lease/files.js';
+} from '../apps/dashboard/users.js';
+import { listLeaseDirectory, resolveLeaseFileTarget, resolveLeaseUploadTarget } from '../core/leases/files.js';
 import {
   createLease,
   defaultLeasesPath,
@@ -59,8 +59,8 @@ import {
   rotateLeaseToken,
   setLeasePublished,
   validateLeaseToken,
-} from '../lease/store.js';
-import { findLeaseSecret, leaseSecretsPathForLeaseStore, removeLeaseSecret, saveLeaseSecret } from '../lease/secrets.js';
+} from '../core/leases/store.js';
+import { findLeaseSecret, leaseSecretsPathForLeaseStore, removeLeaseSecret, saveLeaseSecret } from '../core/leases/secrets.js';
 import { clientConfigToGrant, isGrantPublished, leaseGrantScope } from '../grant/model.js';
 import {
   attachClientIdentity,
@@ -958,7 +958,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     //   upload   → ['upload']         drop-box (no download, no overwrite)
     //   two-way  → ['read', 'upload'] browse + download + add new files
     // `write` (overwrite + delete) is intentionally not exposed by the
-    // dashboard — see lease/files.ts for collision-suffix semantics.
+    // dashboard — see core/leases/files.ts for collision-suffix semantics.
     const permissions = leasePermissionsForDashboardMode(mode);
     if (!permissions) {
       res.status(400).json({ error: 'invalid_mode' });

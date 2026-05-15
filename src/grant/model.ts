@@ -1,5 +1,5 @@
 import { ClientConfig } from '../config/schema.js';
-import { LeaseRecord, leaseAllows, leaseResources } from '../lease/store.js';
+import { LeaseRecord, leaseAllows, leaseResources } from '../core/leases/store.js';
 
 // A Grant is the unified read-model for a scoped capability, independent
 // of where it is stored (clients[] in config, or the lease store) and of

@@ -8,7 +8,7 @@ import {
   listDashboardFiles,
   normalizeDashboardPath,
   resolveDashboardFileTarget,
-} from '../src/dashboard/files.js';
+} from '../src/apps/dashboard/files.js';
 
 describe('dashboard file access helpers', () => {
   let tmp: string;

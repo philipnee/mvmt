@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { parseConfig } from '../src/config/loader.js';
 import { TextContextIndex } from '../src/context/text-index.js';
 import { ClientIdentity } from '../src/server/client-identity.js';
-import { ToolRouter } from '../src/server/router.js';
+import { ToolRouter } from '../src/apps/mcp/router.js';
 
 describe('ToolRouter', () => {
   it('does not expose tools without a text context index', async () => {

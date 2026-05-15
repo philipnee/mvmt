@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { CONTEXT_TOOLS } from '../src/server/context-tools/index.js';
-import { listTool } from '../src/server/context-tools/list.js';
+import { CONTEXT_TOOLS } from '../src/apps/mcp/tools/index.js';
+import { listTool } from '../src/apps/mcp/tools/list.js';
 
 describe('context tool registry', () => {
   it('registers the canonical tool surface in display order', () => {

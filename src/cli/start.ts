@@ -6,7 +6,7 @@ import { MvmtConfig, TunnelSchema } from '../config/schema.js';
 import { createTemporaryFilesystemConfig } from './config.js';
 import { setupConfig } from './init.js';
 import { startHttpServer, startStdioServer } from '../server/index.js';
-import { ToolRouter } from '../server/router.js';
+import { ToolRouter } from '../apps/mcp/router.js';
 import { createAuditLogger, AUDIT_LOG_PATH } from '../utils/audit.js';
 import { getControlSocketPath, startJsonControlServer } from '../utils/control.js';
 import { createLogger, Logger } from '../utils/logger.js';

@@ -21,7 +21,7 @@ import { applyTunnelConfig, printTunnelEnabledWithNoTokens, promptForTunnelConfi
 import { LoadedConnector } from './connector-loader.js';
 import { TunnelController } from './tunnel-controller.js';
 import { addPathsToLease, createFolderLease, listFolderLeases, revokeFolderLease } from './lease.js';
-import { DEFAULT_LEASE_TTL, defaultLeasesPath, leaseUnavailableReason, listLeases } from '../lease/store.js';
+import { DEFAULT_LEASE_TTL, defaultLeasesPath, leaseUnavailableReason, listLeases } from '../core/leases/store.js';
 import { loadConfig } from '../config/loader.js';
 import { addPrivilegedUserCommand, listPrivilegedUsersCommand, removePrivilegedUserCommand, setPrivilegedUserAdminCommand } from './users.js';
 
