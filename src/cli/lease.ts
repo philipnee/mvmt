@@ -36,6 +36,7 @@ export interface CreateLeaseOptions extends LeaseCommandOptions {
   ttl?: string;
   mode?: string;
   upload?: boolean;
+  downloads?: string;
 }
 
 export async function listFolderLeases(options: LeaseCommandOptions = {}): Promise<void> {
@@ -56,8 +57,9 @@ export async function listFolderLeases(options: LeaseCommandOptions = {}): Promi
     const activity = lease.permissions.includes('upload')
       ? `uploads ${lease.uploadCount ?? 0}`
       : `downloads ${lease.downloadCount ?? 0}`;
+    const limit = lease.maxDownloads === undefined ? '' : ` limit ${lease.maxDownloads}`;
     const resourceText = leaseResources(lease).map((resource) => resource.path).join(',');
-    console.log(`  ${lease.id.padEnd(16)} ${state}  ${lease.label}  ${resourceText}  expires ${lease.expiresAt ?? 'never'}  ${activity}`);
+    console.log(`  ${lease.id.padEnd(16)} ${state}  ${lease.label}  ${resourceText}  expires ${lease.expiresAt ?? 'never'}  ${activity}${limit}`);
   }
 }
 
@@ -70,6 +72,10 @@ export async function createFolderLease(inputPath: string | string[] | undefined
   const configPath = options.config ? resolveSetupPath(options.config) : getConfigPath();
   const config = configExists(configPath) ? loadConfig(configPath) : parseConfig({ version: 1 });
   const permissions = permissionsFromOptions(options);
+  const maxDownloads = maxDownloadsFromOptions(options);
+  if (maxDownloads !== undefined && !permissions.includes('read')) {
+    throw new Error('Download limits require a read or two-way lease.');
+  }
   const prepared = await prepareLeasePaths(config, inputPaths, label, permissions);
   if (prepared.config !== config) await saveConfig(configPath, prepared.config);
 
@@ -81,6 +87,7 @@ export async function createFolderLease(inputPath: string | string[] | undefined
     resources: prepared.resources,
     expiresAt: ttl.expiresAt,
     permissions,
+    ...(maxDownloads === undefined ? {} : { maxDownloads }),
   });
   saveLeaseSecret(leaseSecretsPathForLeaseStore(leaseStorePath), created.record.id, created.token);
   const url = leaseUrl(prepared.config, created.record.id, created.token);
@@ -95,6 +102,7 @@ export async function createFolderLease(inputPath: string | string[] | undefined
   console.log(`  Paths: ${leaseResources(created.record).map((resource) => resource.path).join(', ')}`);
   console.log(`  Mode: ${formatPermissions(created.record.permissions)}`);
   console.log(`  Expires: ${created.record.expiresAt ?? 'never'}${options.expires || options.ttl ? '' : ` (${DEFAULT_LEASE_TTL} default)`}`);
+  if (created.record.maxDownloads !== undefined) console.log(`  Downloads: ${created.record.maxDownloads}`);
   for (const mount of prepared.addedMounts) {
     const access = mount.writeAccess ? 'upload-capable' : 'read-only';
     console.log(chalk.dim(`  Added ${access} mount: ${mount.name} -> ${mount.root}`));
@@ -300,6 +308,16 @@ function permissionsFromOptions(options: CreateLeaseOptions): LeasePermission[] 
   if (mode === 'upload') return ['upload'];
   if (mode === 'two-way' || mode === 'two_way' || mode === 'read+upload') return ['read', 'upload'];
   throw new Error('Invalid lease mode. Use --mode read, --mode upload, --mode two-way, or --mode write.');
+}
+
+function maxDownloadsFromOptions(options: CreateLeaseOptions): number | undefined {
+  if (options.downloads === undefined) return undefined;
+  const trimmed = options.downloads.trim();
+  if (trimmed === '-1') return undefined;
+  if (!/^[1-9]\d*$/.test(trimmed)) throw new Error('Invalid download limit. Use --downloads -1 for unlimited, or a positive integer.');
+  const limit = Number.parseInt(trimmed, 10);
+  if (!Number.isSafeInteger(limit)) throw new Error('Invalid download limit. Use a smaller positive integer.');
+  return limit;
 }
 
 function formatPermissions(permissions: readonly LeasePermission[]): string {

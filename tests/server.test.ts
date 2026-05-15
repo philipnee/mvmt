@@ -196,6 +196,49 @@ describe('file lease downloads', () => {
     }
   });
 
+  it('enforces one-time download leases without consuming the limit on HEAD', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-lease-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const leaseStorePath = path.join(tmp, '.leases.json');
+    const filePath = path.join(tmp, 'invite.txt');
+    fs.writeFileSync(filePath, 'relay secret');
+    const config = parseConfig({
+      version: 1,
+      mounts: [{ name: 'invite', type: 'local_folder', path: '/invite.txt', root: filePath }],
+    });
+    const lease = createLease(leaseStorePath, {
+      label: 'Invite',
+      path: '/invite.txt',
+      resources: [{ path: '/invite.txt', sourcePath: '/invite.txt', type: 'file' }],
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      maxDownloads: 1,
+    });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: config.mounts,
+      leaseStorePath,
+    });
+    const url = `http://127.0.0.1:${server.port}/lease/${lease.record.id}/files/invite.txt?token=${lease.token}`;
+    try {
+      const head = await fetch(url, { method: 'HEAD' });
+      expect(head.status).toBe(200);
+      expect(listLeases(leaseStorePath)[0].downloadCount).toBe(0);
+
+      const first = await fetch(url);
+      expect(first.status).toBe(200);
+      expect(await first.text()).toBe('relay secret');
+      expect(listLeases(leaseStorePath)[0].downloadCount).toBe(1);
+
+      const second = await fetch(url);
+      expect(second.status).toBe(410);
+      expect((await second.json() as { error: string }).error).toBe('lease_download_limit_reached');
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('rejects invalid and expired lease tokens', async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-lease-test-'));
     const tokenPath = path.join(tmp, '.session-token');
@@ -843,11 +886,12 @@ describe('dashboard access', () => {
       const readLease = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases`, {
         method: 'POST',
         headers: { Cookie: cookie, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: '/read/note.txt', label: 'Read note', mode: 'read', expires: '1h' }),
+        body: JSON.stringify({ path: '/read/note.txt', label: 'Read note', mode: 'read', expires: '1h', maxDownloads: 1 }),
       });
       expect(readLease.status).toBe(201);
-      const readBody = await readLease.json() as { lease: { id: string; url: string; permissions: string[] } };
+      const readBody = await readLease.json() as { lease: { id: string; url: string; permissions: string[]; maxDownloads?: number } };
       expect(readBody.lease.permissions).toEqual(['read']);
+      expect(readBody.lease.maxDownloads).toBe(1);
       const listedLeases = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases`, {
         headers: { Cookie: cookie },
       });
@@ -881,6 +925,23 @@ describe('dashboard access', () => {
       });
       expect(uploadOnReadOnly.status).toBe(400);
       expect((await uploadOnReadOnly.json() as { error: string }).error).toBe('mount_read_only');
+
+      const uploadWithDownloadLimit = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: '/write', label: 'Bad limit', mode: 'upload', maxDownloads: 1 }),
+      });
+      expect(uploadWithDownloadLimit.status).toBe(400);
+      expect((await uploadWithDownloadLimit.json() as { error: string }).error).toBe('download_limit_requires_read');
+
+      const unlimitedDownloads = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases`, {
+        method: 'POST',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: '/read/note.txt', label: 'Unlimited note', mode: 'read', maxDownloads: -1 }),
+      });
+      expect(unlimitedDownloads.status).toBe(201);
+      const unlimitedBody = await unlimitedDownloads.json() as { lease: { maxDownloads?: number } };
+      expect(unlimitedBody.lease.maxDownloads).toBeUndefined();
 
       // Two-way lease (read + upload) on a writable folder.
       const twoWay = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases`, {

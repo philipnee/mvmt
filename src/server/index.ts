@@ -54,6 +54,7 @@ import {
   leaseUnavailableReason,
   listLeases,
   recordLeaseUse,
+  reserveLeaseDownload,
   revokeLease,
   rotateLeaseToken,
   setLeasePublished,
@@ -943,6 +944,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     const label = typeof body.label === 'string' ? body.label.trim() : '';
     const mode = typeof body.mode === 'string' ? body.mode.trim().toLowerCase() : 'read';
     const paths = dashboardLeasePaths(body);
+    const maxDownloads = dashboardMaxDownloads(body);
     if (!label) {
       res.status(400).json({ error: 'label_required' });
       return;
@@ -962,6 +964,14 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       res.status(400).json({ error: 'invalid_mode' });
       return;
     }
+    if (maxDownloads === 'invalid') {
+      res.status(400).json({ error: 'invalid_download_limit' });
+      return;
+    }
+    if (maxDownloads !== undefined && !permissions.includes('read')) {
+      res.status(400).json({ error: 'download_limit_requires_read' });
+      return;
+    }
     try {
       const resources = await dashboardLeaseResources(resolveLeaseMounts(options.leaseMounts), paths);
       if (mode !== 'read' && resources.some((resource) => resource.type === 'file')) {
@@ -979,6 +989,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
         resources,
         expiresAt: ttl.expiresAt,
         permissions: [...permissions],
+        ...(maxDownloads === undefined ? {} : { maxDownloads }),
         // Creating a share link in the dashboard is the explicit publish
         // gesture — the lease is meant to be reachable over the relay.
         published: true,
@@ -1435,6 +1446,19 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     const start = range?.start ?? 0;
     const end = range?.end ?? Math.max(0, target.size - 1);
     const status = range ? 206 : 200;
+    if (req.method !== 'HEAD') {
+      const reserved = reserveLeaseDownload(leaseStorePath, lease.id);
+      if (reserved === 'download_limit_reached') {
+        logHttpRequest(requestLog, req, 410, 'lease.request', 'download_limit_reached', lease.id);
+        res.status(410).json({ error: 'lease_download_limit_reached' });
+        return;
+      }
+      if (!reserved) {
+        logHttpRequest(requestLog, req, 404, 'lease.request', 'unknown_lease', lease.id);
+        res.status(404).json({ error: 'lease_not_found' });
+        return;
+      }
+    }
     res.status(status);
     res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Cache-Control', 'no-store');
@@ -1452,16 +1476,6 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       res.end();
       return;
     }
-
-    res.on('finish', () => {
-      if (res.statusCode < 400) {
-        try {
-          recordLeaseUse(leaseStorePath, lease.id, { downloaded: true });
-        } catch {
-          // Never let lease accounting break a download.
-        }
-      }
-    });
     createReadStream(target.realPath, target.size === 0 ? {} : { start, end })
       .on('error', () => {
         if (!res.headersSent) res.status(500).end();
@@ -2133,6 +2147,21 @@ function dashboardLeasePaths(body: Record<string, unknown>): string[] {
   return typeof body.path === 'string' && body.path.trim().length > 0 ? [body.path] : [];
 }
 
+function dashboardMaxDownloads(body: Record<string, unknown>): number | 'invalid' | undefined {
+  const value = body.maxDownloads ?? body.downloads;
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value === 'number') {
+    if (value === -1) return undefined;
+    return Number.isSafeInteger(value) && value > 0 ? value : 'invalid';
+  }
+  if (typeof value !== 'string') return 'invalid';
+  const trimmed = value.trim();
+  if (trimmed === '-1') return undefined;
+  if (!/^[1-9]\d*$/.test(trimmed)) return 'invalid';
+  const limit = Number.parseInt(trimmed, 10);
+  return Number.isSafeInteger(limit) ? limit : 'invalid';
+}
+
 function withUnavailableRootMounts(
   listing: Awaited<ReturnType<typeof listDashboardFiles>>,
   mounts: readonly LocalFolderMountConfig[],
@@ -2731,6 +2760,9 @@ table.t{border-collapse:collapse;width:100%}
               <option value="7d">7 days</option>
               <option value="30d">30 days</option>
             </select>
+            <label for="lease-downloads">Downloads</label>
+            <input id="lease-downloads" type="number" step="1" min="-1" value="-1">
+            <p class="field-help">Use -1 for unlimited.</p>
           </div>
         </div>
         <div class="modal-foot">
@@ -3366,6 +3398,7 @@ table.t{border-collapse:collapse;width:100%}
   function leaseStatus(lease) {
     if (lease.revokedAt) return { state: 'revoked', label: 'Revoked' };
     if (lease.expiresAt && new Date(lease.expiresAt).getTime() <= Date.now()) return { state: 'expired', label: 'Expired' };
+    if (lease.maxDownloads && (lease.downloadCount || 0) >= lease.maxDownloads) return { state: 'expired', label: 'Downloaded' };
     return { state: 'active', label: lease.expiresAt ? 'Expires in ' + relativeTime(lease.expiresAt).replace('in ', '').replace(' ago', '') : 'No expiry' };
   }
 
@@ -3378,6 +3411,18 @@ table.t{border-collapse:collapse;width:100%}
     if (hasRead && hasUpload) return 'Read + upload';
     if (hasUpload) return 'Upload only';
     return 'Read only';
+  }
+
+  function leaseActivityLabel(lease) {
+    var perms = lease.permissions || ['read'];
+    var hasRead = perms.indexOf('read') !== -1;
+    var hasUpload = perms.indexOf('upload') !== -1;
+    var downloads = lease.downloadCount || 0;
+    var uploads = lease.uploadCount || 0;
+    if (lease.maxDownloads) return downloads + '/' + lease.maxDownloads + ' downloads';
+    if (hasUpload && !hasRead) return uploads + ' uploads';
+    if (hasRead && hasUpload) return downloads + ' downloads, ' + uploads + ' uploads';
+    return downloads + ' downloads';
   }
 
   function renderLeaseRow(lease) {
@@ -3422,10 +3467,10 @@ table.t{border-collapse:collapse;width:100%}
     }
 
     var usedCell = document.createElement('td');
-    usedCell.setAttribute('data-label', 'Last used');
+    usedCell.setAttribute('data-label', 'Activity');
     usedCell.className = 'cell-num';
-    if (lease.lastUsedAt) { usedCell.textContent = relativeTime(lease.lastUsedAt); usedCell.title = formatDate(lease.lastUsedAt); }
-    else { usedCell.textContent = '—'; }
+    usedCell.textContent = leaseActivityLabel(lease);
+    if (lease.lastUsedAt) usedCell.title = 'Last used ' + formatDate(lease.lastUsedAt);
 
     var actionCell = document.createElement('td');
     actionCell.setAttribute('data-label', 'Actions');
@@ -3553,6 +3598,7 @@ table.t{border-collapse:collapse;width:100%}
     target.innerHTML = '<span>' + (entry.type === 'directory' ? ICONS.folder : ICONS.file) + '</span><div class="target-path">' + escapeHtml(entry.path) + '</div><span class="badge ' + (entry.writeAccess ? 'write' : 'readonly') + '">' + (entry.type === 'directory' ? 'Folder' : 'File') + ' · ' + (entry.writeAccess ? 'writable' : 'read-only') + '</span>';
     $('lease-label').value = entry.name || entry.path;
     $('lease-expires').value = '24h';
+    $('lease-downloads').value = '-1';
     configureLeaseModeSelect(entry);
     $('lease-modal').classList.remove('hidden');
     setTimeout(function () { $('lease-label').focus(); $('lease-label').select(); }, 0);
@@ -3586,6 +3632,8 @@ table.t{border-collapse:collapse;width:100%}
       'two-way': 'Recipients can view, download, and add new files. Existing files are never overwritten.',
     };
     $('mode-help').textContent = modeNotes[mode] || '';
+    $('lease-downloads').disabled = mode === 'upload';
+    if (mode === 'upload') $('lease-downloads').value = '-1';
   }
 
   async function submitLease() {
@@ -3593,6 +3641,8 @@ table.t{border-collapse:collapse;width:100%}
     var mode = $('lease-mode').value;
     if (!mode) { toast('Pick a permission.', 'error'); return; }
     if (!$('lease-label').value.trim()) { toast('Add a label first.', 'error'); $('lease-label').focus(); return; }
+    var downloads = $('lease-downloads').value.trim();
+    if (!downloads) downloads = '-1';
     var btn = $('lease-create');
     btn.disabled = true;
     try {
@@ -3603,6 +3653,7 @@ table.t{border-collapse:collapse;width:100%}
           label: $('lease-label').value.trim(),
           mode: mode,
           expires: $('lease-expires').value,
+          maxDownloads: Number(downloads),
         }),
       });
       storeLeaseUrl(payload.lease.id, payload.lease.url);

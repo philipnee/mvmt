@@ -117,6 +117,54 @@ describe('lease CLI helpers', () => {
     });
   });
 
+  it('creates one-time download leases', async () => {
+    const file = path.join(tmp, 'invite.txt');
+    await fs.writeFile(file, 'secret');
+
+    await createFolderLease(file, {
+      config: configPath,
+      leaseStorePath,
+      label: 'Invite',
+      expires: '1h',
+      downloads: '1',
+    });
+
+    const lease = listLeases(leaseStorePath)[0]!;
+    expect(lease).toMatchObject({
+      label: 'Invite',
+      maxDownloads: 1,
+      downloadCount: 0,
+    });
+    expect(logSpy.mock.calls.flat().join('\n')).toContain('Downloads: 1');
+  });
+
+  it('treats --downloads -1 as unlimited', async () => {
+    const file = path.join(tmp, 'photos.zip');
+    await fs.writeFile(file, 'zip');
+
+    await createFolderLease(file, {
+      config: configPath,
+      leaseStorePath,
+      label: 'Photos',
+      downloads: '-1',
+    });
+
+    expect(listLeases(leaseStorePath)[0].maxDownloads).toBeUndefined();
+  });
+
+  it('rejects download limits for upload-only leases', async () => {
+    const folder = path.join(tmp, 'dropbox');
+    await fs.mkdir(folder);
+
+    await expect(createFolderLease(folder, {
+      config: configPath,
+      leaseStorePath,
+      label: 'Uploads',
+      mode: 'upload',
+      downloads: '1',
+    })).rejects.toThrow(/Download limits require/);
+  });
+
   it('adds paths to an existing read lease without replacing the token record', async () => {
     const folder = path.join(tmp, 'Taxes');
     const receipts = path.join(tmp, 'Receipts');
