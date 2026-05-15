@@ -6,7 +6,7 @@ mvmt stores its configuration at:
 ~/.mvmt/config.yaml
 ```
 
-The config controls the local mounts exposed to MCP clients, server access, per-client policy, and result plugins. On non-Windows systems, mvmt writes the config with mode `600`.
+The config controls the local mounts exposed to MCP clients, server access, and per-client policy. On non-Windows systems, mvmt writes the config with mode `600`.
 
 Use the CLI when possible:
 
@@ -74,11 +74,6 @@ clients:
         actions: [search, read, write]
       - path: /notes/**
         actions: [search, read]
-
-plugins:
-  - name: pattern-redactor
-    enabled: true
-    mode: redact
 ```
 
 ## `version`
@@ -209,27 +204,6 @@ permissions:
   - path: /**
     actions: [search, read, write]
 ```
-
-## `plugins`
-
-The only built-in plugin is `pattern-redactor`.
-
-```yaml
-plugins:
-  - name: pattern-redactor
-    enabled: true
-    mode: redact
-```
-
-Modes:
-
-| Mode | Behavior |
-| --- | --- |
-| `warn` | Records matches but returns the original result. |
-| `redact` | Replaces matches with configured replacement strings. |
-| `block` | Blocks the entire result. |
-
-The default patterns cover common API-key shapes. Pattern redaction is defense in depth, not the primary permission model.
 
 ## Legacy Fields
 

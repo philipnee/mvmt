@@ -88,85 +88,6 @@ export const ProxySchema = z
     }
   });
 
-export const PatternRedactorPatternSchema = z
-  .object({
-    name: z.string().min(1),
-    regex: z.string().min(1),
-    flags: z.string().regex(/^[dgimsuvy]*$/).default('g'),
-    replacement: z.string().min(1),
-    enabled: z.boolean().default(true),
-  })
-  .superRefine((data, ctx) => {
-    try {
-      new RegExp(data.regex, data.flags.includes('g') ? data.flags : `${data.flags}g`);
-    } catch (err) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: err instanceof Error ? err.message : 'Invalid regex',
-        path: ['regex'],
-      });
-    }
-  });
-
-export const DEFAULT_PATTERN_REDACTOR_PATTERNS: z.infer<typeof PatternRedactorPatternSchema>[] = [
-  {
-    name: 'anthropic-keys',
-    regex: '\\bsk-ant-[A-Za-z0-9_-]{20,}\\b',
-    flags: 'g',
-    replacement: '[REDACTED:ANTHROPIC_KEY]',
-    enabled: true,
-  },
-  {
-    name: 'openai-keys',
-    regex: '\\bsk-[A-Za-z0-9_-]{20,}\\b',
-    flags: 'g',
-    replacement: '[REDACTED:OPENAI_KEY]',
-    enabled: true,
-  },
-  {
-    name: 'aws-access-keys',
-    regex: '\\b(?:AKIA|ASIA)[A-Z0-9]{16}\\b',
-    flags: 'g',
-    replacement: '[REDACTED:AWS_ACCESS_KEY]',
-    enabled: true,
-  },
-  {
-    name: 'github-tokens',
-    regex: '\\b(?:(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,255}|github_pat_[A-Za-z0-9_]{22,255})\\b',
-    flags: 'g',
-    replacement: '[REDACTED:GITHUB_TOKEN]',
-    enabled: true,
-  },
-  {
-    name: 'slack-tokens',
-    regex: '\\bxox[baprs]-[A-Za-z0-9-]{10,}\\b',
-    flags: 'g',
-    replacement: '[REDACTED:SLACK_TOKEN]',
-    enabled: true,
-  },
-  {
-    name: 'jwt-looking-strings',
-    regex: '\\beyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\b',
-    flags: 'g',
-    replacement: '[REDACTED:JWT]',
-    enabled: true,
-  },
-];
-
-export const PatternRedactorPluginSchema = z.object({
-  name: z.literal('pattern-redactor'),
-  enabled: z.boolean().default(true),
-  mode: z.enum(['warn', 'redact', 'block']).default('redact'),
-  maxBytes: z.number().int().min(1024).max(10 * 1024 * 1024).default(1024 * 1024),
-  patterns: z.array(PatternRedactorPatternSchema).default(DEFAULT_PATTERN_REDACTOR_PATTERNS),
-});
-
-// Single-variant today; kept as a discriminated union so plugin #N lands as
-// a schema addition, not a structural refactor of PluginSchema.
-export const PluginSchema = z.discriminatedUnion('name', [
-  PatternRedactorPluginSchema,
-]);
-
 export const LocalFolderMountSchema = z.object({
   name: z.string().min(1).regex(/^[a-z0-9][a-z0-9_-]*$/, 'mount name must be lowercase alphanum/dash/underscore'),
   type: z.literal('local_folder').default('local_folder'),
@@ -259,7 +180,6 @@ export const ConfigSchema = z
       .default({}),
     proxy: z.array(ProxySchema).default([]),
     mounts: z.array(LocalFolderMountSchema).default([]),
-    plugins: z.array(PluginSchema).default([]),
     // clients and semanticTools are additive to the v1 schema. When
     // absent, the runtime synthesizes a single default client that maps
     // to the existing session token (preserves pre-PR behavior).
@@ -465,9 +385,6 @@ function normalizePolicyPath(value: string): string {
 export type TunnelConfig = z.infer<typeof TunnelSchema>;
 export type ProxyConfig = z.infer<typeof ProxySchema>;
 export type LocalFolderMountConfig = z.infer<typeof LocalFolderMountSchema>;
-export type PatternRedactorPatternConfig = z.infer<typeof PatternRedactorPatternSchema>;
-export type PatternRedactorPluginConfig = z.infer<typeof PatternRedactorPluginSchema>;
-export type PluginConfig = z.infer<typeof PluginSchema>;
 export type PermissionConfig = z.infer<typeof PermissionSchema>;
 export type ClientAuthConfig = z.infer<typeof ClientAuthSchema>;
 export type ClientConfig = z.infer<typeof ClientSchema>;

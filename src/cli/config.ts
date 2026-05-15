@@ -122,7 +122,6 @@ export function printConfigSummary(
   }
 
   printMountSummary(config);
-  printPluginSummary(config);
 }
 
 function printMountSummary(config: MvmtConfig): void {
@@ -137,18 +136,5 @@ function printMountSummary(config: MvmtConfig): void {
     console.log(`  ${mount.name}: ${mount.path} -> ${mount.root}  ${mount.writeAccess ? 'writable' : 'read-only'}`);
     if (mount.description) console.log(`    description: ${mount.description}`);
     if (mount.guidance) console.log(`    guidance: ${mount.guidance}`);
-  }
-}
-
-function printPluginSummary(config: MvmtConfig): void {
-  console.log('\nPlugins');
-  const enabled = config.plugins.filter((plugin) => plugin.enabled !== false);
-  if (enabled.length === 0) {
-    console.log(`  ${chalk.dim('none')}`);
-    return;
-  }
-
-  for (const plugin of enabled) {
-    console.log(`  ${plugin.name}`);
   }
 }

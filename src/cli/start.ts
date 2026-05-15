@@ -5,8 +5,6 @@ import { configExists, loadConfig, parseConfig, readConfig, resolveConfigPath, s
 import { MvmtConfig, TunnelSchema } from '../config/schema.js';
 import { createTemporaryFilesystemConfig } from './config.js';
 import { setupConfig } from './init.js';
-import { createPlugins } from '../plugins/factory.js';
-import { ToolResultPlugin } from '../plugins/types.js';
 import { startHttpServer, startStdioServer } from '../server/index.js';
 import { ToolRouter } from '../server/router.js';
 import { createAuditLogger, AUDIT_LOG_PATH } from '../utils/audit.js';
@@ -104,10 +102,6 @@ export async function start(options: StartOptions = {}): Promise<void> {
   const textIndex = !stdioMode || config.mounts.some((mount) => mount.enabled !== false)
     ? new TextContextIndex({ mounts: config.mounts, indexPath: defaultTextIndexPath(configPath) })
     : undefined;
-  const plugins = createPlugins(config.plugins);
-  for (const plugin of plugins) {
-    emit(`Loaded plugin:${plugin.id}`, stdioMode, logger);
-  }
 
   if (stdioMode && loaded.length === 0 && !textIndex) {
     emitNoMountsGuidance(stdioMode, logger);
@@ -117,7 +111,7 @@ export async function start(options: StartOptions = {}): Promise<void> {
   const audit = interactiveMode
     ? new InteractiveAuditLogger(createAuditLogger())
     : createAuditLogger();
-  const router = new ToolRouter(audit, plugins, { contextIndex: textIndex });
+  const router = new ToolRouter(audit, { contextIndex: textIndex });
   await router.initialize();
   if (textIndex) {
     void textIndex.rebuild().then((stats) => {
@@ -249,7 +243,6 @@ export async function start(options: StartOptions = {}): Promise<void> {
     printStartupBanner(
       port,
       loaded,
-      plugins,
       router.getAllTools().length,
       tunnel?.url,
       interactiveMode,
@@ -262,7 +255,6 @@ export async function start(options: StartOptions = {}): Promise<void> {
         port,
         tunnel: tunnelController,
         loaded,
-        plugins,
         totalTools: router.getAllTools().length,
         audit: audit as InteractiveAuditLogger,
         shutdown,
@@ -437,7 +429,6 @@ function registerShutdown(
 function printStartupBanner(
   port: number,
   loaded: LoadedConnector[],
-  plugins: ToolResultPlugin[],
   totalTools: number,
   publicUrl?: string,
   interactiveMode = false,
@@ -459,13 +450,6 @@ function printStartupBanner(
     console.log(`  ${chalk.green('ok')} ${'text-index'.padEnd(22)} ${String(mountCount).padStart(3)} mounts`);
   }
   console.log(`  ${chalk.dim('total'.padEnd(25))} ${String(totalTools).padStart(3)} tools\n`);
-  if (plugins.length > 0) {
-    console.log(chalk.bold('Plugins:'));
-    for (const plugin of plugins) {
-      console.log(`  ${chalk.green('ok')} ${plugin.id}`);
-    }
-    console.log('');
-  }
   if (interactiveMode) {
     console.log(`${chalk.bold('Dashboard')}    browse files, manage sources, and copy shared links`);
     console.log(`${chalk.bold('Share link')}   type ${chalk.cyan('lease create')} to share a file or folder`);

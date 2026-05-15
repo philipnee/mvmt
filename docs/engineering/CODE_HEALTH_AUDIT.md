@@ -84,16 +84,16 @@ Scope: local-first mount runtime, CLI command layer, text index, router, tests, 
 - Files likely involved: `src/context/text-index.ts`, `tests/text-index.test.ts`.
 - Status: Backlog.
 
-### 8. Router mixes tool definitions, permission checks, dispatch, plugin application, and auditing
+### 8. Router mixes permission checks, dispatch, and auditing
 
 - Problem: `ToolRouter` has multiple reasons to change.
-- Evidence from the code: `src/server/router.ts` defines tools, parses arguments, checks permissions, dispatches storage calls, applies plugins, and records audit entries.
+- Evidence from the code: `src/server/router.ts` parses arguments, checks permissions, dispatches storage calls, and records audit entries.
 - User/developer impact: small changes to one concern are harder to review and test in isolation.
 - Risk level: Medium.
 - Proposed fix: split context tool definitions and handlers into per-tool modules with a small registry.
 - Acceptance criteria: router tests remain behavior-focused; adding a new tool requires adding a module and registering it in `src/server/context-tools/index.ts`.
 - Files likely involved: `src/server/router.ts`, `src/server/context-tools/*`, `tests/router.test.ts`.
-- Status: Completed for context tool definitions and handlers. Permission helpers, plugin application, and audit remain in `ToolRouter`.
+- Status: Completed for context tool definitions and handlers. Permission helpers and audit remain in `ToolRouter`.
 
 ### 9. CLI command registration is concentrated in one large file
 

@@ -6,6 +6,12 @@ This project follows the spirit of Keep a Changelog and uses semantic versioning
 
 ## Unreleased
 
+### Removed
+
+- Removed the pattern-redactor plugin and plugin configuration surface. Use
+  mount scope, `exclude`, `protect`, and client permissions as the security
+  boundary.
+
 ## 0.1.1 - 2026-05-05
 
 ### Added

@@ -41,7 +41,6 @@ It is not sync, cloud storage, or a connector marketplace. Data stays where it l
 |  |                       |                                                     |
 |  | search/list/read      |                                                     |
 |  | write/remove          |                                                     |
-|  | plugins               |                                                     |
 |  | audit log             |                                                     |
 |  +-----------+-----------+                                                     |
 |              |                                                                 |
@@ -92,7 +91,6 @@ client
   -> path/action policy
   -> tool router
   -> text index or local folder provider
-  -> plugins
   -> audit log
   -> client
 ```
@@ -139,12 +137,6 @@ The text index is used by `search`.
 On startup, mvmt serves immediately and rebuilds the index in the background. `mvmt reindex` forces a full rebuild.
 
 The current index is a JSON snapshot beside the config. SQLite and incremental file watching are planned.
-
-## Plugins
-
-Plugins run after a tool returns and before the result reaches the client. The built-in `pattern-redactor` can warn, redact, or block regex matches in text results.
-
-Plugins are defense in depth. They do not expand mount scope and they do not replace path/action policy.
 
 ## Shutdown
 

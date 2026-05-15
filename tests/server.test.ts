@@ -636,7 +636,7 @@ describe('folder lease access', () => {
     });
     const index = new TextContextIndex({ mounts: config.mounts, indexPath: path.join(tmp, 'index.json') });
     await index.rebuild();
-    const router = new ToolRouter(undefined, [], { contextIndex: index });
+    const router = new ToolRouter(undefined, { contextIndex: index });
     await router.initialize();
     const server = await startHttpServer(router, {
       port: 0,
@@ -3682,7 +3682,7 @@ describe('startHttpServer lifecycle', () => {
 
   it('keeps existing OAuth grants after scoped API token permissions are edited', async () => {
     const { index, tmp: indexTmp } = await createTextIndexServerFixture();
-    const router = new ToolRouter(undefined, [], { contextIndex: index });
+    const router = new ToolRouter(undefined, { contextIndex: index });
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -3883,7 +3883,7 @@ describe('startHttpServer lifecycle', () => {
 
   it('filters MCP tools/list and denies tool calls by resolved client permissions', async () => {
     const { index, tmp: indexTmp } = await createTextIndexServerFixture();
-    const router = new ToolRouter(undefined, [], { contextIndex: index });
+    const router = new ToolRouter(undefined, { contextIndex: index });
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -3923,7 +3923,7 @@ describe('startHttpServer lifecycle', () => {
 
   it('applies edited token permissions to existing MCP sessions on the next request', async () => {
     const { index, tmp: indexTmp } = await createTextIndexServerFixture();
-    const router = new ToolRouter(undefined, [], { contextIndex: index });
+    const router = new ToolRouter(undefined, { contextIndex: index });
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -3980,7 +3980,7 @@ describe('startHttpServer lifecycle', () => {
 
   it('denies writes after a token changes from path-specific write to all read', async () => {
     const { index, tmp: indexTmp } = await createTextIndexServerFixture();
-    const router = new ToolRouter(undefined, [], { contextIndex: index });
+    const router = new ToolRouter(undefined, { contextIndex: index });
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');
@@ -4049,7 +4049,7 @@ describe('startHttpServer lifecycle', () => {
       mountPath: '/notes',
       files: { 'projects/launch.md': '# Launch\nShip it.' },
     });
-    const router = new ToolRouter(undefined, [], { contextIndex: index });
+    const router = new ToolRouter(undefined, { contextIndex: index });
     await router.initialize();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-server-test-'));
     const tokenPath = path.join(tmp, '.mvmt', '.session-token');

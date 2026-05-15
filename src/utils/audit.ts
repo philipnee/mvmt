@@ -17,13 +17,6 @@ export interface AuditEntry {
   result?: 'success' | 'error';
   argKeys: string[];
   argPreview: string;
-  redactions?: Array<{
-    pluginId: string;
-    mode: 'warn' | 'redact' | 'block';
-    pattern: string;
-    count: number;
-    truncated?: boolean;
-  }>;
   isError: boolean;
   deniedReason?: string;
   durationMs: number;
