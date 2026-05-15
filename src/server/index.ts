@@ -37,7 +37,7 @@ import { isTextPath, MAX_TEXT_BYTES } from '../context/text-index.js';
 import { addMountToConfig, editMountInConfig, MountInput, removeMountFromConfig } from '../cli/mounts.js';
 import { addApiTokenToConfig, removeApiTokenFromConfig, setApiTokenPublishedInConfig } from '../cli/api-tokens.js';
 import { resolveSetupPath } from '../connectors/setup-paths.js';
-import { listDashboardFiles, normalizeDashboardPath, resolveDashboardFileTarget } from '../apps/dashboard/files.js';
+import { normalizeDashboardPath, resolveDashboardFileTarget } from '../apps/dashboard/files.js';
 import {
   defaultPrivilegedUsersPath,
   findPrivilegedUser,
@@ -923,28 +923,11 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     }
   });
 
-  app.get('/dashboard/api/files', dashboardOriginMiddleware, dashboardAuthMiddleware, async (req, res) => {
-    const requestPath = firstStringQuery(req.query.path) ?? '/';
-    try {
-      const session = res.locals.dashboardSession as DashboardSession;
-      const mounts = resolveLeaseMounts(options.leaseMounts);
-      let listing = await listDashboardFiles(mounts, requestPath);
-      if (normalizeDashboardPath(requestPath) === '/' && session.admin && isLocalRequest(req)) {
-        listing = withUnavailableRootMounts(listing, mounts);
-      }
-      logHttpRequest(requestLog, req, 200, 'dashboard.files', listing.path);
-      res.json(listing);
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : 'unavailable';
-      logHttpRequest(requestLog, req, 404, 'dashboard.files', detail);
-      res.status(404).json({ error: 'file_unavailable' });
-    }
-  });
-
   app.get('/api/fs/sources', dashboardOriginMiddleware, dashboardAuthMiddleware, async (req, res) => {
     const identity = readClientIdentity(req);
+    const fsOptions = fsListOptionsForRequest(req, res);
     try {
-      const sources = await fsSourcesForRequest(resolveLeaseMounts(options.leaseMounts), identity);
+      const sources = await fsSourcesForRequest(resolveLeaseMounts(options.leaseMounts), identity, fsOptions);
       logHttpRequest(requestLog, req, 200, 'fs.sources');
       res.json({ sources });
     } catch (err) {
@@ -957,8 +940,9 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   app.get('/api/fs/list', dashboardOriginMiddleware, dashboardAuthMiddleware, async (req, res) => {
     const requestPath = firstStringQuery(req.query.path) ?? '/';
     const identity = readClientIdentity(req);
+    const fsOptions = fsListOptionsForRequest(req, res);
     try {
-      const listing = await fsListForRequest(resolveLeaseMounts(options.leaseMounts), requestPath, identity);
+      const listing = await fsListForRequest(resolveLeaseMounts(options.leaseMounts), requestPath, identity, fsOptions);
       logHttpRequest(requestLog, req, 200, 'fs.list', listing.path);
       res.json(listing);
     } catch (err) {
@@ -1935,6 +1919,7 @@ function authLogKind(req: Request): string {
 type FsEntryPayload = StorageProviderStat & {
   name: string;
   writeAccess: boolean;
+  unavailable?: boolean;
 };
 
 type FsStatPayload = StorageProviderStat & {
@@ -1945,9 +1930,19 @@ type FsListingPayload = FsStatPayload & {
   entries: FsEntryPayload[];
 };
 
+// includeUnavailable surfaces mounts whose root path does not resolve (deleted,
+// permission error, unmounted disk) as entries flagged with `unavailable: true`.
+// Strictly an operator-facing diagnostic — callers should gate it on
+// local-admin context. The unauthenticated/remote/non-admin path keeps the
+// strict behavior of silently omitting broken mounts.
+interface FsListOptions {
+  includeUnavailable?: boolean;
+}
+
 async function fsSourcesForRequest(
   mounts: readonly LocalFolderMountConfig[],
   identity?: ClientIdentity,
+  options: FsListOptions = {},
 ): Promise<FsEntryPayload[]> {
   const registry = new MountRegistry([...mounts]);
   const sources: FsEntryPayload[] = [];
@@ -1958,8 +1953,9 @@ async function fsSourcesForRequest(
       const stat = await provider.stat('');
       sources.push(fsEntryPayload(stat, mount, identity, mount.config.name));
     } catch {
-      // Unavailable roots are omitted from the reusable FS API. The dashboard
-      // local settings view handles stale mount diagnostics separately.
+      if (options.includeUnavailable) {
+        sources.push(unavailableMountEntry(mount.config));
+      }
     }
   }
   return sources.sort((a, b) => a.path.localeCompare(b.path));
@@ -1969,6 +1965,7 @@ async function fsListForRequest(
   mounts: readonly LocalFolderMountConfig[],
   inputPath: string,
   identity?: ClientIdentity,
+  options: FsListOptions = {},
 ): Promise<FsListingPayload> {
   const normalizedPath = normalizeVirtualPath(inputPath);
   if (normalizedPath === '/') {
@@ -1980,7 +1977,7 @@ async function fsListForRequest(
       size: 0,
       mtimeMs: 0,
       writeAccess: false,
-      entries: await fsSourcesForRequest(mounts, identity),
+      entries: await fsSourcesForRequest(mounts, identity, options),
     };
   }
 
@@ -2089,6 +2086,25 @@ function fsStatPayload(stat: StorageProviderStat, mount: RegisteredMount, identi
   return {
     ...stat,
     writeAccess: Boolean(mount.config.writeAccess) && pathAllowed(stat.path, 'write', identity),
+  };
+}
+
+function fsListOptionsForRequest(req: Request, res: Response): FsListOptions {
+  const session = res.locals.dashboardSession as DashboardSession | undefined;
+  return { includeUnavailable: Boolean(session?.admin) && isLocalRequest(req) };
+}
+
+function unavailableMountEntry(mount: LocalFolderMountConfig): FsEntryPayload {
+  return {
+    mount: mount.name,
+    name: mount.path.split('/').filter(Boolean).join('/') || mount.name,
+    path: mount.path,
+    relativePath: '',
+    type: 'directory',
+    size: 0,
+    mtimeMs: 0,
+    writeAccess: Boolean(mount.writeAccess),
+    unavailable: true,
   };
 }
 
@@ -2632,29 +2648,6 @@ function dashboardMaxDownloads(body: Record<string, unknown>): number | 'invalid
   if (!/^[1-9]\d*$/.test(trimmed)) return 'invalid';
   const limit = Number.parseInt(trimmed, 10);
   return Number.isSafeInteger(limit) ? limit : 'invalid';
-}
-
-function withUnavailableRootMounts(
-  listing: Awaited<ReturnType<typeof listDashboardFiles>>,
-  mounts: readonly LocalFolderMountConfig[],
-): Awaited<ReturnType<typeof listDashboardFiles>> {
-  const visible = new Set(listing.entries.map((entry) => entry.path));
-  const missing = mounts
-    .filter((mount) => mount.enabled !== false && !visible.has(mount.path))
-    .map((mount) => ({
-      name: mount.path.split('/').filter(Boolean).join('/') || mount.name,
-      path: mount.path,
-      type: 'directory' as const,
-      size: 0,
-      mtimeMs: 0,
-      writeAccess: Boolean(mount.writeAccess),
-      unavailable: true,
-    }));
-  if (missing.length === 0) return listing;
-  return {
-    ...listing,
-    entries: [...listing.entries, ...missing].sort((a, b) => a.name.localeCompare(b.name)),
-  };
 }
 
 function mountInputFromBody(
@@ -3407,6 +3400,7 @@ table.t{border-collapse:collapse;width:100%}
 (function () {
   var $ = function (id) { return document.getElementById(id); };
   var DASHBOARD_API_PREFIX = '/dashboard/api/';
+  var APP_API_PREFIX = '/api/';
 
   function scrubDashboardUrl() {
     if (!location.search && !location.hash) return;
@@ -3436,9 +3430,18 @@ table.t{border-collapse:collapse;width:100%}
     return index >= 0 ? path.slice(0, index + marker.length) : marker;
   }
 
+  function appBasePath() {
+    var base = dashboardBasePath();
+    var marker = '/dashboard';
+    return base.endsWith(marker) ? base.slice(0, -marker.length) : '';
+  }
+
   function dashboardRequestUrl(url) {
     if (typeof url === 'string' && url.indexOf(DASHBOARD_API_PREFIX) === 0) {
       return dashboardBasePath() + '/api/' + url.slice(DASHBOARD_API_PREFIX.length);
+    }
+    if (typeof url === 'string' && url.indexOf(APP_API_PREFIX) === 0) {
+      return appBasePath() + url;
     }
     return url;
   }
@@ -3843,7 +3846,7 @@ table.t{border-collapse:collapse;width:100%}
     var requested = targetPath || state.currentPath;
     var listing;
     try {
-      listing = await api('/dashboard/api/files?path=' + encodeURIComponent(requested));
+      listing = await api('/api/fs/list?path=' + encodeURIComponent(requested));
     } catch (err) {
       if (err && err.status === 404 && requested !== '/') {
         toast('Path is unavailable. Returned to top.', 'error');

@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { parseConfig } from '../src/config/loader.js';
 import {
   assertDashboardWriteAllowed,
-  listDashboardFiles,
   normalizeDashboardPath,
   resolveDashboardFileTarget,
 } from '../src/apps/dashboard/files.js';
@@ -32,24 +31,7 @@ describe('dashboard file access helpers', () => {
     await fs.rm(tmp, { recursive: true, force: true });
   });
 
-  it('lists enabled mount roots and hides stale roots', async () => {
-    const config = parseConfig({
-      version: 1,
-      mounts: [
-        { name: 'docs', type: 'local_folder', path: '/docs', root: readRoot },
-        { name: 'write', type: 'local_folder', path: '/write', root: writeRoot, writeAccess: true },
-        { name: 'missing', type: 'local_folder', path: '/missing', root: path.join(tmp, 'missing') },
-      ],
-    });
-
-    const listing = await listDashboardFiles(config.mounts, '/');
-
-    expect(listing).toMatchObject({ path: '/', type: 'directory', writeAccess: false });
-    expect(listing.entries.map((entry) => entry.path)).toEqual(['/docs', '/write']);
-    expect(listing.entries.find((entry) => entry.path === '/write')).toMatchObject({ writeAccess: true });
-  });
-
-  it('lists children through mount policy and hides excluded files', async () => {
+  it('rejects excluded paths via resolveDashboardFileTarget', async () => {
     const config = parseConfig({
       version: 1,
       mounts: [
@@ -63,9 +45,6 @@ describe('dashboard file access helpers', () => {
       ],
     });
 
-    const listing = await listDashboardFiles(config.mounts, '/docs');
-
-    expect(listing.entries.map((entry) => entry.name)).toEqual(['nested', 'safe.txt']);
     await expect(resolveDashboardFileTarget(config.mounts, '/docs/secret.txt')).rejects.toThrow('excluded');
   });
 
@@ -81,8 +60,6 @@ describe('dashboard file access helpers', () => {
     });
 
     await expect(resolveDashboardFileTarget(config.mounts, '/docs/outside-link.txt')).rejects.toThrow('escapes mount root');
-    const listing = await listDashboardFiles(config.mounts, '/docs');
-    expect(listing.entries.map((entry) => entry.name)).not.toContain('outside-link.txt');
   });
 
   it('normalizes browser paths and enforces dashboard write gates', async () => {
