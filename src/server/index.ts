@@ -1802,6 +1802,9 @@ function remoteAddressFor(req: Request): string | undefined {
 }
 
 function relayRemoteAddressFor(req: Request): string | undefined {
+  // Trust these headers only after the configured relay marks the request
+  // as relayed. The relay should stamp x-mvmt-relay-client-ip; Fly provides
+  // fly-client-ip today, and x-forwarded-for is a compatibility fallback.
   if (!isRelayRequest(req)) return undefined;
   return firstForwardedAddress(
     firstHeaderValue(req.headers['x-mvmt-relay-client-ip'])

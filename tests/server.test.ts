@@ -869,12 +869,14 @@ describe('dashboard access', () => {
         { name: 'write', type: 'local_folder', path: '/write', root: writeRoot, writeAccess: true },
       ],
     });
+    const requestLogs: Array<{ kind: string; path: string; status: number; clientId?: string }> = [];
     const server = await startHttpServer(new ToolRouter(), {
       port: 0,
       tokenPath,
       leaseMounts: config.mounts,
       leaseStorePath,
       privilegedUsersPath: usersPath,
+      requestLog: (entry) => requestLogs.push(entry),
     });
     try {
       const rejected = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/files`);
@@ -898,6 +900,21 @@ describe('dashboard access', () => {
       expect(listedLeases.status).toBe(200);
       const listedBody = await listedLeases.json() as { leases: { id: string; url?: string }[] };
       expect(listedBody.leases.find((lease) => lease.id === readBody.lease.id)?.url).toBe(readBody.lease.url);
+
+      const loggedLeases = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases`, {
+        headers: { Cookie: cookie },
+      });
+      expect(loggedLeases.status).toBe(200);
+      expect(requestLogs).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'dashboard.leases',
+            path: '/dashboard/api/leases',
+            status: 200,
+            clientId: 'sarah',
+          }),
+        ]),
+      );
 
       // 'write' mode is no longer accepted by the dashboard.
       const writeBlocked = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases`, {
