@@ -851,6 +851,131 @@ describe('folder lease access', () => {
 });
 
 describe('dashboard access', () => {
+  it('serves mounted files through the cookie-authenticated FS API with range, write, remove, and audit', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-fs-api-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    const photosRoot = path.join(tmp, 'photos');
+    fs.mkdirSync(photosRoot, { recursive: true });
+    const imageBytes = Buffer.from([0, 1, 2, 3, 4, 5, 6]);
+    fs.writeFileSync(path.join(photosRoot, 'photo.jpg'), imageBytes);
+    createPrivilegedUser(usersPath, { username: 'photo-admin', password: 'correct horse battery staple' });
+    const config = parseConfig({
+      version: 1,
+      mounts: [
+        { name: 'photos', type: 'local_folder', path: '/photos', root: photosRoot, writeAccess: true },
+      ],
+    });
+    const auditEntries: unknown[] = [];
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: config.mounts,
+      privilegedUsersPath: usersPath,
+      audit: {
+        record: (entry) => auditEntries.push(entry),
+        recordHttp: () => undefined,
+      },
+    });
+    try {
+      const blocked = await fetch(`http://127.0.0.1:${server.port}/api/fs/sources`);
+      expect(blocked.status).toBe(401);
+
+      const cookie = await loginDashboard(server.port, 'photo-admin', 'correct horse battery staple');
+      const sources = await fetch(`http://127.0.0.1:${server.port}/api/fs/sources`, {
+        headers: { Cookie: cookie },
+      });
+      expect(sources.status).toBe(200);
+      expect(await sources.json()).toMatchObject({
+        sources: [
+          expect.objectContaining({ name: 'photos', path: '/photos', type: 'directory', writeAccess: true }),
+        ],
+      });
+
+      const listing = await fetch(`http://127.0.0.1:${server.port}/api/fs/list?path=${encodeURIComponent('/photos')}`, {
+        headers: { Cookie: cookie },
+      });
+      expect(listing.status).toBe(200);
+      expect(await listing.json()).toMatchObject({
+        path: '/photos',
+        entries: [
+          expect.objectContaining({ name: 'photo.jpg', path: '/photos/photo.jpg', type: 'file', size: imageBytes.length }),
+        ],
+      });
+
+      const range = await fetch(`http://127.0.0.1:${server.port}/api/fs/file?path=${encodeURIComponent('/photos/photo.jpg')}`, {
+        headers: { Cookie: cookie, Range: 'bytes=2-4' },
+      });
+      expect(range.status).toBe(206);
+      expect(range.headers.get('content-range')).toBe('bytes 2-4/7');
+      expect(range.headers.get('content-type')).toBe('image/jpeg');
+      expect([...Buffer.from(await range.arrayBuffer())]).toEqual([2, 3, 4]);
+
+      const writeBody = '{"saved":true}';
+      const write = await fetch(`http://127.0.0.1:${server.port}/api/fs/file?path=${encodeURIComponent('/photos/upload.json')}`, {
+        method: 'PUT',
+        headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+        body: writeBody,
+      });
+      expect(write.status).toBe(200);
+      expect(fs.readFileSync(path.join(photosRoot, 'upload.json'), 'utf-8')).toBe(writeBody);
+
+      const remove = await fetch(`http://127.0.0.1:${server.port}/api/fs/file?path=${encodeURIComponent('/photos/upload.json')}`, {
+        method: 'DELETE',
+        headers: { Cookie: cookie },
+      });
+      expect(remove.status).toBe(200);
+      expect(fs.existsSync(path.join(photosRoot, 'upload.json'))).toBe(false);
+
+      expect(auditEntries).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ tool: 'fs.read', clientId: 'photo-admin', isError: false }),
+          expect.objectContaining({ tool: 'fs.write', clientId: 'photo-admin', isError: false }),
+          expect.objectContaining({ tool: 'fs.remove', clientId: 'photo-admin', isError: false }),
+        ]),
+      );
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('caps cookie-authenticated FS uploads before writing to disk', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-fs-api-cap-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    const docsRoot = path.join(tmp, 'docs');
+    fs.mkdirSync(docsRoot, { recursive: true });
+    createPrivilegedUser(usersPath, { username: 'writer', password: 'correct horse battery staple' });
+    const config = parseConfig({
+      version: 1,
+      mounts: [
+        { name: 'docs', type: 'local_folder', path: '/docs', root: docsRoot, writeAccess: true },
+      ],
+    });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: config.mounts,
+      privilegedUsersPath: usersPath,
+      maxFsUploadBytes: 4,
+    });
+    try {
+      const cookie = await loginDashboard(server.port, 'writer', 'correct horse battery staple');
+      const response = await fetch(`http://127.0.0.1:${server.port}/api/fs/file?path=${encodeURIComponent('/docs/too-large.bin')}`, {
+        method: 'PUT',
+        headers: { Cookie: cookie, 'Content-Type': 'application/octet-stream' },
+        body: Buffer.from([0, 1, 2, 3, 4]),
+      });
+      expect(response.status).toBe(413);
+      expect(await response.json()).toEqual({ error: 'fs_upload_too_large' });
+      expect(fs.existsSync(path.join(docsRoot, 'too-large.bin'))).toBe(false);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('logs in privileged users, creates read/upload/two-way leases, and suffixes collision uploads', async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-test-'));
     const tokenPath = path.join(tmp, '.session-token');

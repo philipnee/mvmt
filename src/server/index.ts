@@ -31,6 +31,9 @@ import {
 import { rateLimit } from './rate-limit.js';
 import { ClientConfig, LocalFolderMountConfig, PermissionConfig } from '../config/schema.js';
 import { readConfig, saveConfig, withConfigLock } from '../config/loader.js';
+import { MountRegistry, normalizeVirtualPath, RegisteredMount } from '../context/mount-registry.js';
+import { LocalFolderStorageProvider, type StorageProviderReadStream, type StorageProviderStat } from '../context/storage-provider.js';
+import { isTextPath, MAX_TEXT_BYTES } from '../context/text-index.js';
 import { addMountToConfig, editMountInConfig, MountInput, removeMountFromConfig } from '../cli/mounts.js';
 import { addApiTokenToConfig, removeApiTokenFromConfig, setApiTokenPublishedInConfig } from '../cli/api-tokens.js';
 import { resolveSetupPath } from '../connectors/setup-paths.js';
@@ -71,6 +74,8 @@ import {
   readClientIdentity,
   resolveClientIdentity,
 } from './client-identity.js';
+import { pathAllowed, pathMayExposeEntry } from '../core/auth/permissions.js';
+import { AuditLogger, summarizeArgs } from '../utils/audit.js';
 
 // Rate limits are defense-in-depth against brute-force and DoS,
 // primarily meaningful when mvmt is exposed via a tunnel. Auth-gated
@@ -82,6 +87,7 @@ const DEFAULT_AUTH_RATE_LIMIT = { windowMs: 60_000, max: 30 };
 const DEFAULT_MCP_RATE_LIMIT = { windowMs: 60_000, max: 600 };
 const DEFAULT_HEALTH_RATE_LIMIT = { windowMs: 60_000, max: 120 };
 const DEFAULT_MAX_LEASE_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024;
+const DEFAULT_MAX_FS_UPLOAD_BYTES = DEFAULT_MAX_LEASE_UPLOAD_BYTES;
 const DEFAULT_DASHBOARD_LEASE_TTL = '24h';
 const DASHBOARD_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const DASHBOARD_SESSION_COOKIE = 'mvmt_dashboard';
@@ -127,6 +133,8 @@ export interface HttpServerOptions {
   // without blasting thousands of requests.
   rateLimits?: RateLimitOverrides;
   requestLog?: (entry: HttpRequestLogEntry) => void;
+  audit?: AuditLogger;
+  maxFsUploadBytes?: number;
   // Per-client policy entries (from `config.clients`). When undefined or
   // empty, requests authenticated via the session token resolve to a
   // synthesized default identity that preserves pre-PR single-token
@@ -252,7 +260,14 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   // falls back to baseUrlFor(), so local-only behaviour is unchanged.
   const userFacingBaseUrlFor = (req: Request): string => resolvePublicBaseUrl?.() ?? baseUrlFor(req);
   const app = express();
-  app.use(express.json({ limit: '10mb' }));
+  app.use(express.json({
+    limit: '10mb',
+    type: (req) => {
+      if (req.method === 'PUT' && typeof req.url === 'string' && req.url.startsWith('/api/fs/file')) return false;
+      const header = Array.isArray(req.headers['content-type']) ? req.headers['content-type'][0] : req.headers['content-type'];
+      return typeof header === 'string' && /^\s*application\/(?:[\w.+-]+\+)?json\b/i.test(header);
+    },
+  }));
   app.use(express.urlencoded({ extended: false, limit: '64kb' }));
 
   ensureSessionToken(tokenPath);
@@ -267,6 +282,7 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
   const clientsPath = defaultClientsPath(tokenPath ?? TOKEN_PATH);
   const refreshTokensPath = defaultRefreshTokensPath(tokenPath ?? TOKEN_PATH);
   const leaseSecretsPath = options.leaseSecretsPath ?? leaseSecretsPathForLeaseStore(leaseStorePath);
+  const maxFsUploadBytes = options.maxFsUploadBytes ?? DEFAULT_MAX_FS_UPLOAD_BYTES;
   const oauth = new OAuthStore({
     signingKey: () => readSigningKey(signingKeyPath) ?? ensureSigningKey(signingKeyPath),
     clientsPath,
@@ -922,6 +938,185 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       const detail = err instanceof Error ? err.message : 'unavailable';
       logHttpRequest(requestLog, req, 404, 'dashboard.files', detail);
       res.status(404).json({ error: 'file_unavailable' });
+    }
+  });
+
+  app.get('/api/fs/sources', dashboardOriginMiddleware, dashboardAuthMiddleware, async (req, res) => {
+    const identity = readClientIdentity(req);
+    try {
+      const sources = await fsSourcesForRequest(resolveLeaseMounts(options.leaseMounts), identity);
+      logHttpRequest(requestLog, req, 200, 'fs.sources');
+      res.json({ sources });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'unavailable';
+      logHttpRequest(requestLog, req, 500, 'fs.sources', detail);
+      res.status(500).json({ error: 'fs_sources_unavailable' });
+    }
+  });
+
+  app.get('/api/fs/list', dashboardOriginMiddleware, dashboardAuthMiddleware, async (req, res) => {
+    const requestPath = firstStringQuery(req.query.path) ?? '/';
+    const identity = readClientIdentity(req);
+    try {
+      const listing = await fsListForRequest(resolveLeaseMounts(options.leaseMounts), requestPath, identity);
+      logHttpRequest(requestLog, req, 200, 'fs.list', listing.path);
+      res.json(listing);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'unavailable';
+      const status = detail.includes('missing_permission') ? 403 : 404;
+      logHttpRequest(requestLog, req, status, 'fs.list', detail);
+      res.status(status).json({ error: status === 403 ? 'fs_permission_denied' : 'fs_path_unavailable' });
+    }
+  });
+
+  app.get('/api/fs/stat', dashboardOriginMiddleware, dashboardAuthMiddleware, async (req, res) => {
+    const requestPath = firstStringQuery(req.query.path);
+    const identity = readClientIdentity(req);
+    if (!requestPath) {
+      res.status(400).json({ error: 'path_required' });
+      return;
+    }
+    try {
+      const stat = await fsStatForRequest(resolveLeaseMounts(options.leaseMounts), requestPath, identity);
+      logHttpRequest(requestLog, req, 200, 'fs.stat', stat.path);
+      res.json(stat);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'unavailable';
+      const status = detail.includes('missing_permission') ? 403 : 404;
+      logHttpRequest(requestLog, req, status, 'fs.stat', detail);
+      res.status(status).json({ error: status === 403 ? 'fs_permission_denied' : 'fs_path_unavailable' });
+    }
+  });
+
+  const fsFileHandler: express.RequestHandler = async (req, res) => {
+    const requestPath = firstStringQuery(req.query.path);
+    const identity = readClientIdentity(req);
+    const dashboardSession = res.locals.dashboardSession as DashboardSession | undefined;
+    const startedAt = Date.now();
+    if (!requestPath) {
+      res.status(400).json({ error: 'path_required' });
+      return;
+    }
+
+    let file;
+    try {
+      file = await fsStatForRequest(resolveLeaseMounts(options.leaseMounts), requestPath, identity, { requireExactRead: true });
+      if (file.type !== 'file') throw new Error('not_file');
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'unavailable';
+      const status = detail.includes('missing_permission') ? 403 : 404;
+      logHttpRequest(requestLog, req, status, 'fs.file', detail);
+      recordFsAudit(options.audit, 'read', requestPath, startedAt, true, identity, dashboardSession, detail);
+      res.status(status).json({ error: status === 403 ? 'fs_permission_denied' : 'fs_path_unavailable' });
+      return;
+    }
+
+    const range = parseRangeHeader(firstHeaderValue(req.headers.range), file.size);
+    if (range === 'invalid') {
+      res.setHeader('Content-Range', `bytes */${file.size}`);
+      logHttpRequest(requestLog, req, 416, 'fs.file', 'invalid_range');
+      recordFsAudit(options.audit, 'read', file.path, startedAt, true, identity, dashboardSession, 'invalid_range');
+      res.status(416).end();
+      return;
+    }
+
+    const start = range?.start ?? 0;
+    const end = range?.end ?? Math.max(0, file.size - 1);
+    const status = range ? 206 : 200;
+    res.status(status);
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Disposition', `inline; filename="${escapeHeaderValue(path.basename(file.path))}"`);
+    res.setHeader('Content-Length', String(file.size === 0 ? 0 : end - start + 1));
+    res.setHeader('Content-Type', contentTypeForPath(file.path));
+    res.setHeader('Last-Modified', new Date(file.mtimeMs).toUTCString());
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    if (range) res.setHeader('Content-Range', `bytes ${start}-${end}/${file.size}`);
+    logHttpRequest(requestLog, req, status, 'fs.file', file.path);
+    recordFsAudit(options.audit, 'read', file.path, startedAt, false, identity, dashboardSession);
+    if (req.method === 'HEAD') {
+      res.end();
+      return;
+    }
+    let opened: StorageProviderReadStream;
+    try {
+      opened = await fsOpenForRequest(resolveLeaseMounts(options.leaseMounts), file.path, identity, range ? { start, end } : undefined);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'unavailable';
+      logHttpRequest(requestLog, req, 404, 'fs.file', detail);
+      recordFsAudit(options.audit, 'read', file.path, startedAt, true, identity, dashboardSession, detail);
+      res.destroy();
+      return;
+    }
+    opened.stream
+      .on('error', () => {
+        if (!res.headersSent) res.status(500).end();
+        else res.destroy();
+      })
+      .pipe(res);
+  };
+
+  app.get('/api/fs/file', dashboardOriginMiddleware, dashboardAuthMiddleware, fsFileHandler);
+  app.head('/api/fs/file', dashboardOriginMiddleware, dashboardAuthMiddleware, fsFileHandler);
+
+  app.put('/api/fs/file', dashboardOriginMiddleware, dashboardAuthMiddleware, async (req, res) => {
+    const requestPath = firstStringQuery(req.query.path);
+    const identity = readClientIdentity(req);
+    const dashboardSession = res.locals.dashboardSession as DashboardSession | undefined;
+    const startedAt = Date.now();
+    if (!requestPath) {
+      res.status(400).json({ error: 'path_required' });
+      return;
+    }
+    const contentLength = parseContentLength(firstHeaderValue(req.headers['content-length']));
+    if (contentLength === 'invalid') {
+      logHttpRequest(requestLog, req, 400, 'fs.write', 'invalid_content_length');
+      recordFsAudit(options.audit, 'write', requestPath, startedAt, true, identity, dashboardSession, 'invalid_content_length');
+      res.status(400).json({ error: 'invalid_content_length' });
+      return;
+    }
+    if (contentLength !== undefined && contentLength > maxFsUploadBytes) {
+      logHttpRequest(requestLog, req, 413, 'fs.write', 'upload_too_large');
+      recordFsAudit(options.audit, 'write', requestPath, startedAt, true, identity, dashboardSession, 'upload_too_large');
+      res.status(413).json({ error: 'fs_upload_too_large' });
+      return;
+    }
+    try {
+      const written = await fsWriteForRequest(resolveLeaseMounts(options.leaseMounts), requestPath, req, maxFsUploadBytes, identity);
+      logHttpRequest(requestLog, req, 200, 'fs.write', written.path);
+      recordFsAudit(options.audit, 'write', written.path, startedAt, false, identity, dashboardSession);
+      res.json(written);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'write_failed';
+      const status = err instanceof FsUploadTooLargeError
+        ? 413
+        : detail.includes('missing_permission') || detail.includes('read-only') || detail.includes('protected') ? 403 : 400;
+      logHttpRequest(requestLog, req, status, 'fs.write', detail);
+      recordFsAudit(options.audit, 'write', requestPath, startedAt, true, identity, dashboardSession, detail);
+      res.status(status).json({ error: status === 413 ? 'fs_upload_too_large' : status === 403 ? 'fs_permission_denied' : 'fs_write_failed' });
+    }
+  });
+
+  app.delete('/api/fs/file', dashboardOriginMiddleware, dashboardAuthMiddleware, async (req, res) => {
+    const requestPath = firstStringQuery(req.query.path);
+    const identity = readClientIdentity(req);
+    const dashboardSession = res.locals.dashboardSession as DashboardSession | undefined;
+    const startedAt = Date.now();
+    if (!requestPath) {
+      res.status(400).json({ error: 'path_required' });
+      return;
+    }
+    try {
+      const removed = await fsRemoveForRequest(resolveLeaseMounts(options.leaseMounts), requestPath, identity);
+      logHttpRequest(requestLog, req, 200, 'fs.remove', removed.path);
+      recordFsAudit(options.audit, 'remove', removed.path, startedAt, false, identity, dashboardSession);
+      res.json({ ...removed, removed: true });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'remove_failed';
+      const status = detail.includes('missing_permission') || detail.includes('read-only') || detail.includes('protected') ? 403 : 404;
+      logHttpRequest(requestLog, req, status, 'fs.remove', detail);
+      recordFsAudit(options.audit, 'remove', requestPath, startedAt, true, identity, dashboardSession, detail);
+      res.status(status).json({ error: status === 403 ? 'fs_permission_denied' : 'fs_remove_failed' });
     }
   });
 
@@ -1737,6 +1932,233 @@ function authLogKind(req: Request): string {
   return 'http.auth';
 }
 
+type FsEntryPayload = StorageProviderStat & {
+  name: string;
+  writeAccess: boolean;
+};
+
+type FsStatPayload = StorageProviderStat & {
+  writeAccess: boolean;
+};
+
+type FsListingPayload = FsStatPayload & {
+  entries: FsEntryPayload[];
+};
+
+async function fsSourcesForRequest(
+  mounts: readonly LocalFolderMountConfig[],
+  identity?: ClientIdentity,
+): Promise<FsEntryPayload[]> {
+  const registry = new MountRegistry([...mounts]);
+  const sources: FsEntryPayload[] = [];
+  for (const mount of registry.mounts()) {
+    if (!pathMayExposeEntry(mount.config.path, 'read', identity)) continue;
+    try {
+      const provider = fsProviderForMount(mount);
+      const stat = await provider.stat('');
+      sources.push(fsEntryPayload(stat, mount, identity, mount.config.name));
+    } catch {
+      // Unavailable roots are omitted from the reusable FS API. The dashboard
+      // local settings view handles stale mount diagnostics separately.
+    }
+  }
+  return sources.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+async function fsListForRequest(
+  mounts: readonly LocalFolderMountConfig[],
+  inputPath: string,
+  identity?: ClientIdentity,
+): Promise<FsListingPayload> {
+  const normalizedPath = normalizeVirtualPath(inputPath);
+  if (normalizedPath === '/') {
+    return {
+      mount: '',
+      path: '/',
+      relativePath: '',
+      type: 'directory',
+      size: 0,
+      mtimeMs: 0,
+      writeAccess: false,
+      entries: await fsSourcesForRequest(mounts, identity),
+    };
+  }
+
+  if (!pathMayExposeEntry(normalizedPath, 'read', identity)) throw new Error('missing_permission');
+  const target = fsTargetForPath(mounts, normalizedPath);
+  const stat = await target.provider.stat(target.relativePath);
+  if (stat.type === 'file' && !pathAllowed(stat.path, 'read', identity)) throw new Error('missing_permission');
+  const entries = stat.type === 'directory'
+    ? (await target.provider.list(target.relativePath))
+        .filter((entry) => pathMayExposeEntry(entry.path, 'read', identity))
+        .map((entry) => fsEntryPayload(entry, target.mount, identity))
+    : [];
+  return {
+    ...fsStatPayload(stat, target.mount, identity),
+    entries,
+  };
+}
+
+async function fsStatForRequest(
+  mounts: readonly LocalFolderMountConfig[],
+  inputPath: string,
+  identity?: ClientIdentity,
+  options: { requireExactRead?: boolean } = {},
+): Promise<FsStatPayload> {
+  const normalizedPath = normalizeVirtualPath(inputPath);
+  if (!pathMayExposeEntry(normalizedPath, 'read', identity)) throw new Error('missing_permission');
+  const target = fsTargetForPath(mounts, normalizedPath);
+  const stat = await target.provider.stat(target.relativePath);
+  if ((options.requireExactRead || stat.type === 'file') && !pathAllowed(stat.path, 'read', identity)) {
+    throw new Error('missing_permission');
+  }
+  return fsStatPayload(stat, target.mount, identity);
+}
+
+async function fsOpenForRequest(
+  mounts: readonly LocalFolderMountConfig[],
+  inputPath: string,
+  identity?: ClientIdentity,
+  range?: { start?: number; end?: number },
+): Promise<StorageProviderReadStream> {
+  const normalizedPath = normalizeVirtualPath(inputPath);
+  if (!pathAllowed(normalizedPath, 'read', identity)) throw new Error('missing_permission');
+  const target = fsTargetForPath(mounts, normalizedPath);
+  return target.provider.openReadStream(target.relativePath, range);
+}
+
+async function fsWriteForRequest(
+  mounts: readonly LocalFolderMountConfig[],
+  inputPath: string,
+  input: NodeJS.ReadableStream,
+  maxBytes: number,
+  identity?: ClientIdentity,
+): Promise<FsStatPayload> {
+  const normalizedPath = normalizeVirtualPath(inputPath);
+  if (!pathAllowed(normalizedPath, 'write', identity)) throw new Error('missing_permission');
+  const target = fsTargetForPath(mounts, normalizedPath);
+  const written = await target.provider.writeStream(target.relativePath, limitFsUploadStream(input, maxBytes));
+  return fsStatPayload(written, target.mount, identity);
+}
+
+async function fsRemoveForRequest(
+  mounts: readonly LocalFolderMountConfig[],
+  inputPath: string,
+  identity?: ClientIdentity,
+): Promise<{ mount: string; path: string }> {
+  const normalizedPath = normalizeVirtualPath(inputPath);
+  if (!pathAllowed(normalizedPath, 'write', identity)) throw new Error('missing_permission');
+  const target = fsTargetForPath(mounts, normalizedPath);
+  await target.provider.remove(target.relativePath);
+  return { mount: target.mount.config.name, path: target.virtualPath };
+}
+
+function fsTargetForPath(mounts: readonly LocalFolderMountConfig[], inputPath: string): {
+  mount: RegisteredMount;
+  relativePath: string;
+  virtualPath: string;
+  provider: LocalFolderStorageProvider;
+} {
+  const resolved = new MountRegistry([...mounts]).resolve(inputPath);
+  return {
+    mount: resolved.mount,
+    relativePath: resolved.relativePath,
+    virtualPath: resolved.virtualPath,
+    provider: fsProviderForMount(resolved.mount),
+  };
+}
+
+function fsProviderForMount(mount: RegisteredMount): LocalFolderStorageProvider {
+  return new LocalFolderStorageProvider(mount, { isTextPath, maxTextBytes: MAX_TEXT_BYTES });
+}
+
+function fsEntryPayload(
+  stat: StorageProviderStat,
+  mount: RegisteredMount,
+  identity?: ClientIdentity,
+  name = path.basename(stat.path),
+): FsEntryPayload {
+  return {
+    ...stat,
+    name,
+    writeAccess: Boolean(mount.config.writeAccess) && pathAllowed(stat.path, 'write', identity),
+  };
+}
+
+function fsStatPayload(stat: StorageProviderStat, mount: RegisteredMount, identity?: ClientIdentity): FsStatPayload {
+  return {
+    ...stat,
+    writeAccess: Boolean(mount.config.writeAccess) && pathAllowed(stat.path, 'write', identity),
+  };
+}
+
+function recordFsAudit(
+  audit: AuditLogger | undefined,
+  action: 'read' | 'write' | 'remove',
+  inputPath: string,
+  startedAt: number,
+  isError: boolean,
+  identity?: ClientIdentity,
+  dashboardSession?: DashboardSession,
+  deniedReason?: string,
+): void {
+  if (!audit) return;
+  const { argKeys, argPreview } = summarizeArgs({ path: inputPath });
+  const clientId = identity?.id ?? dashboardSession?.username;
+  audit.record({
+    ts: new Date().toISOString(),
+    ...(identity && (identity.source === 'token' || identity.source === 'oauth')
+      ? {
+          event: 'token.use' as const,
+          name: identity.id,
+          result: isError ? 'error' as const : 'success' as const,
+        }
+      : {}),
+    connectorId: 'mvmt',
+    tool: `fs.${action}`,
+    ...(clientId ? { clientId } : {}),
+    argKeys,
+    argPreview,
+    isError,
+    ...(deniedReason ? { deniedReason } : {}),
+    durationMs: Date.now() - startedAt,
+  });
+}
+
+function contentTypeForPath(inputPath: string): string {
+  switch (path.extname(inputPath).toLowerCase()) {
+    case '.avif':
+      return 'image/avif';
+    case '.gif':
+      return 'image/gif';
+    case '.heic':
+      return 'image/heic';
+    case '.heif':
+      return 'image/heif';
+    case '.jpg':
+    case '.jpeg':
+      return 'image/jpeg';
+    case '.png':
+      return 'image/png';
+    case '.webp':
+      return 'image/webp';
+    case '.mov':
+      return 'video/quicktime';
+    case '.mp4':
+      return 'video/mp4';
+    case '.pdf':
+      return 'application/pdf';
+    case '.json':
+      return 'application/json; charset=utf-8';
+    case '.md':
+    case '.text':
+    case '.txt':
+      return 'text/plain; charset=utf-8';
+    default:
+      return 'application/octet-stream';
+  }
+}
+
 function resolveAllowLegacyDefaultClient(value: HttpServerOptions['allowLegacyDefaultClient']): boolean | undefined {
   return typeof value === 'function' ? value() : value;
 }
@@ -2059,6 +2481,27 @@ class LeaseUploadTooLargeError extends Error {
   constructor(maxBytes: number) {
     super(`Lease upload exceeds ${maxBytes} bytes`);
   }
+}
+
+class FsUploadTooLargeError extends Error {
+  constructor(maxBytes: number) {
+    super(`FS upload exceeds ${maxBytes} bytes`);
+  }
+}
+
+function limitFsUploadStream(input: NodeJS.ReadableStream, maxBytes: number): NodeJS.ReadableStream {
+  let bytes = 0;
+  const meter = new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      bytes += chunk.length;
+      if (bytes > maxBytes) {
+        callback(new FsUploadTooLargeError(maxBytes));
+        return;
+      }
+      callback(null, chunk);
+    },
+  });
+  return input.pipe(meter);
 }
 
 async function writeLeaseUpload(
