@@ -4835,6 +4835,8 @@ function jsFunctionDeclaration(script: string, name: string): string {
   const braceStart = script.indexOf('{', start);
   if (braceStart === -1) throw new Error(`Missing dashboard script function body: ${name}`);
 
+  // Deliberately simple: these dashboard URL helpers do not contain braces
+  // inside strings or comments, and this test should fail if that changes.
   let depth = 0;
   for (let index = braceStart; index < script.length; index += 1) {
     const char = script[index];
