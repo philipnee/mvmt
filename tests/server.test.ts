@@ -976,6 +976,74 @@ describe('dashboard access', () => {
     }
   });
 
+  it('exposes unavailable mounts in /api/fs/list to local admins only', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-fs-unavailable-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    const aliveRoot = path.join(tmp, 'alive');
+    fs.mkdirSync(aliveRoot, { recursive: true });
+    createPrivilegedUser(usersPath, { username: 'admin', password: 'correct horse battery staple', admin: true });
+    createPrivilegedUser(usersPath, { username: 'viewer', password: 'correct horse battery staple', admin: false });
+    const config = parseConfig({
+      version: 1,
+      mounts: [
+        { name: 'alive', type: 'local_folder', path: '/alive', root: aliveRoot },
+        { name: 'broken', type: 'local_folder', path: '/broken', root: path.join(tmp, 'does-not-exist') },
+      ],
+    });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: config.mounts,
+      privilegedUsersPath: usersPath,
+    });
+    try {
+      const adminCookie = await loginDashboard(server.port, 'admin', 'correct horse battery staple');
+      const adminListing = await fetch(`http://127.0.0.1:${server.port}/api/fs/list?path=${encodeURIComponent('/')}`, {
+        headers: { Cookie: adminCookie },
+      });
+      expect(adminListing.status).toBe(200);
+      const adminBody = await adminListing.json() as { entries: Array<{ path: string; unavailable?: boolean }> };
+      expect(adminBody.entries.find((entry) => entry.path === '/alive')).toMatchObject({ path: '/alive' });
+      expect(adminBody.entries.find((entry) => entry.path === '/alive')?.unavailable).toBeUndefined();
+      expect(adminBody.entries.find((entry) => entry.path === '/broken')).toMatchObject({ path: '/broken', unavailable: true });
+
+      const viewerCookie = await loginDashboard(server.port, 'viewer', 'correct horse battery staple');
+      const viewerListing = await fetch(`http://127.0.0.1:${server.port}/api/fs/list?path=${encodeURIComponent('/')}`, {
+        headers: { Cookie: viewerCookie },
+      });
+      expect(viewerListing.status).toBe(200);
+      const viewerBody = await viewerListing.json() as { entries: Array<{ path: string; unavailable?: boolean }> };
+      expect(viewerBody.entries.map((entry) => entry.path)).toEqual(['/alive']);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('renders the dashboard without referencing the retired /dashboard/api/files endpoint', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-html-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    createPrivilegedUser(usersPath, { username: 'admin', password: 'correct horse battery staple' });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: [],
+      privilegedUsersPath: usersPath,
+    });
+    try {
+      const response = await fetch(`http://127.0.0.1:${server.port}/dashboard`);
+      expect(response.status).toBe(200);
+      const body = await response.text();
+      expect(body).not.toContain('/dashboard/api/files');
+      expect(body).toContain('/api/fs/list');
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('logs in privileged users, creates read/upload/two-way leases, and suffixes collision uploads', async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-test-'));
     const tokenPath = path.join(tmp, '.session-token');
@@ -1004,9 +1072,6 @@ describe('dashboard access', () => {
       requestLog: (entry) => requestLogs.push(entry),
     });
     try {
-      const rejected = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/files`);
-      expect(rejected.status).toBe(401);
-
       const cookie = await loginDashboard(server.port, 'sarah', 'correct horse battery staple');
 
       // Read lease on a file: only 'read' mode is valid.
@@ -1230,7 +1295,7 @@ describe('dashboard access', () => {
       expect(persistedAfterAdd.mounts).toHaveLength(1);
       expect(persistedAfterAdd.mounts[0]?.path).toBe('/photos');
 
-      const filesListing = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/files?path=/photos`, {
+      const filesListing = await fetch(`http://127.0.0.1:${server.port}/api/fs/list?path=/photos`, {
         headers: { Cookie: cookie },
       });
       expect(filesListing.status).toBe(200);
@@ -1302,7 +1367,7 @@ describe('dashboard access', () => {
     });
     try {
       const cookie = await loginDashboard(server.port, 'admin', 'correct horse battery staple');
-      const listing = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/files?path=/`, {
+      const listing = await fetch(`http://127.0.0.1:${server.port}/api/fs/list?path=/`, {
         headers: { Cookie: cookie },
       });
       expect(listing.status).toBe(200);
@@ -1808,7 +1873,7 @@ describe('dashboard access', () => {
       });
 
       const cookie = await loginDashboard(server.port, 'sarah', 'correct horse battery staple');
-      await fetch(`http://127.0.0.1:${server.port}/dashboard/api/files?path=/`, { headers: { Cookie: cookie } });
+      await fetch(`http://127.0.0.1:${server.port}/api/fs/list?path=/`, { headers: { Cookie: cookie } });
       const leaseResp = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/leases`, {
         method: 'POST',
         headers: { Cookie: cookie, 'Content-Type': 'application/json' },
@@ -1821,7 +1886,7 @@ describe('dashboard access', () => {
       const lines = fs.readFileSync(auditPath, 'utf-8').split('\n').filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
       const kinds = lines.map((entry) => entry.kind);
       expect(kinds).toContain('dashboard.login'); // includes both invalid_credentials and ok rows
-      expect(kinds).toContain('dashboard.files');
+      expect(kinds).toContain('fs.list');
       expect(kinds).toContain('dashboard.leases');
       expect(kinds).toContain('lease.request');
       // every entry is tagged http and carries source ip
@@ -1885,8 +1950,14 @@ describe('dashboard access', () => {
       expect(html).toContain('function scrubDashboardUrl()');
       expect(html).toContain("history.replaceState(null, '', location.pathname)");
       expect(html).toContain("var DASHBOARD_API_PREFIX = '/dashboard/api/'");
+      expect(html).toContain("var APP_API_PREFIX = '/api/'");
       expect(html).toContain('function dashboardRequestUrl(url)');
       expect(html).toContain("return dashboardBasePath() + '/api/' + url.slice(DASHBOARD_API_PREFIX.length)");
+      expect(html).toContain('function appBasePath()');
+      expect(html).toContain('return appBasePath() + url;');
+      expect(dashboardRequestUrlFromHtml(html, '/dashboard', '/api/fs/list?path=%2F')).toBe('/api/fs/list?path=%2F');
+      expect(dashboardRequestUrlFromHtml(html, '/t/demo/dashboard', '/api/fs/list?path=%2F')).toBe('/t/demo/api/fs/list?path=%2F');
+      expect(dashboardRequestUrlFromHtml(html, '/t/demo/dashboard', '/dashboard/api/leases')).toBe('/t/demo/dashboard/api/leases');
       expect(html).toContain("api('/dashboard/api/local-path-picker'");
       expect(html).toContain('Choose a local file or folder first.');
       expect(html).toContain('Remove source');
@@ -4726,6 +4797,57 @@ function inlineScriptBodies(html: string): string[] {
   }
 
   return bodies;
+}
+
+function dashboardRequestUrlFromHtml(html: string, pathname: string, url: string): string {
+  const script = inlineScriptBodies(html).find((body) => body.includes('function dashboardRequestUrl'));
+  expect(script).toBeTruthy();
+  const snippet = [
+    jsVariableDeclaration(script ?? '', 'DASHBOARD_API_PREFIX'),
+    jsVariableDeclaration(script ?? '', 'APP_API_PREFIX'),
+    jsFunctionDeclaration(script ?? '', 'dashboardBasePath'),
+    jsFunctionDeclaration(script ?? '', 'appBasePath'),
+    jsFunctionDeclaration(script ?? '', 'dashboardRequestUrl'),
+  ].join('\n');
+  const sandbox = {
+    location: { pathname, search: '', hash: '' },
+    result: '',
+  };
+  Function(
+    'sandbox',
+    `with (sandbox) {
+      ${snippet}
+      sandbox.result = dashboardRequestUrl(${JSON.stringify(url)});
+    }`,
+  )(sandbox);
+  return sandbox.result;
+}
+
+function jsVariableDeclaration(script: string, name: string): string {
+  const match = script.match(new RegExp(`var ${name} = [^;]+;`));
+  if (!match) throw new Error(`Missing dashboard script variable: ${name}`);
+  return match[0];
+}
+
+function jsFunctionDeclaration(script: string, name: string): string {
+  const start = script.indexOf(`function ${name}(`);
+  if (start === -1) throw new Error(`Missing dashboard script function: ${name}`);
+  const braceStart = script.indexOf('{', start);
+  if (braceStart === -1) throw new Error(`Missing dashboard script function body: ${name}`);
+
+  // Deliberately simple: these dashboard URL helpers do not contain braces
+  // inside strings or comments, and this test should fail if that changes.
+  let depth = 0;
+  for (let index = braceStart; index < script.length; index += 1) {
+    const char = script[index];
+    if (char === '{') depth += 1;
+    if (char === '}') {
+      depth -= 1;
+      if (depth === 0) return script.slice(start, index + 1);
+    }
+  }
+
+  throw new Error(`Unterminated dashboard script function: ${name}`);
 }
 
 function findScriptOpenTag(lowerHtml: string, from: number): number {
