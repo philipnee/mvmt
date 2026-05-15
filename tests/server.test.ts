@@ -1106,6 +1106,8 @@ describe('dashboard access', () => {
       expect(body).toContain('id="view-apps-panel"');
       expect(body).toContain('id="apps-grid"');
       expect(body).toContain("api('/dashboard/api/apps')");
+      expect(body).toContain('Apps failed to load. Click Apps again to retry.');
+      expect(body).toContain('state.appsLoaded = false;');
       expect(body).toContain("appBasePath() + '/apps/'");
     } finally {
       await server.close();

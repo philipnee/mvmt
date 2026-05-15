@@ -4202,8 +4202,9 @@ table.t{border-collapse:collapse;width:100%}
       renderApps();
     } catch (err) {
       state.apps = [];
-      state.appsLoaded = true;
+      state.appsLoaded = false;
       renderApps();
+      showError(err);
     }
   }
 
@@ -4213,6 +4214,7 @@ table.t{border-collapse:collapse;width:100%}
     $('apps-count').textContent = state.apps.length ? '(' + state.apps.length + ')' : '';
     grid.innerHTML = '';
     if (state.apps.length === 0) {
+      empty.textContent = state.appsLoaded ? 'No apps installed yet.' : 'Apps failed to load. Click Apps again to retry.';
       empty.classList.remove('hidden');
       return;
     }
