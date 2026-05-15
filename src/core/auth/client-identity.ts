@@ -1,4 +1,3 @@
-import type { Request } from 'express';
 import { ClientConfig, PermissionConfig } from '../../config/schema.js';
 import { verifyApiToken } from '../../utils/api-token-hash.js';
 import { isExpired } from '../../utils/token-ttl.js';
@@ -173,15 +172,6 @@ export function isQuarantined(identity: ClientIdentity): boolean {
   return identity.source === 'quarantine';
 }
 
-export function readClientIdentity(req: Request): ClientIdentity | undefined {
-  const value = req.res?.locals?.mvmtClient;
-  return isClientIdentity(value) ? value : undefined;
-}
-
-export function attachClientIdentity(req: Request, identity: ClientIdentity): void {
-  if (req.res) req.res.locals.mvmtClient = identity;
-}
-
 function identityFromConfig(
   client: ClientConfig,
   source: 'token' | 'oauth',
@@ -208,7 +198,7 @@ function extractBearer(authHeader: string): string | undefined {
   return token.length > 0 ? token : undefined;
 }
 
-function isClientIdentity(value: unknown): value is ClientIdentity {
+export function isClientIdentity(value: unknown): value is ClientIdentity {
   if (!value || typeof value !== 'object') return false;
   const v = value as Record<string, unknown>;
   return typeof v.id === 'string' && typeof v.name === 'string' && typeof v.source === 'string';
