@@ -1,5 +1,8 @@
+import { randomUUID } from 'crypto';
+import { createReadStream, createWriteStream, ReadStream } from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
+import { pipeline } from 'stream/promises';
 import { joinVirtualPath, normalizePathSeparators, RegisteredMount, toVirtualRelative } from './mount-registry.js';
 import { isGloballyDeniedPath, matchesConfiguredOrGlobalPattern } from './path-policy.js';
 
@@ -21,12 +24,29 @@ export interface StorageProviderEntry {
   mtimeMs: number;
 }
 
+export interface StorageProviderStat {
+  mount: string;
+  path: string;
+  relativePath: string;
+  type: 'file' | 'directory';
+  size: number;
+  mtimeMs: number;
+}
+
+export interface StorageProviderReadStream {
+  file: StorageProviderStat & { type: 'file' };
+  stream: ReadStream;
+}
+
 export interface StorageProvider {
   readonly mount: RegisteredMount;
   list(relativePath?: string): Promise<StorageProviderEntry[]>;
   exists(relativePath: string): Promise<boolean>;
+  stat(relativePath: string): Promise<StorageProviderStat>;
+  openReadStream(relativePath: string, range?: { start?: number; end?: number }): Promise<StorageProviderReadStream>;
   read(relativePath: string): Promise<StorageProviderFile>;
   write(relativePath: string, content: string): Promise<StorageProviderFile>;
+  writeStream(relativePath: string, input: NodeJS.ReadableStream): Promise<StorageProviderStat & { type: 'file' }>;
   remove(relativePath: string): Promise<void>;
   walkTextFiles(): AsyncIterable<StorageProviderFile>;
 }
@@ -63,16 +83,16 @@ export class LocalFolderStorageProvider implements StorageProvider {
     for (const entry of entries) {
       const childRelative = joinRelative(target.relativePath, entry.name);
       if (this.isExcluded(childRelative)) continue;
-      if (!entry.isDirectory() && !this.options.isTextPath(entry.name)) continue;
       const realPath = path.join(target.realPath, entry.name);
       if (!await this.realPathWithinMount(realPath)) continue;
       const itemStat = await fsp.stat(realPath);
+      if (!itemStat.isDirectory() && !itemStat.isFile()) continue;
       result.push({
         mount: this.mount.config.name,
         path: joinVirtualPath(this.mount.config.path, childRelative),
         relativePath: childRelative,
-        type: entry.isDirectory() ? 'directory' : 'file',
-        size: itemStat.size,
+        type: itemStat.isDirectory() ? 'directory' : 'file',
+        size: itemStat.isDirectory() ? 0 : itemStat.size,
         mtimeMs: itemStat.mtimeMs,
       });
     }
@@ -86,6 +106,36 @@ export class LocalFolderStorageProvider implements StorageProvider {
     } catch {
       return false;
     }
+  }
+
+  async stat(relativePath: string): Promise<StorageProviderStat> {
+    const target = this.resolve(relativePath);
+    await this.assertRealPathWithinMount(target);
+    const stat = await fsp.stat(target.realPath);
+    if (!stat.isDirectory() && !stat.isFile()) throw new Error(`${target.virtualPath} is not a file or directory`);
+    return {
+      mount: this.mount.config.name,
+      path: target.virtualPath,
+      relativePath: target.relativePath,
+      type: stat.isDirectory() ? 'directory' : 'file',
+      size: stat.isDirectory() ? 0 : stat.size,
+      mtimeMs: stat.mtimeMs,
+    };
+  }
+
+  async openReadStream(
+    relativePath: string,
+    range: { start?: number; end?: number } = {},
+  ): Promise<StorageProviderReadStream> {
+    const file = await this.stat(relativePath);
+    if (file.type !== 'file') throw new Error(`${file.path} is not a file`);
+    const fileStat = file as StorageProviderStat & { type: 'file' };
+    const target = this.resolve(relativePath);
+    const stream = createReadStream(target.realPath, {
+      ...(range.start === undefined ? {} : { start: range.start }),
+      ...(range.end === undefined ? {} : { end: range.end }),
+    });
+    return { file: fileStat, stream };
   }
 
   async read(relativePath: string): Promise<StorageProviderFile> {
@@ -117,6 +167,28 @@ export class LocalFolderStorageProvider implements StorageProvider {
     await fsp.mkdir(path.dirname(target.realPath), { recursive: true });
     await fsp.writeFile(target.realPath, content, 'utf-8');
     return this.read(relativePath);
+  }
+
+  async writeStream(relativePath: string, input: NodeJS.ReadableStream): Promise<StorageProviderStat & { type: 'file' }> {
+    const target = this.resolve(relativePath);
+    this.assertWritable(target);
+    await this.assertRealPathWithinMount(target, { allowMissingLeaf: true });
+    await fsp.mkdir(path.dirname(target.realPath), { recursive: true });
+    const parentRealPath = await fsp.realpath(path.dirname(target.realPath));
+    const rootRealPath = await fsp.realpath(this.mount.root);
+    if (!isWithin(rootRealPath, parentRealPath)) {
+      throw new Error(`${target.virtualPath} escapes mount root`);
+    }
+    const tempPath = path.join(parentRealPath, `.mvmt-write-${process.pid}-${Date.now()}-${randomUUID()}.tmp`);
+    try {
+      await pipeline(input, createWriteStream(tempPath, { flags: 'wx', mode: 0o600 }));
+      await fsp.rename(tempPath, target.realPath);
+      const written = await this.stat(relativePath);
+      if (written.type !== 'file') throw new Error(`${target.virtualPath} is not a file`);
+      return written as StorageProviderStat & { type: 'file' };
+    } finally {
+      await fsp.unlink(tempPath).catch(() => undefined);
+    }
   }
 
   async remove(relativePath: string): Promise<void> {

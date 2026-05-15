@@ -66,6 +66,28 @@ describe('LocalFolderStorageProvider', () => {
     expect(files).toEqual(['/workspace/note.md']);
   });
 
+  it('stats and streams binary files without applying the text size cap', async () => {
+    const bytes = Buffer.from([0, 1, 2, 3, 4, 5]);
+    await fs.writeFile(path.join(tmp, 'photo.jpg'), bytes);
+    const provider = createProvider(tmp, true, 4);
+
+    await expect(provider.list()).resolves.toEqual([
+      expect.objectContaining({ path: '/workspace/photo.jpg', type: 'file', size: bytes.length }),
+    ]);
+    await expect(provider.read('photo.jpg')).rejects.toThrow('not a supported text file');
+    await expect(provider.stat('photo.jpg')).resolves.toMatchObject({
+      path: '/workspace/photo.jpg',
+      type: 'file',
+      size: bytes.length,
+    });
+
+    const { file, stream } = await provider.openReadStream('photo.jpg', { start: 2, end: 4 });
+    expect(file).toMatchObject({ path: '/workspace/photo.jpg', type: 'file' });
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+    expect(Buffer.concat(chunks)).toEqual(Buffer.from([2, 3, 4]));
+  });
+
   it('supports a single text file as the mount root', async () => {
     const filePath = path.join(tmp, 'note.md');
     await fs.writeFile(filePath, 'single file mount', 'utf-8');
