@@ -1107,6 +1107,7 @@ describe('dashboard access', () => {
       const listBody = await list.json() as { apps: Array<{ id: string; label: string; description: string }> };
       expect(listBody.apps).toEqual(expect.arrayContaining([
         expect.objectContaining({ id: 'file-inspector', label: 'File Inspector' }),
+        expect.objectContaining({ id: 'photos', label: 'Photos' }),
       ]));
 
       const served = await fetch(`http://127.0.0.1:${server.port}/apps/file-inspector`, { headers: { Cookie: cookie } });
@@ -1117,6 +1118,21 @@ describe('dashboard access', () => {
       expect(html).toContain('/api/fs/sources');
       expect(html).toContain('/api/fs/list');
       expect(html).toContain('/api/fs/stat');
+      expect(html).toContain('ENTRY_BATCH_SIZE = 200');
+      expect(html).toContain('Show more entries');
+      expect(html).toContain('Refresh stat');
+
+      const photos = await fetch(`http://127.0.0.1:${server.port}/apps/photos`, { headers: { Cookie: cookie } });
+      expect(photos.status).toBe(200);
+      expect(photos.headers.get('content-type')).toMatch(/text\/html/);
+      const photosHtml = await photos.text();
+      expect(photosHtml).toContain('Photos');
+      expect(photosHtml).toContain('/api/fs/sources');
+      expect(photosHtml).toContain('/api/fs/list');
+      expect(photosHtml).toContain('/api/fs/file?path=');
+      expect(photosHtml).toContain('PHOTO_BATCH_SIZE = 48');
+      expect(photosHtml).toContain('Show more photos');
+      expect(photosHtml).not.toContain('/api/fs/write');
 
       const missing = await fetch(`http://127.0.0.1:${server.port}/apps/unknown-app`, { headers: { Cookie: cookie } });
       expect(missing.status).toBe(404);
@@ -1172,13 +1188,40 @@ describe('dashboard access', () => {
       const html = await served.text();
 
       // Local path: no workspace prefix to add.
-      expect(fileInspectorAppBaseFromHtml(html, '/apps/file-inspector')).toBe('');
-      expect(fileInspectorAppBaseFromHtml(html, '/apps/file-inspector/')).toBe('');
+      expect(appBaseFromHtml(html, '/apps/file-inspector')).toBe('');
+      expect(appBaseFromHtml(html, '/apps/file-inspector/')).toBe('');
       // Relay path: SPA must preserve the workspace prefix when assembling
       // /api/fs/* and back-to-dashboard URLs, or remote calls land at the
       // relay root instead of the agent.
-      expect(fileInspectorAppBaseFromHtml(html, '/t/demo/apps/file-inspector')).toBe('/t/demo');
-      expect(fileInspectorAppBaseFromHtml(html, '/t/demo/apps/file-inspector/')).toBe('/t/demo');
+      expect(appBaseFromHtml(html, '/t/demo/apps/file-inspector')).toBe('/t/demo');
+      expect(appBaseFromHtml(html, '/t/demo/apps/file-inspector/')).toBe('/t/demo');
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the Photos SPA relay-prefix-safe', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-photos-prefix-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    createPrivilegedUser(usersPath, { username: 'curious', password: 'correct horse battery staple' });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: [],
+      privilegedUsersPath: usersPath,
+    });
+    try {
+      const cookie = await loginDashboard(server.port, 'curious', 'correct horse battery staple');
+      const served = await fetch(`http://127.0.0.1:${server.port}/apps/photos`, { headers: { Cookie: cookie } });
+      expect(served.status).toBe(200);
+      const html = await served.text();
+
+      expect(appBaseFromHtml(html, '/apps/photos')).toBe('');
+      expect(appBaseFromHtml(html, '/apps/photos/')).toBe('');
+      expect(appBaseFromHtml(html, '/t/demo/apps/photos')).toBe('/t/demo');
+      expect(appBaseFromHtml(html, '/t/demo/apps/photos/')).toBe('/t/demo');
     } finally {
       await server.close();
       fs.rmSync(tmp, { recursive: true, force: true });
@@ -4940,7 +4983,7 @@ function inlineScriptBodies(html: string): string[] {
   return bodies;
 }
 
-function fileInspectorAppBaseFromHtml(html: string, pathname: string): string {
+function appBaseFromHtml(html: string, pathname: string): string {
   const script = inlineScriptBodies(html).find((body) => body.includes('function appBase'));
   expect(script).toBeTruthy();
   const fn = jsFunctionDeclaration(script ?? '', 'appBase');
