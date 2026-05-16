@@ -903,13 +903,48 @@ describe('dashboard access', () => {
         ],
       });
 
+      const cold = await fetch(`http://127.0.0.1:${server.port}/api/fs/file?path=${encodeURIComponent('/photos/photo.jpg')}`, {
+        headers: { Cookie: cookie },
+      });
+      expect(cold.status).toBe(200);
+      const etag = cold.headers.get('etag');
+      expect(etag).toMatch(/^W\/"[0-9a-f]{24}"$/);
+      expect(cold.headers.get('cache-control')).toBe('private, max-age=300, must-revalidate');
+      expect(cold.headers.get('last-modified')).toBeTruthy();
+      expect([...Buffer.from(await cold.arrayBuffer())]).toEqual([...imageBytes]);
+
+      const cached = await fetch(`http://127.0.0.1:${server.port}/api/fs/file?path=${encodeURIComponent('/photos/photo.jpg')}`, {
+        headers: { Cookie: cookie, 'If-None-Match': etag ?? '' },
+      });
+      expect(cached.status).toBe(304);
+      expect(cached.headers.get('etag')).toBe(etag);
+      expect(await cached.text()).toBe('');
+
+      const cachedByDate = await fetch(`http://127.0.0.1:${server.port}/api/fs/file?path=${encodeURIComponent('/photos/photo.jpg')}`, {
+        headers: { Cookie: cookie, 'If-Modified-Since': cold.headers.get('last-modified') ?? '' },
+      });
+      expect(cachedByDate.status).toBe(304);
+      expect(cachedByDate.headers.get('etag')).toBe(etag);
+      expect(await cachedByDate.text()).toBe('');
+
+      const updatedImageBytes = Buffer.from([9, 8, 7, 6, 5, 4, 3, 2]);
+      fs.writeFileSync(path.join(photosRoot, 'photo.jpg'), updatedImageBytes);
+      const refreshed = await fetch(`http://127.0.0.1:${server.port}/api/fs/file?path=${encodeURIComponent('/photos/photo.jpg')}`, {
+        headers: { Cookie: cookie, 'If-None-Match': etag ?? '' },
+      });
+      expect(refreshed.status).toBe(200);
+      expect(refreshed.headers.get('etag')).not.toBe(etag);
+      expect([...Buffer.from(await refreshed.arrayBuffer())]).toEqual([...updatedImageBytes]);
+
       const range = await fetch(`http://127.0.0.1:${server.port}/api/fs/file?path=${encodeURIComponent('/photos/photo.jpg')}`, {
         headers: { Cookie: cookie, Range: 'bytes=2-4' },
       });
       expect(range.status).toBe(206);
-      expect(range.headers.get('content-range')).toBe('bytes 2-4/7');
+      expect(range.headers.get('cache-control')).toBe('private, max-age=300, must-revalidate');
+      expect(range.headers.get('etag')).toBe(refreshed.headers.get('etag'));
+      expect(range.headers.get('content-range')).toBe('bytes 2-4/8');
       expect(range.headers.get('content-type')).toBe('image/jpeg');
-      expect([...Buffer.from(await range.arrayBuffer())]).toEqual([2, 3, 4]);
+      expect([...Buffer.from(await range.arrayBuffer())]).toEqual([7, 6, 5]);
 
       const writeBody = '{"saved":true}';
       const write = await fetch(`http://127.0.0.1:${server.port}/api/fs/file?path=${encodeURIComponent('/photos/upload.json')}`, {
@@ -930,6 +965,7 @@ describe('dashboard access', () => {
       expect(auditEntries).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ tool: 'fs.read', clientId: 'photo-admin', isError: false }),
+          expect.objectContaining({ tool: 'fs.read', clientId: 'photo-admin', isError: false, deniedReason: 'cache_hit' }),
           expect.objectContaining({ tool: 'fs.write', clientId: 'photo-admin', isError: false }),
           expect.objectContaining({ tool: 'fs.remove', clientId: 'photo-admin', isError: false }),
         ]),
