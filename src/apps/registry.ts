@@ -1,4 +1,5 @@
 import { fileInspectorApp } from './file-inspector/manifest.js';
+import { photosApp } from './photos/manifest.js';
 
 // AppManifest is the minimal first-party-app contract. Each manifest carries
 // a self-contained HTML payload (same inline pattern as DASHBOARD_PAGE_HTML)
@@ -17,7 +18,7 @@ export interface AppManifest {
   html: string;
 }
 
-export const INSTALLED_APPS: AppManifest[] = [fileInspectorApp];
+export const INSTALLED_APPS: AppManifest[] = [fileInspectorApp, photosApp];
 
 export function getApp(id: string): AppManifest | undefined {
   return INSTALLED_APPS.find((app) => app.id === id);
