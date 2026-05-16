@@ -1008,13 +1008,22 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
     const start = range?.start ?? 0;
     const end = range?.end ?? Math.max(0, file.size - 1);
     const status = range ? 206 : 200;
+    const etag = fsFileEtag(file);
+    const lastModified = new Date(file.mtimeMs).toUTCString();
+    if (fsFileNotModified(req, file, etag)) {
+      res.status(304);
+      setFsFileCacheHeaders(res, etag, lastModified);
+      logHttpRequest(requestLog, req, 304, 'fs.file', 'cache_hit');
+      recordFsAudit(options.audit, 'read', file.path, startedAt, false, identity, dashboardSession, 'cache_hit');
+      res.end();
+      return;
+    }
+
     res.status(status);
-    res.setHeader('Accept-Ranges', 'bytes');
-    res.setHeader('Cache-Control', 'no-store');
+    setFsFileCacheHeaders(res, etag, lastModified);
     res.setHeader('Content-Disposition', `inline; filename="${escapeHeaderValue(path.basename(file.path))}"`);
     res.setHeader('Content-Length', String(file.size === 0 ? 0 : end - start + 1));
     res.setHeader('Content-Type', contentTypeForPath(file.path));
-    res.setHeader('Last-Modified', new Date(file.mtimeMs).toUTCString());
     res.setHeader('X-Content-Type-Options', 'nosniff');
     if (range) res.setHeader('Content-Range', `bytes ${start}-${end}/${file.size}`);
     logHttpRequest(requestLog, req, status, 'fs.file', file.path);
@@ -2115,6 +2124,49 @@ function fsStatPayload(stat: StorageProviderStat, mount: RegisteredMount, identi
     ...stat,
     writeAccess: Boolean(mount.config.writeAccess) && pathAllowed(stat.path, 'write', identity),
   };
+}
+
+function fsFileEtag(file: Pick<FsStatPayload, 'path' | 'size' | 'mtimeMs'>): string {
+  const digest = createHash('sha256')
+    .update(file.path)
+    .update('\0')
+    .update(String(file.size))
+    .update('\0')
+    .update(String(Math.trunc(file.mtimeMs)))
+    .digest('hex')
+    .slice(0, 24);
+  return `W/"${digest}"`;
+}
+
+function setFsFileCacheHeaders(res: Response, etag: string, lastModified: string): void {
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('Cache-Control', 'private, max-age=300, must-revalidate');
+  res.setHeader('ETag', etag);
+  res.setHeader('Last-Modified', lastModified);
+  res.setHeader('Vary', 'Range');
+}
+
+function fsFileNotModified(req: Request, file: Pick<FsStatPayload, 'mtimeMs'>, etag: string): boolean {
+  const ifNoneMatch = firstHeaderValue(req.headers['if-none-match']);
+  if (ifNoneMatch) return etagHeaderMatches(ifNoneMatch, etag);
+
+  const ifModifiedSince = firstHeaderValue(req.headers['if-modified-since']);
+  if (!ifModifiedSince) return false;
+  const sinceMs = Date.parse(ifModifiedSince);
+  if (!Number.isFinite(sinceMs)) return false;
+  return Math.floor(file.mtimeMs / 1000) * 1000 <= sinceMs;
+}
+
+function etagHeaderMatches(headerValue: string, etag: string): boolean {
+  const expected = normalizeEntityTag(etag);
+  return headerValue
+    .split(',')
+    .map((value) => value.trim())
+    .some((value) => value === '*' || normalizeEntityTag(value) === expected);
+}
+
+function normalizeEntityTag(value: string): string {
+  return value.replace(/^W\//i, '').trim();
 }
 
 function fsListOptionsForRequest(req: Request, res: Response): FsListOptions {
