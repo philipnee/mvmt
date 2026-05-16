@@ -9,89 +9,55 @@ const PHOTOS_HTML = `<!doctype html>
 <title>Photos - mvmt</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <style>
-:root{--text:#1d1d1f;--muted:#6e6e73;--border:#d2d2d7;--bg:#f5f5f7;--card:#fff;--accent:#0a84ff}
-*{box-sizing:border-box}
-body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:var(--text);background:var(--bg)}
-.shell{min-height:100vh;display:flex;flex-direction:column}
-.topbar{height:58px;display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:0 1.25rem;background:rgba(255,255,255,.86);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:10;backdrop-filter:saturate(180%) blur(16px)}
-.title{display:flex;align-items:center;gap:.7rem;min-width:0}
-.title h1{font-size:1.05rem;margin:0;font-weight:650}
-.crumbs{display:flex;align-items:center;gap:.35rem;color:var(--muted);font-size:.86rem;min-width:0;overflow:hidden;white-space:nowrap}
-.crumbs a,.back{color:var(--accent);text-decoration:none}
-.crumbs a:hover,.back:hover{text-decoration:underline}
-.main{display:grid;grid-template-columns:220px minmax(0,1fr);gap:0;min-height:calc(100vh - 58px)}
-.sidebar{border-right:1px solid var(--border);background:#fbfbfd;padding:1rem}
-.sidebar h2{font-size:.75rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin:.25rem .45rem .6rem}
-.source-list{display:flex;flex-direction:column;gap:.25rem}
-.source-btn{appearance:none;border:0;background:transparent;color:var(--text);text-align:left;border-radius:7px;padding:.48rem .55rem;font:inherit;font-size:.9rem;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.source-btn:hover{background:#ececf0}
-.source-btn.active{background:#e6f1ff;color:#005dbb;font-weight:600}
-.content{padding:1rem 1.2rem 2rem}
-.status{color:var(--muted);font-size:.9rem;margin:.5rem 0 1rem}
-.err{color:#c0392b}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(154px,1fr));gap:14px;align-items:start}
-.tile{border:0;background:transparent;padding:0;text-align:left;color:inherit;cursor:pointer;min-width:0}
-.album,.photo{background:var(--card);border:1px solid var(--border);border-radius:10px;overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,.04)}
-.album{height:154px;display:flex;align-items:center;justify-content:center;color:var(--muted);font-weight:600}
-.album::before{content:'';display:block;width:62px;height:46px;border:2px solid #9aa8ba;border-radius:5px;background:linear-gradient(#fff,#edf2f8);box-shadow:0 -7px 0 -2px #c8d4e4}
-.photo{aspect-ratio:1/1;background:#ececf0}
-.photo img{display:block;width:100%;height:100%;object-fit:cover}
-.photo.loading::after,.photo.error::after{display:flex;align-items:center;justify-content:center;height:100%;padding:.75rem;text-align:center;color:var(--muted);font-size:.8rem}
-.photo.loading::after{content:'Loading...'}
-.photo.error::after{content:'Preview unavailable'}
-.caption{font-size:.82rem;line-height:1.2;margin:.45rem .1rem 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.load-more{height:154px;border:1px dashed var(--border);border-radius:10px;background:rgba(255,255,255,.75);color:var(--accent);font-weight:600;display:flex;align-items:center;justify-content:center}
-.empty{border:1px dashed var(--border);border-radius:10px;padding:2rem;color:var(--muted);background:rgba(255,255,255,.72);text-align:center}
-.viewer{position:fixed;inset:0;background:rgba(0,0,0,.86);display:flex;flex-direction:column;z-index:30}
-.viewer.hidden{display:none}
-.viewer-bar{height:56px;display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:0 1rem;color:#fff}
-.viewer-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.95rem}
-.viewer-actions{display:flex;align-items:center;gap:.6rem;flex:none}
-.viewer-actions a,.viewer-actions button{border:1px solid rgba(255,255,255,.28);background:rgba(255,255,255,.1);color:#fff;border-radius:7px;padding:.42rem .7rem;text-decoration:none;font:inherit;cursor:pointer}
-.viewer-stage{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:0 1rem 1rem}
-.viewer-stage img{max-width:100%;max-height:100%;object-fit:contain;box-shadow:0 8px 40px rgba(0,0,0,.35)}
-@media(max-width:720px){.main{grid-template-columns:1fr}.sidebar{border-right:0;border-bottom:1px solid var(--border)}.source-list{flex-direction:row;overflow-x:auto}.source-btn{flex:none}.grid{grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:10px}.album{height:118px}.content{padding:.8rem}.topbar{align-items:flex-start;height:auto;min-height:58px;padding:.75rem .9rem;flex-direction:column}.back{align-self:flex-end}}
+:root{--bg:#FAFAF7;--fg:#1A1A18;--muted:#8A8A80;--accent:#C4421A;--border:#E2E2DA;--surface:#F2F2ED;--dot:#D4D4CC;--font-body:Georgia,serif;--font-mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}
+@media(prefers-color-scheme:dark){:root{--bg:#141413;--fg:#E8E8E0;--muted:#7A7A70;--accent:#E8693F;--border:#2A2A28;--surface:#1E1E1C;--dot:#222220}}
+*{margin:0;padding:0;box-sizing:border-box}
+html{font-size:16px;-webkit-font-smoothing:antialiased}
+body{font-family:var(--font-body);background:var(--bg);color:var(--fg);line-height:1.7;min-height:100vh;position:relative}
+body:before{content:"";position:fixed;inset:0;background-image:radial-gradient(circle,var(--dot) .6px,transparent .6px);background-size:28px 28px;opacity:.45;pointer-events:none;z-index:0}
+a,button{font:inherit;color:inherit}
+button{cursor:pointer}
+.page-wide{position:relative;z-index:1;max-width:960px;margin:0 auto;padding:3rem 2rem 6rem}
+.crumbs{display:flex;align-items:center;gap:.35rem;flex-wrap:wrap;margin-bottom:1.25rem;font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+.crumbs a{color:var(--muted);text-decoration:none;border-bottom:1px solid transparent}
+.crumbs a:hover{color:var(--accent);border-bottom-color:var(--accent)}
+.folders{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1.5rem}
+.folder{font-family:var(--font-mono);font-size:12px;color:var(--muted);background:transparent;border:1px solid var(--border);border-radius:4px;padding:.35rem .6rem;transition:border-color .2s,color .2s}
+.folder:hover{color:var(--accent);border-color:var(--accent)}
+.photo-grid{columns:3;column-gap:.75rem}
+.photo-tile{display:block;width:100%;margin-bottom:.75rem;border:0;background:var(--surface);border-radius:4px;min-height:160px;overflow:hidden;break-inside:avoid;transition:opacity .2s}
+.photo-tile.loaded{min-height:0;background:transparent}
+.photo-tile:hover{opacity:.85}
+.photo-tile img{display:block;width:100%;border-radius:4px;opacity:0;transition:opacity .18s}
+.photo-tile.loaded img{opacity:1}
+.lightbox{position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.9);display:flex;align-items:center;justify-content:center;cursor:pointer;padding:5vw}
+.lightbox.hidden{display:none}
+.lightbox img{max-width:90vw;max-height:90vh;object-fit:contain;border-radius:4px}
+.empty{font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+.sentinel{height:1px}
+.sentinel.hidden{display:none}
+@media(max-width:600px){.page-wide{padding:2rem 1.25rem 4rem}.photo-grid{columns:2}.photo-tile{min-height:120px}}
 </style>
 </head>
 <body>
-<div class="shell">
-  <header class="topbar">
-    <div class="title">
-      <h1>Photos</h1>
-      <nav class="crumbs" id="crumbs"></nav>
-    </div>
-    <a class="back" id="back">Dashboard</a>
-  </header>
-  <main class="main">
-    <aside class="sidebar">
-      <h2>Sources</h2>
-      <div class="source-list" id="sources"><div class="status">Loading...</div></div>
-    </aside>
-    <section class="content">
-      <div class="status" id="status">Loading...</div>
-      <div class="grid" id="grid"></div>
-    </section>
-  </main>
-</div>
-<div class="viewer hidden" id="viewer" role="dialog" aria-modal="true">
-  <div class="viewer-bar">
-    <div class="viewer-title" id="viewer-title"></div>
-    <div class="viewer-actions">
-      <a id="viewer-download" download>Download</a>
-      <button type="button" id="viewer-close">Close</button>
-    </div>
-  </div>
-  <div class="viewer-stage" id="viewer-stage"></div>
-</div>
+<main class="page-wide">
+  <nav class="crumbs" id="crumbs"></nav>
+  <div class="folders" id="folders"></div>
+  <div class="photo-grid" id="grid"></div>
+  <div class="sentinel hidden" id="sentinel"></div>
+</main>
+<div class="lightbox hidden" id="lightbox" role="dialog" aria-modal="true"></div>
 <script>
 (function () {
-  var PHOTO_BATCH_SIZE = 48;
+  var PHOTO_BATCH_SIZE = 60;
   var MAX_IMAGE_LOADS = 4;
   var IMAGE_EXTENSIONS = { '.avif': true, '.gif': true, '.jpg': true, '.jpeg': true, '.png': true, '.webp': true };
   var state = { path: '/', sources: [], entries: [], visiblePhotoCount: PHOTO_BATCH_SIZE };
   var activeImageLoads = 0;
   var pendingImageLoads = [];
   var imageLoadGeneration = 0;
+  var sentinelObserver = null;
+
   function appBase() {
     var p = location.pathname.replace(/\\/+$/, '');
     var marker = '/apps/photos';
@@ -104,19 +70,18 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif
   }
   function $(id) { return document.getElementById(id); }
   function fileUrl(path) { return appBase() + '/api/fs/file?path=' + encodeURIComponent(path); }
-  function ext(path) {
-    var name = (path || '').toLowerCase();
+  function ext(inputPath) {
+    var name = (inputPath || '').toLowerCase();
     var dot = name.lastIndexOf('.');
     return dot >= 0 ? name.slice(dot) : '';
   }
   function isImage(entry) { return entry.type === 'file' && !!IMAGE_EXTENSIONS[ext(entry.path || entry.name)]; }
   function resetImageQueue() {
     imageLoadGeneration += 1;
-    activeImageLoads = 0;
     pendingImageLoads = [];
   }
-  function enqueueImage(img, frame, entry) {
-    pendingImageLoads.push({ img: img, frame: frame, entry: entry, generation: imageLoadGeneration });
+  function enqueueImage(img, tile, entry) {
+    pendingImageLoads.push({ img: img, tile: tile, entry: entry, generation: imageLoadGeneration });
     pumpImageQueue();
   }
   function pumpImageQueue() {
@@ -134,11 +99,8 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif
       done = true;
       activeImageLoads = Math.max(0, activeImageLoads - 1);
       if (task.generation === imageLoadGeneration) {
-        task.frame.classList.remove('loading');
-        if (!ok) {
-          task.img.remove();
-          task.frame.classList.add('error');
-        }
+        if (ok) task.tile.classList.add('loaded');
+        else task.tile.remove();
       }
       pumpImageQueue();
     }
@@ -146,47 +108,19 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif
     task.img.addEventListener('error', function () { finish(false); }, { once: true });
     task.img.src = fileUrl(task.entry.path);
   }
-  function setStatus(message, kind) {
-    var node = $('status');
-    node.textContent = message || '';
-    node.className = kind === 'error' ? 'status err' : 'status';
-  }
-  function renderSources() {
-    var node = $('sources');
-    node.innerHTML = '';
-    if (!state.sources.length) {
-      var empty = document.createElement('div');
-      empty.className = 'status';
-      empty.textContent = 'No sources.';
-      node.appendChild(empty);
-      return;
-    }
-    state.sources.forEach(function (source) {
-      var btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = source.path === state.path ? 'source-btn active' : 'source-btn';
-      btn.textContent = source.name || source.path;
-      btn.title = source.path;
-      btn.addEventListener('click', function () { navigate(source.path); });
-      node.appendChild(btn);
-    });
-  }
   function renderCrumbs() {
     var node = $('crumbs');
     node.innerHTML = '';
-    var segs = state.path === '/' ? [] : state.path.split('/').filter(Boolean);
-    if (segs.length === 0) {
-      node.textContent = 'sources';
-      return;
-    }
     var root = document.createElement('a');
     root.href = '#';
     root.textContent = 'sources';
     root.addEventListener('click', function (event) { event.preventDefault(); navigate('/'); });
     node.appendChild(root);
+    if (state.path === '/') return;
+    var segs = state.path.split('/').filter(Boolean);
     var acc = '';
     segs.forEach(function (seg) {
-      node.appendChild(document.createTextNode(' / '));
+      node.appendChild(document.createTextNode('/'));
       acc += '/' + seg;
       var target = acc;
       var link = document.createElement('a');
@@ -198,100 +132,94 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif
       node.appendChild(link);
     });
   }
-  function renderEntries(entries) {
-    var grid = $('grid');
-    grid.innerHTML = '';
-    var directories = entries.filter(function (entry) { return entry.type === 'directory' && !entry.unavailable; });
-    var photos = entries.filter(isImage);
-    var visiblePhotos = photos.slice(0, state.visiblePhotoCount);
-    var visible = directories.concat(visiblePhotos);
-    if (!visible.length) {
-      var empty = document.createElement('div');
-      empty.className = 'empty';
-      empty.textContent = state.path === '/' ? 'No photo sources yet.' : 'No photos in this folder.';
-      grid.appendChild(empty);
-      setStatus('');
-      return;
-    }
-    setStatus(visiblePhotos.length + ' of ' + photos.length + ' photos, ' + directories.length + ' folders');
-    visible.forEach(function (entry) {
+  function renderFolders(entries) {
+    var node = $('folders');
+    node.innerHTML = '';
+    entries.filter(function (entry) { return entry.type === 'directory' && !entry.unavailable; }).forEach(function (entry) {
       var button = document.createElement('button');
       button.type = 'button';
-      button.className = 'tile';
-      var frame = document.createElement('div');
-      frame.className = entry.type === 'directory' ? 'album' : 'photo';
-      if (entry.type === 'file') {
-        frame.classList.add('loading');
-        var img = document.createElement('img');
-        img.loading = 'eager';
-        img.decoding = 'async';
-        img.alt = entry.name || entry.path;
-        frame.appendChild(img);
-        enqueueImage(img, frame, entry);
-      }
-      var caption = document.createElement('div');
-      caption.className = 'caption';
-      caption.textContent = entry.name || entry.path;
-      button.appendChild(frame);
-      button.appendChild(caption);
-      button.addEventListener('click', function () {
-        if (entry.type === 'directory') navigate(entry.path);
-        else openViewer(entry);
-      });
-      grid.appendChild(button);
+      button.className = 'folder';
+      button.textContent = (entry.name || entry.path) + '/';
+      button.addEventListener('click', function () { navigate(entry.path); });
+      node.appendChild(button);
     });
-    if (visiblePhotos.length < photos.length) {
-      var more = document.createElement('button');
-      more.type = 'button';
-      more.className = 'tile load-more';
-      more.textContent = 'Show more photos';
-      more.addEventListener('click', function () {
-        state.visiblePhotoCount += PHOTO_BATCH_SIZE;
-        resetImageQueue();
-        renderEntries(state.entries);
-      });
-      grid.appendChild(more);
+  }
+  function renderPhotos(entries) {
+    var grid = $('grid');
+    grid.innerHTML = '';
+    resetImageQueue();
+    var photos = entries.filter(isImage);
+    var visiblePhotos = photos.slice(0, state.visiblePhotoCount);
+    if (!visiblePhotos.length && !entries.some(function (entry) { return entry.type === 'directory' && !entry.unavailable; })) {
+      var empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = 'No photos.';
+      grid.appendChild(empty);
     }
+    visiblePhotos.forEach(function (entry) {
+      var tile = document.createElement('button');
+      tile.type = 'button';
+      tile.className = 'photo-tile';
+      var img = document.createElement('img');
+      img.decoding = 'async';
+      img.loading = 'eager';
+      img.alt = '';
+      tile.appendChild(img);
+      tile.addEventListener('click', function () { openLightbox(entry); });
+      grid.appendChild(tile);
+      enqueueImage(img, tile, entry);
+    });
+    observeSentinel(photos);
   }
-  function openViewer(entry) {
-    var viewer = $('viewer');
-    var stage = $('viewer-stage');
-    stage.innerHTML = '';
+  function observeSentinel(photos) {
+    var sentinel = $('sentinel');
+    sentinel.classList.toggle('hidden', state.visiblePhotoCount >= photos.length);
+    if (sentinelObserver) sentinelObserver.disconnect();
+    if (state.visiblePhotoCount >= photos.length || !('IntersectionObserver' in window)) return;
+    sentinelObserver = new IntersectionObserver(function (items) {
+      if (!items.some(function (item) { return item.isIntersecting; })) return;
+      state.visiblePhotoCount += PHOTO_BATCH_SIZE;
+      renderPhotos(state.entries);
+    }, { rootMargin: '600px' });
+    sentinelObserver.observe(sentinel);
+  }
+  function openLightbox(entry) {
+    var box = $('lightbox');
+    box.innerHTML = '';
     var img = document.createElement('img');
-    img.alt = entry.name || entry.path;
     img.src = fileUrl(entry.path);
-    stage.appendChild(img);
-    $('viewer-title').textContent = entry.name || entry.path;
-    $('viewer-download').setAttribute('href', fileUrl(entry.path));
-    $('viewer-download').setAttribute('download', entry.name || 'photo');
-    viewer.classList.remove('hidden');
+    img.alt = '';
+    box.appendChild(img);
+    box.classList.remove('hidden');
   }
-  function closeViewer() {
-    $('viewer').classList.add('hidden');
-    $('viewer-stage').innerHTML = '';
+  function closeLightbox() {
+    var box = $('lightbox');
+    box.classList.add('hidden');
+    box.innerHTML = '';
   }
-  function navigate(path) {
-    state.path = path;
+  function navigate(nextPath) {
+    state.path = nextPath;
     state.visiblePhotoCount = PHOTO_BATCH_SIZE;
     resetImageQueue();
-    renderSources();
     renderCrumbs();
+    renderFolders([]);
     $('grid').innerHTML = '';
-    setStatus('Loading...');
-    var req = path === '/' ? api('/api/fs/sources').then(function (body) { state.sources = body.sources || []; return state.sources; })
-                           : api('/api/fs/list?path=' + encodeURIComponent(path)).then(function (body) { return body.entries || []; });
+    var req = nextPath === '/'
+      ? api('/api/fs/sources').then(function (body) { state.sources = body.sources || []; return state.sources; })
+      : api('/api/fs/list?path=' + encodeURIComponent(nextPath)).then(function (body) { return body.entries || []; });
     req.then(function (entries) {
-      if (path === '/') renderSources();
       state.entries = entries || [];
-      renderEntries(state.entries);
-    }).catch(function (error) {
-      setStatus(error.message || 'Unable to load photos.', 'error');
+      renderFolders(state.entries);
+      renderPhotos(state.entries);
+    }).catch(function () {
+      state.entries = [];
+      renderFolders([]);
+      renderPhotos([]);
     });
   }
-  $('back').setAttribute('href', appBase() + '/dashboard');
-  $('viewer-close').addEventListener('click', closeViewer);
-  $('viewer').addEventListener('click', function (event) { if (event.target === $('viewer')) closeViewer(); });
-  document.addEventListener('keydown', function (event) { if (event.key === 'Escape') closeViewer(); });
+
+  $('lightbox').addEventListener('click', closeLightbox);
+  document.addEventListener('keydown', function (event) { if (event.key === 'Escape') closeLightbox(); });
   navigate('/');
 })();
 </script>
