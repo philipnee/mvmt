@@ -37,6 +37,7 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif
 .photo{aspect-ratio:1/1;background:#ececf0}
 .photo img{display:block;width:100%;height:100%;object-fit:cover}
 .caption{font-size:.82rem;line-height:1.2;margin:.45rem .1rem 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.load-more{height:154px;border:1px dashed var(--border);border-radius:10px;background:rgba(255,255,255,.75);color:var(--accent);font-weight:600;display:flex;align-items:center;justify-content:center}
 .empty{border:1px dashed var(--border);border-radius:10px;padding:2rem;color:var(--muted);background:rgba(255,255,255,.72);text-align:center}
 .viewer{position:fixed;inset:0;background:rgba(0,0,0,.86);display:flex;flex-direction:column;z-index:30}
 .viewer.hidden{display:none}
@@ -81,8 +82,9 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif
 </div>
 <script>
 (function () {
+  var PHOTO_BATCH_SIZE = 48;
   var IMAGE_EXTENSIONS = { '.avif': true, '.gif': true, '.heic': true, '.heif': true, '.jpg': true, '.jpeg': true, '.png': true, '.webp': true };
-  var state = { path: '/', sources: [] };
+  var state = { path: '/', sources: [], entries: [], visiblePhotoCount: PHOTO_BATCH_SIZE };
   function appBase() {
     var p = location.pathname.replace(/\\/+$/, '');
     var marker = '/apps/photos';
@@ -158,7 +160,8 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif
     grid.innerHTML = '';
     var directories = entries.filter(function (entry) { return entry.type === 'directory' && !entry.unavailable; });
     var photos = entries.filter(isImage);
-    var visible = directories.concat(photos);
+    var visiblePhotos = photos.slice(0, state.visiblePhotoCount);
+    var visible = directories.concat(visiblePhotos);
     if (!visible.length) {
       var empty = document.createElement('div');
       empty.className = 'empty';
@@ -167,7 +170,7 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif
       setStatus('');
       return;
     }
-    setStatus(photos.length + ' photos, ' + directories.length + ' folders');
+    setStatus(visiblePhotos.length + ' of ' + photos.length + ' photos, ' + directories.length + ' folders');
     visible.forEach(function (entry) {
       var button = document.createElement('button');
       button.type = 'button';
@@ -193,6 +196,17 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif
       });
       grid.appendChild(button);
     });
+    if (visiblePhotos.length < photos.length) {
+      var more = document.createElement('button');
+      more.type = 'button';
+      more.className = 'tile load-more';
+      more.textContent = 'Show more photos';
+      more.addEventListener('click', function () {
+        state.visiblePhotoCount += PHOTO_BATCH_SIZE;
+        renderEntries(state.entries);
+      });
+      grid.appendChild(more);
+    }
   }
   function openViewer(entry) {
     var viewer = $('viewer');
@@ -213,6 +227,7 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif
   }
   function navigate(path) {
     state.path = path;
+    state.visiblePhotoCount = PHOTO_BATCH_SIZE;
     renderSources();
     renderCrumbs();
     $('grid').innerHTML = '';
@@ -221,7 +236,8 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif
                            : api('/api/fs/list?path=' + encodeURIComponent(path)).then(function (body) { return body.entries || []; });
     req.then(function (entries) {
       if (path === '/') renderSources();
-      renderEntries(entries || []);
+      state.entries = entries || [];
+      renderEntries(state.entries);
     }).catch(function (error) {
       setStatus(error.message || 'Unable to load photos.', 'error');
     });

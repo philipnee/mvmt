@@ -1079,6 +1079,9 @@ describe('dashboard access', () => {
       expect(html).toContain('/api/fs/sources');
       expect(html).toContain('/api/fs/list');
       expect(html).toContain('/api/fs/stat');
+      expect(html).toContain('ENTRY_BATCH_SIZE = 200');
+      expect(html).toContain('Show more entries');
+      expect(html).toContain('Refresh stat');
 
       const photos = await fetch(`http://127.0.0.1:${server.port}/apps/photos`, { headers: { Cookie: cookie } });
       expect(photos.status).toBe(200);
@@ -1088,6 +1091,8 @@ describe('dashboard access', () => {
       expect(photosHtml).toContain('/api/fs/sources');
       expect(photosHtml).toContain('/api/fs/list');
       expect(photosHtml).toContain('/api/fs/file?path=');
+      expect(photosHtml).toContain('PHOTO_BATCH_SIZE = 48');
+      expect(photosHtml).toContain('Show more photos');
       expect(photosHtml).not.toContain('/api/fs/write');
 
       const missing = await fetch(`http://127.0.0.1:${server.port}/apps/unknown-app`, { headers: { Cookie: cookie } });
