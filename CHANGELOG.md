@@ -6,6 +6,11 @@ This project follows the spirit of Keep a Changelog and uses semantic versioning
 
 ## Unreleased
 
+### Added
+
+- Added first-party app audit-log kinds: `dashboard.apps` for app listing
+  and `apps.serve` for app launch.
+
 ### Removed
 
 - Removed the pattern-redactor plugin and plugin configuration surface. Use

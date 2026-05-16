@@ -1044,6 +1044,108 @@ describe('dashboard access', () => {
     }
   });
 
+  it('lists installed apps and serves them under /apps/:id behind dashboard auth', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-apps-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    createPrivilegedUser(usersPath, { username: 'curious', password: 'correct horse battery staple' });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: [],
+      privilegedUsersPath: usersPath,
+    });
+    try {
+      const blockedList = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/apps`);
+      expect(blockedList.status).toBe(401);
+      const blockedApp = await fetch(`http://127.0.0.1:${server.port}/apps/file-inspector`);
+      expect(blockedApp.status).toBe(401);
+
+      const cookie = await loginDashboard(server.port, 'curious', 'correct horse battery staple');
+
+      const list = await fetch(`http://127.0.0.1:${server.port}/dashboard/api/apps`, { headers: { Cookie: cookie } });
+      expect(list.status).toBe(200);
+      const listBody = await list.json() as { apps: Array<{ id: string; label: string; description: string }> };
+      expect(listBody.apps).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'file-inspector', label: 'File Inspector' }),
+      ]));
+
+      const served = await fetch(`http://127.0.0.1:${server.port}/apps/file-inspector`, { headers: { Cookie: cookie } });
+      expect(served.status).toBe(200);
+      expect(served.headers.get('content-type')).toMatch(/text\/html/);
+      const html = await served.text();
+      expect(html).toContain('File Inspector');
+      expect(html).toContain('/api/fs/sources');
+      expect(html).toContain('/api/fs/list');
+      expect(html).toContain('/api/fs/stat');
+
+      const missing = await fetch(`http://127.0.0.1:${server.port}/apps/unknown-app`, { headers: { Cookie: cookie } });
+      expect(missing.status).toBe(404);
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('renders the dashboard Apps tab nav, panel, and loader script', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-apps-tab-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    createPrivilegedUser(usersPath, { username: 'admin', password: 'correct horse battery staple' });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: [],
+      privilegedUsersPath: usersPath,
+    });
+    try {
+      const response = await fetch(`http://127.0.0.1:${server.port}/dashboard`);
+      expect(response.status).toBe(200);
+      const body = await response.text();
+      expect(body).toContain('data-view="apps"');
+      expect(body).toContain('id="view-apps-panel"');
+      expect(body).toContain('id="apps-grid"');
+      expect(body).toContain("api('/dashboard/api/apps')");
+      expect(body).toContain('Apps failed to load. Click Apps again to retry.');
+      expect(body).toContain('state.appsLoaded = false;');
+      expect(body).toContain("appBasePath() + '/apps/'");
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the file-inspector SPA relay-prefix-safe', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-file-inspector-prefix-test-'));
+    const tokenPath = path.join(tmp, '.session-token');
+    const usersPath = path.join(tmp, '.privileged-users.json');
+    createPrivilegedUser(usersPath, { username: 'curious', password: 'correct horse battery staple' });
+    const server = await startHttpServer(new ToolRouter(), {
+      port: 0,
+      tokenPath,
+      leaseMounts: [],
+      privilegedUsersPath: usersPath,
+    });
+    try {
+      const cookie = await loginDashboard(server.port, 'curious', 'correct horse battery staple');
+      const served = await fetch(`http://127.0.0.1:${server.port}/apps/file-inspector`, { headers: { Cookie: cookie } });
+      expect(served.status).toBe(200);
+      const html = await served.text();
+
+      // Local path: no workspace prefix to add.
+      expect(fileInspectorAppBaseFromHtml(html, '/apps/file-inspector')).toBe('');
+      expect(fileInspectorAppBaseFromHtml(html, '/apps/file-inspector/')).toBe('');
+      // Relay path: SPA must preserve the workspace prefix when assembling
+      // /api/fs/* and back-to-dashboard URLs, or remote calls land at the
+      // relay root instead of the agent.
+      expect(fileInspectorAppBaseFromHtml(html, '/t/demo/apps/file-inspector')).toBe('/t/demo');
+      expect(fileInspectorAppBaseFromHtml(html, '/t/demo/apps/file-inspector/')).toBe('/t/demo');
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('logs in privileged users, creates read/upload/two-way leases, and suffixes collision uploads', async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mvmt-dashboard-test-'));
     const tokenPath = path.join(tmp, '.session-token');
@@ -4797,6 +4899,24 @@ function inlineScriptBodies(html: string): string[] {
   }
 
   return bodies;
+}
+
+function fileInspectorAppBaseFromHtml(html: string, pathname: string): string {
+  const script = inlineScriptBodies(html).find((body) => body.includes('function appBase'));
+  expect(script).toBeTruthy();
+  const fn = jsFunctionDeclaration(script ?? '', 'appBase');
+  const sandbox = {
+    location: { pathname, search: '', hash: '' },
+    result: '',
+  };
+  Function(
+    'sandbox',
+    `with (sandbox) {
+      ${fn}
+      sandbox.result = appBase();
+    }`,
+  )(sandbox);
+  return sandbox.result;
 }
 
 function dashboardRequestUrlFromHtml(html: string, pathname: string, url: string): string {

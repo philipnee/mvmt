@@ -101,28 +101,32 @@ Mount and client policy answer what that caller may access.
 
 ## Source Layout
 
-This is a layout step, not an app-registry step. Routes still live in
-`src/server/index.ts`; what has moved is the canonical location of pieces
-that already had a clear shape:
-
 ```text
-src/apps/mcp             MCP protocol router and tool modules (full move)
-src/apps/dashboard       dashboard helper modules used by routes in server/
-src/apps/file-inspector  experimental filesystem stub module (no HTTP route)
+src/apps/mcp             MCP protocol router and tool modules
+src/apps/dashboard       dashboard helper modules
+src/apps/file-inspector  first-party reference app (HTML SPA + manifest)
+src/apps/registry.ts     first-party app registry consumed by the server
 src/core/leases          lease model, store, secrets, and file access
 src/core/auth            ClientIdentity and auth resolution
 ```
 
-Intent: `apps/*` is for code that belongs to one application surface;
-`core/*` is the shared substrate that any app may consume. Mount
-resolution, path policy, storage, leases, auth, and audit should stay in
-core so apps don't drift on access rules.
+`apps/*` is for code that belongs to one application surface; `core/*`
+is the shared substrate any app may consume. Mount resolution, path
+policy, storage, leases, auth, and audit should stay in core so apps
+don't drift on access rules.
 
-What this layout does *not* yet do: there's no `Application` interface, no
-app registry, and HTTP route composition is unchanged. `apps/dashboard` is
-a helpers directory, not the dashboard app itself — the routes and HTML
-are still inside `src/server/index.ts`. `apps/file-inspector` is a
-standalone module exercised by tests but not wired through HTTP.
+HTTP route composition still lives in `src/server/index.ts`. There is no
+generic `Application` interface yet — `apps/registry.ts` is a static
+first-party list, not a plugin loader. Third-party app install, dynamic
+discovery, CORS, bearer-token FS access, and per-app permissions are
+intentionally deferred until a real need surfaces.
+
+What ships today is a first-party app registry plus a single launch route:
+`GET /apps/<id>` returns the app's inline HTML behind the same dashboard
+cookie auth. There is no `GET /apps/<id>/*` static asset surface yet —
+apps that outgrow inline HTML will trigger that addition. Apps call back
+into `/api/fs/*` for filesystem access; they never reach into the storage
+provider directly.
 
 Old paths under `src/dashboard/`, `src/lease/`,
 `src/server/context-tools/`, and `src/server/client-identity.ts` remain as

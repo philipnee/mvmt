@@ -38,6 +38,7 @@ import { addMountToConfig, editMountInConfig, MountInput, removeMountFromConfig 
 import { addApiTokenToConfig, removeApiTokenFromConfig, setApiTokenPublishedInConfig } from '../cli/api-tokens.js';
 import { resolveSetupPath } from '../connectors/setup-paths.js';
 import { normalizeDashboardPath, resolveDashboardFileTarget } from '../apps/dashboard/files.js';
+import { getApp, INSTALLED_APPS } from '../apps/registry.js';
 import {
   defaultPrivilegedUsersPath,
   findPrivilegedUser,
@@ -1102,6 +1103,33 @@ export async function startHttpServer(router: ToolRouter, options: HttpServerOpt
       recordFsAudit(options.audit, 'remove', requestPath, startedAt, true, identity, dashboardSession, detail);
       res.status(status).json({ error: status === 403 ? 'fs_permission_denied' : 'fs_remove_failed' });
     }
+  });
+
+  // First-party app registry. INSTALLED_APPS is a static list; third-party
+  // app install / dynamic discovery is intentionally out of scope. Apps
+  // inherit dashboard cookie auth — they are tabs in the dashboard, not a
+  // separate trust tier.
+  app.get('/dashboard/api/apps', dashboardOriginMiddleware, dashboardAuthMiddleware, (req, res) => {
+    logHttpRequest(requestLog, req, 200, 'dashboard.apps');
+    res.json({
+      apps: INSTALLED_APPS.map((app) => ({
+        id: app.id,
+        label: app.label,
+        description: app.description,
+      })),
+    });
+  });
+
+  app.get('/apps/:appId', dashboardOriginMiddleware, dashboardAuthMiddleware, (req, res) => {
+    const appId = firstStringQuery(req.params.appId) ?? '';
+    const manifest = getApp(appId);
+    if (!manifest) {
+      logHttpRequest(requestLog, req, 404, 'apps.serve', `unknown_app=${appId}`);
+      res.status(404).type('text/plain').send('App not found');
+      return;
+    }
+    logHttpRequest(requestLog, req, 200, 'apps.serve', manifest.id);
+    res.type('html').send(manifest.html);
   });
 
   const dashboardLeasePayload = (req: Request, lease: LeaseRecord): LeaseRecord & { url?: string } => {
@@ -2916,6 +2944,11 @@ label{font-size:.82rem;color:var(--text-2);font-weight:500}
 .settings-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem}
 .settings-card{border:1px solid var(--border);border-radius:10px;padding:1rem;background:#fff}
 .settings-card h3{margin-bottom:.65rem}
+.apps-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:.8rem}
+.app-card{display:block;text-decoration:none;color:inherit;border:1px solid var(--border);border-radius:10px;padding:1rem;background:#fff;transition:transform .1s ease, box-shadow .1s ease}
+.app-card:hover{transform:translateY(-1px);box-shadow:var(--shadow-sm)}
+.app-card-title{font-weight:600;margin-bottom:.25rem}
+.app-card-desc{color:var(--muted);font-size:.85rem;line-height:1.35}
 .kv{display:grid;grid-template-columns:7rem minmax(0,1fr);gap:.55rem;font-size:.86rem;margin:.45rem 0}
 .kv span:first-child{color:var(--text-2);font-weight:500}
 .kv code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;word-break:break-all}
@@ -3103,6 +3136,7 @@ table.t{border-collapse:collapse;width:100%}
         <button type="button" class="nav-btn active" data-view="files"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>Files</span><span class="nav-count" id="sources-count"></span></button>
         <button type="button" class="nav-btn" data-view="shares"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg><span>Shared links</span><span class="nav-count" id="leases-count"></span></button>
         <button type="button" class="nav-btn" data-view="mcp"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M4 17l6-6-6-6"/><path d="M12 19h8"/></svg><span>MCP access</span><span class="nav-count" id="grants-count"></span></button>
+        <button type="button" class="nav-btn" data-view="apps"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg><span>Apps</span><span class="nav-count" id="apps-count"></span></button>
         <button type="button" class="nav-btn hidden" id="settings-nav" data-view="settings"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4z"/></svg><span>Settings</span></button>
       </aside>
       <section class="finder-main">
@@ -3111,6 +3145,7 @@ table.t{border-collapse:collapse;width:100%}
             <div class="crumbs" id="crumbs" data-test="crumbs"></div>
             <div class="view-title hidden" id="shares-title"><h2>Shared links</h2></div>
             <div class="view-title hidden" id="mcp-title"><h2>MCP access</h2></div>
+            <div class="view-title hidden" id="apps-title"><h2>Apps</h2></div>
             <div class="view-title hidden" id="settings-title"><h2>Local settings</h2></div>
           </div>
           <div class="toolbar-right">
@@ -3160,6 +3195,11 @@ table.t{border-collapse:collapse;width:100%}
           <div class="tablewrap hidden" id="grants-wrap">
             <table class="t"><thead><tr><th>Label</th><th>Access</th><th>Reach</th><th>Expires</th><th>Last used</th><th></th></tr></thead><tbody id="grants"></tbody></table>
           </div>
+        </section>
+
+        <section class="view-panel hidden" id="view-apps-panel">
+          <div class="apps-grid" id="apps-grid"></div>
+          <div class="muted hidden" id="apps-empty">No apps installed yet.</div>
         </section>
 
         <section class="view-panel hidden" id="view-settings-panel">
@@ -3457,6 +3497,8 @@ table.t{border-collapse:collapse;width:100%}
     canManageMounts: false,
     grants: [],
     canManageGrants: false,
+    apps: [],
+    appsLoaded: false,
     localOwner: false,
     status: null,
     activeTab: 'active',
@@ -3660,6 +3702,7 @@ table.t{border-collapse:collapse;width:100%}
       files: $('view-files-panel'),
       shares: $('view-shares-panel'),
       mcp: $('view-mcp-panel'),
+      apps: $('view-apps-panel'),
       settings: $('view-settings-panel'),
     };
     for (var key in panels) {
@@ -3668,16 +3711,19 @@ table.t{border-collapse:collapse;width:100%}
     var nav = document.querySelectorAll('.nav-btn[data-view]');
     for (var i = 0; i < nav.length; i += 1) nav[i].classList.toggle('active', nav[i].getAttribute('data-view') === view);
     renderToolbar();
+    if (view === 'apps' && !state.appsLoaded) loadApps();
   }
 
   function renderToolbar() {
     var files = state.view === 'files';
     var shares = state.view === 'shares';
     var mcp = state.view === 'mcp';
+    var apps = state.view === 'apps';
     var settings = state.view === 'settings';
     $('crumbs').classList.toggle('hidden', !files);
     $('shares-title').classList.toggle('hidden', !shares);
     $('mcp-title').classList.toggle('hidden', !mcp);
+    $('apps-title').classList.toggle('hidden', !apps);
     $('settings-title').classList.toggle('hidden', !settings);
     $('add-mount').classList.toggle('hidden', !(files && state.canManageMounts));
     $('new-grant').classList.toggle('hidden', !(mcp && state.canManageGrants));
@@ -4146,6 +4192,48 @@ table.t{border-collapse:collapse;width:100%}
     state.grants = payload.grants || [];
     state.canManageGrants = !!payload.canManage;
     renderGrants();
+  }
+
+  async function loadApps() {
+    try {
+      var payload = await api('/dashboard/api/apps');
+      state.apps = payload.apps || [];
+      state.appsLoaded = true;
+      renderApps();
+    } catch (err) {
+      state.apps = [];
+      state.appsLoaded = false;
+      renderApps();
+      showError(err);
+    }
+  }
+
+  function renderApps() {
+    var grid = $('apps-grid');
+    var empty = $('apps-empty');
+    $('apps-count').textContent = state.apps.length ? '(' + state.apps.length + ')' : '';
+    grid.innerHTML = '';
+    if (state.apps.length === 0) {
+      empty.textContent = state.appsLoaded ? 'No apps installed yet.' : 'Apps failed to load. Click Apps again to retry.';
+      empty.classList.remove('hidden');
+      return;
+    }
+    empty.classList.add('hidden');
+    for (var i = 0; i < state.apps.length; i += 1) {
+      var manifest = state.apps[i];
+      var card = document.createElement('a');
+      card.className = 'app-card';
+      card.href = appBasePath() + '/apps/' + manifest.id;
+      var title = document.createElement('div');
+      title.className = 'app-card-title';
+      title.textContent = manifest.label;
+      var desc = document.createElement('div');
+      desc.className = 'app-card-desc';
+      desc.textContent = manifest.description || '';
+      card.appendChild(title);
+      card.appendChild(desc);
+      grid.appendChild(card);
+    }
   }
 
   function renderGrants() {
