@@ -49,13 +49,18 @@ button{cursor:pointer}
 <div class="lightbox hidden" id="lightbox" role="dialog" aria-modal="true"></div>
 <script>
 (function () {
-  var PHOTO_BATCH_SIZE = 60;
+  var PHOTO_BATCH_SIZE = 24;
   var MAX_IMAGE_LOADS = 4;
+  var IMAGE_START_DELAY_MS = 250;
+  var IMAGE_LOAD_MARGIN = '80px 0px';
   var IMAGE_EXTENSIONS = { '.avif': true, '.gif': true, '.jpg': true, '.jpeg': true, '.png': true, '.webp': true };
-  var state = { path: '/', sources: [], entries: [], visiblePhotoCount: PHOTO_BATCH_SIZE };
+  var state = { path: '/', sources: [], entries: [], visiblePhotoCount: PHOTO_BATCH_SIZE, renderedPhotoCount: 0 };
   var activeImageLoads = 0;
   var pendingImageLoads = [];
   var imageLoadGeneration = 0;
+  var imageObserver = null;
+  var imagePumpTimer = null;
+  var lastImageStartAt = 0;
   var sentinelObserver = null;
 
   function appBase() {
@@ -79,18 +84,51 @@ button{cursor:pointer}
   function resetImageQueue() {
     imageLoadGeneration += 1;
     pendingImageLoads = [];
+    if (imagePumpTimer) {
+      clearTimeout(imagePumpTimer);
+      imagePumpTimer = null;
+    }
+    if (imageObserver) {
+      imageObserver.disconnect();
+      imageObserver = null;
+    }
   }
   function enqueueImage(img, tile, entry) {
-    pendingImageLoads.push({ img: img, tile: tile, entry: entry, generation: imageLoadGeneration });
+    var task = { img: img, tile: tile, entry: entry, generation: imageLoadGeneration };
+    if (!imageObserver) {
+      enqueueImageTask(task);
+      return;
+    }
+    tile.__mvmtPhotoTask = task;
+    imageObserver.observe(tile);
+  }
+  function enqueueImageTask(task) {
+    pendingImageLoads.push(task);
     pumpImageQueue();
   }
-  function pumpImageQueue() {
-    while (activeImageLoads < MAX_IMAGE_LOADS && pendingImageLoads.length) {
+  function nextImageTask() {
+    while (pendingImageLoads.length) {
       var task = pendingImageLoads.shift();
-      if (!task || task.generation !== imageLoadGeneration) continue;
-      activeImageLoads += 1;
-      startImageLoad(task);
+      if (task && task.generation === imageLoadGeneration) return task;
     }
+    return null;
+  }
+  function pumpImageQueue() {
+    if (imagePumpTimer || activeImageLoads >= MAX_IMAGE_LOADS || !pendingImageLoads.length) return;
+    var wait = Math.max(0, IMAGE_START_DELAY_MS - (Date.now() - lastImageStartAt));
+    imagePumpTimer = setTimeout(function () {
+      imagePumpTimer = null;
+      if (activeImageLoads >= MAX_IMAGE_LOADS) {
+        pumpImageQueue();
+        return;
+      }
+      var task = nextImageTask();
+      if (!task) return;
+      activeImageLoads += 1;
+      lastImageStartAt = Date.now();
+      startImageLoad(task);
+      pumpImageQueue();
+    }, wait);
   }
   function startImageLoad(task) {
     var done = false;
@@ -107,6 +145,19 @@ button{cursor:pointer}
     task.img.addEventListener('load', function () { finish(true); }, { once: true });
     task.img.addEventListener('error', function () { finish(false); }, { once: true });
     task.img.src = fileUrl(task.entry.path);
+  }
+  function buildImageObserver() {
+    if (!('IntersectionObserver' in window)) return;
+    imageObserver = new IntersectionObserver(function (items) {
+      items.forEach(function (item) {
+        if (!item.isIntersecting) return;
+        var tile = item.target;
+        if (imageObserver) imageObserver.unobserve(tile);
+        var task = tile.__mvmtPhotoTask;
+        tile.__mvmtPhotoTask = null;
+        if (task && task.generation === imageLoadGeneration) enqueueImageTask(task);
+      });
+    }, { rootMargin: IMAGE_LOAD_MARGIN });
   }
   function renderCrumbs() {
     var node = $('crumbs');
@@ -148,15 +199,22 @@ button{cursor:pointer}
     var grid = $('grid');
     grid.innerHTML = '';
     resetImageQueue();
+    buildImageObserver();
     var photos = entries.filter(isImage);
-    var visiblePhotos = photos.slice(0, state.visiblePhotoCount);
-    if (!visiblePhotos.length && !entries.some(function (entry) { return entry.type === 'directory' && !entry.unavailable; })) {
+    state.renderedPhotoCount = 0;
+    state.visiblePhotoCount = Math.min(PHOTO_BATCH_SIZE, photos.length);
+    if (!photos.length && !entries.some(function (entry) { return entry.type === 'directory' && !entry.unavailable; })) {
       var empty = document.createElement('div');
       empty.className = 'empty';
       empty.textContent = 'No photos.';
       grid.appendChild(empty);
     }
-    visiblePhotos.forEach(function (entry) {
+    appendPhotoTiles(photos, 0, state.visiblePhotoCount);
+    observeSentinel(photos);
+  }
+  function appendPhotoTiles(photos, start, end) {
+    var grid = $('grid');
+    photos.slice(start, end).forEach(function (entry) {
       var tile = document.createElement('button');
       tile.type = 'button';
       tile.className = 'photo-tile';
@@ -169,17 +227,23 @@ button{cursor:pointer}
       grid.appendChild(tile);
       enqueueImage(img, tile, entry);
     });
+    state.renderedPhotoCount = end;
+  }
+  function appendMorePhotos() {
+    var photos = state.entries.filter(isImage);
+    var nextCount = Math.min(photos.length, state.renderedPhotoCount + PHOTO_BATCH_SIZE);
+    appendPhotoTiles(photos, state.renderedPhotoCount, nextCount);
+    state.visiblePhotoCount = nextCount;
     observeSentinel(photos);
   }
   function observeSentinel(photos) {
     var sentinel = $('sentinel');
-    sentinel.classList.toggle('hidden', state.visiblePhotoCount >= photos.length);
+    sentinel.classList.toggle('hidden', state.renderedPhotoCount >= photos.length);
     if (sentinelObserver) sentinelObserver.disconnect();
-    if (state.visiblePhotoCount >= photos.length || !('IntersectionObserver' in window)) return;
+    if (state.renderedPhotoCount >= photos.length || !('IntersectionObserver' in window)) return;
     sentinelObserver = new IntersectionObserver(function (items) {
       if (!items.some(function (item) { return item.isIntersecting; })) return;
-      state.visiblePhotoCount += PHOTO_BATCH_SIZE;
-      renderPhotos(state.entries);
+      appendMorePhotos();
     }, { rootMargin: '600px' });
     sentinelObserver.observe(sentinel);
   }
@@ -201,6 +265,10 @@ button{cursor:pointer}
     state.path = nextPath;
     state.visiblePhotoCount = PHOTO_BATCH_SIZE;
     resetImageQueue();
+    if (sentinelObserver) {
+      sentinelObserver.disconnect();
+      sentinelObserver = null;
+    }
     renderCrumbs();
     renderFolders([]);
     $('grid').innerHTML = '';

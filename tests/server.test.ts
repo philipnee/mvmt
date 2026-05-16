@@ -1132,9 +1132,12 @@ describe('dashboard access', () => {
       expect(photosHtml).toContain('/api/fs/file?path=');
       expect(photosHtml).toContain('photo-grid');
       expect(photosHtml).toContain('lightbox');
-      expect(photosHtml).toContain('PHOTO_BATCH_SIZE = 60');
+      expect(photosHtml).toContain('PHOTO_BATCH_SIZE = 24');
       expect(photosHtml).toContain('MAX_IMAGE_LOADS = 4');
+      expect(photosHtml).toContain('IMAGE_START_DELAY_MS = 250');
+      expect(photosHtml).toContain('IMAGE_LOAD_MARGIN');
       expect(photosHtml).toContain('pendingImageLoads');
+      expect(photosHtml).toContain('imageObserver');
       expect(photosHtml).toContain('IntersectionObserver');
       expect(photosHtml).not.toContain('Dashboard');
       expect(photosHtml).not.toContain('Show more photos');
