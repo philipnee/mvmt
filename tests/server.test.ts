@@ -1131,7 +1131,12 @@ describe('dashboard access', () => {
       expect(photosHtml).toContain('/api/fs/list');
       expect(photosHtml).toContain('/api/fs/file?path=');
       expect(photosHtml).toContain('PHOTO_BATCH_SIZE = 48');
+      expect(photosHtml).toContain('MAX_IMAGE_LOADS = 4');
+      expect(photosHtml).toContain('pendingImageLoads');
       expect(photosHtml).toContain('Show more photos');
+      expect(photosHtml).toContain('Preview unavailable');
+      expect(photosHtml).not.toContain("'.heic': true");
+      expect(photosHtml).not.toContain("'.heif': true");
       expect(photosHtml).not.toContain('/api/fs/write');
 
       const missing = await fetch(`http://127.0.0.1:${server.port}/apps/unknown-app`, { headers: { Cookie: cookie } });

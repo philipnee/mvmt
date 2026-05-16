@@ -36,6 +36,9 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif
 .album::before{content:'';display:block;width:62px;height:46px;border:2px solid #9aa8ba;border-radius:5px;background:linear-gradient(#fff,#edf2f8);box-shadow:0 -7px 0 -2px #c8d4e4}
 .photo{aspect-ratio:1/1;background:#ececf0}
 .photo img{display:block;width:100%;height:100%;object-fit:cover}
+.photo.loading::after,.photo.error::after{display:flex;align-items:center;justify-content:center;height:100%;padding:.75rem;text-align:center;color:var(--muted);font-size:.8rem}
+.photo.loading::after{content:'Loading...'}
+.photo.error::after{content:'Preview unavailable'}
 .caption{font-size:.82rem;line-height:1.2;margin:.45rem .1rem 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .load-more{height:154px;border:1px dashed var(--border);border-radius:10px;background:rgba(255,255,255,.75);color:var(--accent);font-weight:600;display:flex;align-items:center;justify-content:center}
 .empty{border:1px dashed var(--border);border-radius:10px;padding:2rem;color:var(--muted);background:rgba(255,255,255,.72);text-align:center}
@@ -83,8 +86,12 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif
 <script>
 (function () {
   var PHOTO_BATCH_SIZE = 48;
-  var IMAGE_EXTENSIONS = { '.avif': true, '.gif': true, '.heic': true, '.heif': true, '.jpg': true, '.jpeg': true, '.png': true, '.webp': true };
+  var MAX_IMAGE_LOADS = 4;
+  var IMAGE_EXTENSIONS = { '.avif': true, '.gif': true, '.jpg': true, '.jpeg': true, '.png': true, '.webp': true };
   var state = { path: '/', sources: [], entries: [], visiblePhotoCount: PHOTO_BATCH_SIZE };
+  var activeImageLoads = 0;
+  var pendingImageLoads = [];
+  var imageLoadGeneration = 0;
   function appBase() {
     var p = location.pathname.replace(/\\/+$/, '');
     var marker = '/apps/photos';
@@ -103,6 +110,42 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif
     return dot >= 0 ? name.slice(dot) : '';
   }
   function isImage(entry) { return entry.type === 'file' && !!IMAGE_EXTENSIONS[ext(entry.path || entry.name)]; }
+  function resetImageQueue() {
+    imageLoadGeneration += 1;
+    activeImageLoads = 0;
+    pendingImageLoads = [];
+  }
+  function enqueueImage(img, frame, entry) {
+    pendingImageLoads.push({ img: img, frame: frame, entry: entry, generation: imageLoadGeneration });
+    pumpImageQueue();
+  }
+  function pumpImageQueue() {
+    while (activeImageLoads < MAX_IMAGE_LOADS && pendingImageLoads.length) {
+      var task = pendingImageLoads.shift();
+      if (!task || task.generation !== imageLoadGeneration) continue;
+      activeImageLoads += 1;
+      startImageLoad(task);
+    }
+  }
+  function startImageLoad(task) {
+    var done = false;
+    function finish(ok) {
+      if (done) return;
+      done = true;
+      activeImageLoads = Math.max(0, activeImageLoads - 1);
+      if (task.generation === imageLoadGeneration) {
+        task.frame.classList.remove('loading');
+        if (!ok) {
+          task.img.remove();
+          task.frame.classList.add('error');
+        }
+      }
+      pumpImageQueue();
+    }
+    task.img.addEventListener('load', function () { finish(true); }, { once: true });
+    task.img.addEventListener('error', function () { finish(false); }, { once: true });
+    task.img.src = fileUrl(task.entry.path);
+  }
   function setStatus(message, kind) {
     var node = $('status');
     node.textContent = message || '';
@@ -178,12 +221,13 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif
       var frame = document.createElement('div');
       frame.className = entry.type === 'directory' ? 'album' : 'photo';
       if (entry.type === 'file') {
+        frame.classList.add('loading');
         var img = document.createElement('img');
-        img.loading = 'lazy';
+        img.loading = 'eager';
         img.decoding = 'async';
         img.alt = entry.name || entry.path;
-        img.src = fileUrl(entry.path);
         frame.appendChild(img);
+        enqueueImage(img, frame, entry);
       }
       var caption = document.createElement('div');
       caption.className = 'caption';
@@ -203,6 +247,7 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif
       more.textContent = 'Show more photos';
       more.addEventListener('click', function () {
         state.visiblePhotoCount += PHOTO_BATCH_SIZE;
+        resetImageQueue();
         renderEntries(state.entries);
       });
       grid.appendChild(more);
@@ -228,6 +273,7 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif
   function navigate(path) {
     state.path = path;
     state.visiblePhotoCount = PHOTO_BATCH_SIZE;
+    resetImageQueue();
     renderSources();
     renderCrumbs();
     $('grid').innerHTML = '';
