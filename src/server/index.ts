@@ -2143,6 +2143,7 @@ function setFsFileCacheHeaders(res: Response, etag: string, lastModified: string
   res.setHeader('Cache-Control', 'private, max-age=300, must-revalidate');
   res.setHeader('ETag', etag);
   res.setHeader('Last-Modified', lastModified);
+  res.setHeader('Vary', 'Range');
 }
 
 function fsFileNotModified(req: Request, file: Pick<FsStatPayload, 'mtimeMs'>, etag: string): boolean {

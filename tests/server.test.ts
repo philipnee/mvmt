@@ -910,6 +910,7 @@ describe('dashboard access', () => {
       const etag = cold.headers.get('etag');
       expect(etag).toMatch(/^W\/"[0-9a-f]{24}"$/);
       expect(cold.headers.get('cache-control')).toBe('private, max-age=300, must-revalidate');
+      expect(cold.headers.get('vary')).toBe('Range');
       expect(cold.headers.get('last-modified')).toBeTruthy();
       expect([...Buffer.from(await cold.arrayBuffer())]).toEqual([...imageBytes]);
 
@@ -918,6 +919,7 @@ describe('dashboard access', () => {
       });
       expect(cached.status).toBe(304);
       expect(cached.headers.get('etag')).toBe(etag);
+      expect(cached.headers.get('vary')).toBe('Range');
       expect(await cached.text()).toBe('');
 
       const cachedByDate = await fetch(`http://127.0.0.1:${server.port}/api/fs/file?path=${encodeURIComponent('/photos/photo.jpg')}`, {
@@ -941,6 +943,7 @@ describe('dashboard access', () => {
       });
       expect(range.status).toBe(206);
       expect(range.headers.get('cache-control')).toBe('private, max-age=300, must-revalidate');
+      expect(range.headers.get('vary')).toBe('Range');
       expect(range.headers.get('etag')).toBe(refreshed.headers.get('etag'));
       expect(range.headers.get('content-range')).toBe('bytes 2-4/8');
       expect(range.headers.get('content-type')).toBe('image/jpeg');
